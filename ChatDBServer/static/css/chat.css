@@ -208,6 +208,7 @@ body {
     box-shadow: none;
 }
 
+.sidebar-tabs {
     display: flex;
     gap: 4px;
     padding: 8px 12px;
@@ -616,6 +617,18 @@ body {
     min-width: 0; /* 防止代码块撑开容器 */
 }
 
+.model-badge {
+    font-size: 11px;
+    color: #94a3b8;
+    margin-bottom: 6px;
+    opacity: 0.8;
+    user-select: none;
+    font-weight: 500;
+    letter-spacing: 0.02em;
+    display: inline-block;
+    padding: 0 4px;
+}
+
 /* 思考过程和工具调用容器 */
 .thinking-container {
     margin-bottom: 16px;
@@ -947,6 +960,7 @@ body {
     gap: 24px;
     margin-bottom: 16px;
     flex-wrap: wrap;
+}
 
 .option-item {
     display: flex;
@@ -1513,3 +1527,708 @@ body {
         transform: translateY(0);
     }
 }
+
+/* 用户菜单与管理后台样式 */
+/* 用户资料按钮 */
+.user-profile-button {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 12px;
+    border-radius: 10px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    background: transparent;
+    border: none;
+    color: #e2e8f0;
+}
+
+.user-profile-button:hover {
+    background: rgba(255, 255, 255, 0.08);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+}
+
+.avatar-circle {
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color: white;
+    font-size: 14px;
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    box-shadow: 0 2px 8px rgba(102, 126, 234, 0.4);
+}
+
+.user-info {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    flex: 1;
+    min-width: 0;
+}
+
+.user-name {
+    font-size: 13px;
+    font-weight: 600;
+    color: #e2e8f0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.user-profile-button i {
+    font-size: 12px;
+    color: #94a3b8;
+    margin-left: auto;
+    transition: transform 0.2s ease;
+}
+
+.user-profile-button:hover i {
+    color: #cbd5e1;
+    transform: rotate(90deg);
+}
+
+/* 用户菜单 - 极简白 */
+.user-menu {
+    position: absolute;
+    bottom: calc(100% + 12px);
+    left: 8px;
+    right: 8px;
+    background: #fff;
+    border: 1px solid #eef0f5;
+    border-radius: 12px;
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.1);
+    display: none;
+    flex-direction: column;
+    z-index: 1000;
+    opacity: 0;
+    transform: translateY(10px);
+    pointer-events: none;
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+    padding: 6px;
+}
+
+.user-menu.active {
+    display: flex;
+    opacity: 1;
+    transform: translateY(0);
+    pointer-events: auto;
+}
+
+.menu-item {
+    padding: 10px 12px;
+    color: #475569;
+    text-decoration: none;
+    font-size: 13px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    border-radius: 8px;
+    transition: all 0.2s;
+    font-weight: 500;
+}
+
+.menu-item:hover {
+    background: #f1f5f9;
+    color: #0f172a;
+}
+
+.menu-item i {
+    width: 16px;
+    text-align: center;
+    font-size: 14px;
+}
+
+.menu-item.logout {
+    color: #ef4444;
+}
+
+.menu-item.logout:hover {
+    background: #fef2f2;
+}
+
+.menu-divider {
+    height: 1px;
+    background: #f1f5f9;
+    margin: 6px 0;
+}
+    transition: all 0.2s ease;
+    position: relative;
+    overflow: hidden;
+}
+
+.menu-item::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 0;
+    height: 100%;
+    width: 0;
+    background: rgba(37, 99, 235, 0.2);
+    transition: width 0.2s ease;
+    z-index: -1;
+}
+
+.menu-item i {
+    width: 16px;
+    text-align: center;
+    font-size: 13px;
+}
+
+.menu-item:hover {
+    background: rgba(37, 99, 235, 0.3);
+    color: #2563eb;
+}
+
+.menu-item:hover::before {
+    width: 100%;
+}
+
+.menu-item.logout {
+    color: #fca5a5;
+}
+
+.menu-item.logout:hover {
+    background: rgba(220, 38, 38, 0.2);
+    color: #ef4444;
+}
+
+/* 通用 Modal 样式 */
+.modal-backdrop {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0, 0, 0, 0.4);
+    backdrop-filter: blur(4px);
+    display: none; /* 由 JS 控制显示/隐藏 */
+    justify-content: center;
+    align-items: center;
+    z-index: 2000;
+}
+
+.modal {
+    background: white;
+    border-radius: 16px;
+    box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    animation: modal-pop 0.25s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+}
+
+@keyframes modal-pop {
+    from { transform: scale(0.9) translateY(20px); opacity: 0; }
+    to { transform: scale(1) translateY(0); opacity: 1; }
+}
+
+.modal-head {
+    padding: 20px 24px;
+    border-bottom: 1px solid #f1f5f9;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.modal-head h3 {
+    font-size: 18px;
+    font-weight: 700;
+    color: #0f172a;
+    margin: 0;
+}
+
+.modal-body {
+    padding: 24px;
+    overflow-y: auto;
+}
+
+/* Token Modal 增强 */
+.token-summary-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 15px;
+    margin-bottom: 25px;
+}
+
+.stat-card {
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
+    padding: 16px;
+    border-radius: 12px;
+    display: flex;
+    flex-direction: column;
+}
+
+.stat-card .label {
+    font-size: 12px;
+    font-weight: 600;
+    color: #64748b;
+    text-transform: uppercase;
+    letter-spacing: 0.025em;
+    margin-bottom: 4px;
+}
+
+.stat-card .value {
+    font-size: 24px;
+    font-weight: 800;
+    color: #0f172a;
+}
+
+.token-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+}
+
+.token-table th {
+    text-align: left;
+    padding: 12px 10px;
+    border-bottom: 2px solid #f1f5f9;
+    color: #64748b;
+    font-weight: 600;
+}
+
+.token-table td {
+    padding: 12px 10px;
+    border-bottom: 1px solid #f8fafc;
+    color: #334155;
+}
+
+.token-table .num {
+    text-align: right;
+    font-family: 'JetBrains Mono', 'Fira Code', monospace;
+    width: 60px;
+}
+
+.token-table .title-cell {
+    max-width: 250px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.token-table tr:hover {
+    background: #f8fafc;
+}
+
+.action-badge {
+    padding: 3px 8px;
+    border-radius: 6px;
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+}
+
+.action-badge.chat { background: #e0e7ff; color: #4338ca; }
+.action-badge.tool { background: #dcfce7; color: #15803d; }
+.action-badge.search { background: #fef9c3; color: #a16207; }
+
+/* 管理后台样式 - 极简白黑 */
+.admin-modal-custom {
+    width: 950px !important;
+    max-width: 95vw !important;
+    max-height: 85vh;
+}
+
+.admin-tabs {
+    display: flex;
+    gap: 4px;
+    margin-bottom: 24px;
+    border-bottom: 1px solid #f1f5f9;
+    padding-bottom: 4px;
+}
+
+.admin-tab {
+    padding: 10px 24px;
+    font-size: 14px;
+    font-weight: 600;
+    color: #64748b;
+    border: none;
+    background: transparent;
+    cursor: pointer;
+    border-radius: 8px;
+    transition: all 0.2s;
+}
+
+.admin-tab:hover {
+    color: #0f172a;
+    background: #f8fafc;
+}
+
+.admin-tab.active {
+    color: #0f172a;
+    background: #f1f5f9;
+}
+
+.admin-tab-content {
+    display: none;
+    animation: fadeIn 0.3s ease;
+}
+
+.admin-tab-content.active {
+    display: block;
+}
+
+.admin-table-wrapper {
+    background: #fff;
+    border: 1px solid #f1f5f9;
+    border-radius: 12px;
+    overflow: hidden;
+}
+
+.admin-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+}
+
+.admin-table th {
+    background: #f8fafc;
+    padding: 12px 16px;
+    text-align: left;
+    color: #64748b;
+    font-weight: 700;
+    border-bottom: 1px solid #f1f5f9;
+}
+
+.admin-table td {
+    padding: 12px 16px;
+    border-bottom: 1px solid #f8fafc;
+    color: #334155;
+}
+
+.admin-table tr:hover td {
+    background: #fafafa;
+}
+
+.admin-stats-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 20px;
+    padding: 4px;
+}
+
+/* 现代输入框和按钮 */
+.input-modern {
+    width: 100%;
+    padding: 12px 16px;
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
+    border-radius: 10px;
+    font-size: 14px;
+    transition: all 0.2s;
+    outline: none;
+}
+
+.input-modern:focus {
+    border-color: #0f172a;
+    background: #fff;
+    box-shadow: 0 0 0 3px rgba(15, 23, 42, 0.05);
+}
+
+.btn-primary {
+    background: #000;
+    color: #fff;
+    padding: 12px 24px;
+    border-radius: 10px;
+    font-weight: 600;
+    border: none;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.btn-primary:hover {
+    background: #333;
+    transform: translateY(-1px);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+}
+
+.btn-danger-small {
+    background: #fef2f2;
+    color: #ef4444;
+    padding: 6px 12px;
+    border-radius: 6px;
+    font-size: 12px;
+    font-weight: 600;
+    border: 1px solid #fee2e2;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.btn-danger-small:hover {
+    background: #ef4444;
+    color: #fff;
+    border-color: #ef4444;
+}
+
+.form-group {
+    margin-bottom: 20px;
+}
+
+.form-group label {
+    display: block;
+    font-size: 13px;
+    font-weight: 700;
+    color: #1e293b;
+    margin-bottom: 8px;
+}
+
+/* Modal Title Icon Decor */
+.head-title {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.head-title .icon {
+    width: 40px;
+    height: 40px;
+    background: #f1f5f9;
+    border-radius: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 20px;
+}
+
+.head-title h3 {
+    margin: 0;
+    font-weight: 800;
+    font-size: 1.25rem;
+    color: #0f172a;
+}
+
+/* Modal Close Button Style */
+.btn-close-circle {
+    appearance: none;
+    -webkit-appearance: none;
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    border: none;
+    background: #f1f5f9;
+    color: #64748b;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+    font-size: 16px;
+    padding: 0;
+    line-height: 1;
+    outline: none;
+}
+
+.btn-close-circle:hover {
+    background: #fee2e2;
+    color: #ef4444;
+    transform: rotate(90deg);
+}
+
+/* Token Modal 重新设计 - 优化滚动与布局 */
+.token-modal-custom {
+    width: 850px !important;
+    max-width: 95vw !important;
+    height: auto !important;
+    max-height: 85vh !important;
+    border: 1px solid #e2e8f0;
+    background: #fff;
+    border-radius: 24px;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25);
+}
+
+.token-modal-custom .modal-head {
+    padding: 24px 28px;
+    border-bottom: 1px solid #f1f5f9;
+    flex-shrink: 0; /* 禁止标题缩小 */
+}
+
+.token-modal-custom .modal-body {
+    padding: 28px;
+    overflow-y: auto; /* 允许主体内容滚动 */
+    flex: 1;
+}
+
+.token-modal-custom .token-summary-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 24px;
+    margin-bottom: 32px;
+}
+
+.token-modal-custom .stat-card {
+    padding: 24px;
+    border-radius: 20px;
+    border: none;
+    display: flex;
+    flex-direction: column;
+}
+
+.token-modal-custom .stat-card.total {
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
+}
+
+.token-modal-custom .stat-card.today {
+    background: #f0f9ff;
+    border: 1px solid #bae6fd;
+}
+
+.token-modal-custom .stat-card .label {
+    font-size: 14px;
+    color: #64748b;
+    margin-bottom: 10px;
+    font-weight: 600;
+}
+
+.token-modal-custom .stat-card .value {
+    font-size: 32px;
+    font-weight: 800;
+    color: #0f172a;
+    letter-spacing: -1px;
+}
+
+.token-logs-section {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+}
+
+.token-logs-section .section-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.token-logs-section h4 {
+    font-size: 16px;
+    font-weight: 700;
+    color: #1e293b;
+    margin: 0;
+}
+
+.token-logs-section .hint {
+    font-size: 13px;
+    color: #94a3b8;
+}
+
+.token-table-wrapper {
+    background: #ffffff;
+    border: 1px solid #e2e8f0;
+    border-radius: 16px;
+    overflow: hidden; /* 由外层容器控制滚动点 */
+}
+
+.token-table-wrapper .token-table {
+    width: 100%;
+    border-collapse: collapse;
+    table-layout: fixed; /* 固定列宽，防止挤压 */
+}
+
+.token-table-wrapper .token-table th {
+    background: #f8fafc;
+    padding: 14px 20px;
+    font-size: 13px;
+    color: #64748b;
+    text-align: left;
+    border-bottom: 1px solid #f1f5f9;
+}
+
+.token-table-wrapper .token-table td {
+    padding: 14px 20px;
+    border-bottom: 1px solid #f8fafc;
+    font-size: 14px;
+    color: #334155;
+    word-break: break-all;
+    vertical-align: middle;
+}
+
+.token-table-wrapper .token-table tr:last-child td {
+    border-bottom: none;
+}
+
+.token-table-wrapper .col-time { width: 140px; }
+.token-table-wrapper .col-title { width: auto; }
+.token-table-wrapper .col-type { width: 100px; }
+.token-table-wrapper .col-num { width: 120px; }
+
+.token-table-wrapper .num {
+    font-family: 'JetBrains Mono', monospace;
+    font-weight: 700;
+    text-align: right;
+    color: #0f172a;
+}
+
+/* Utility Classes & Scrollbar */
+.text-truncate {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 100%;
+}
+
+.mono {
+    font-family: 'JetBrains Mono', 'Fira Code', monospace;
+}
+
+.token-table-wrapper::-webkit-scrollbar,
+.admin-table-wrapper::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+}
+
+.token-table-wrapper::-webkit-scrollbar-thumb,
+.admin-table-wrapper::-webkit-scrollbar-thumb {
+    background: #e2e8f0;
+    border-radius: 10px;
+}
+
+/* Modal Backdrop Refinement */
+.modal-backdrop {
+    display: none;
+    opacity: 0;
+    transition: opacity 0.2s ease;
+    align-items: center;
+    justify-content: center;
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0,0,0,0.4);
+    backdrop-filter: blur(2px);
+    z-index: 2000;
+    pointer-events: none;
+}
+
+.modal-backdrop.active {
+    display: flex;
+    opacity: 1;
+    pointer-events: auto;
+}
+
+#addUserModal {
+    z-index: 2100 !important;
+}
+
+/* Action Badges in Token Table */
+.action-badge {
+    padding: 4px 10px;
+    border-radius: 6px;
+    font-size: 11px;
+    font-weight: 800;
+}
+
+.action-badge.chat { background: #f1f5f9; color: #64748b; }
+.action-badge.tool { background: #dcfce7; color: #15803d; }
+.action-badge.search { background: #fef9c3; color: #a16207; }
+

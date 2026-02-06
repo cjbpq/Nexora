@@ -332,6 +332,22 @@ class User:
         with open(log_file, "w", encoding="utf-8") as f:
             json.dump(logs, f, indent=4, ensure_ascii=False)
             
+        # 同时更新全局 user.json 中的累计 token 消耗
+        try:
+            users_meta_path = "./data/user.json"
+            if os.path.exists(users_meta_path):
+                with open(users_meta_path, "r", encoding="utf-8") as f:
+                    users_data = json.load(f)
+                
+                if self.user in users_data:
+                    current_usage = users_data[self.user].get("token_usage", 0)
+                    users_data[self.user]["token_usage"] = current_usage + (input_tokens + output_tokens)
+                    
+                    with open(users_meta_path, "w", encoding="utf-8") as f:
+                        json.dump(users_data, f, indent=4, ensure_ascii=False)
+        except Exception as e:
+            print(f"Error updating global token usage: {e}")
+            
     def get_token_logs(self):
         """获取Token使用日志"""
         log_file = self.path + "token_usage.json"

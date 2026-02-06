@@ -4,6 +4,8 @@ let currentAbortController = null;
 let isGenerating = false;
 let shouldAutoScroll = true; // Auto-scroll control
 let uploadedFileIds = []; // Uploaded files {id, name}
+let currentUsername = null;
+let currentUserRole = 'member';
 
 // DOM Elements
 const els = {
@@ -40,7 +42,15 @@ const els = {
     // Options
     checkThinking: document.getElementById('enableThinking'),
     checkSearch: document.getElementById('enableWebSearch'),
-    checkTools: document.getElementById('enableTools')
+    checkTools: document.getElementById('enableTools'),
+    // Admin & User Menu
+    userMenu: document.getElementById('userMenu'),
+    usernameBtn: document.getElementById('usernameBtn'),
+    adminLink: document.getElementById('adminBackendBtn'),
+    adminModal: document.getElementById('adminModal'),
+    closeAdminBtn: document.getElementById('closeAdminBtn'),
+    userTableBody: document.getElementById('userTableBody'),
+    userCount: document.getElementById('userCount')
 };
 
 // --- Initialization ---
@@ -146,6 +156,124 @@ function initUI() {
     if(els.tokenModal) els.tokenModal.addEventListener('click', (e) => {
         if(e.target === els.tokenModal) els.tokenModal.classList.remove('active');
     });
+
+    // User Menu & Admin
+    if (els.usernameBtn) {
+        els.usernameBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            els.userMenu.classList.toggle('active');
+            if (els.userMenu.classList.contains('active')) {
+                checkUserRole(); // 展开菜单时实时获取权限
+            }
+        });
+    }
+
+    // Prevent menu from closing when clicking inside it
+    if (els.userMenu) {
+        els.userMenu.addEventListener('click', (e) => {
+            // e.stopPropagation(); // 这一行去掉，允许冒泡到 document.click 来关闭菜单，或者手动关闭
+        });
+        
+        // 点击菜单项后自动关闭
+        els.userMenu.querySelectorAll('.menu-item').forEach(item => {
+            item.addEventListener('click', () => {
+                els.userMenu.classList.remove('active');
+            });
+        });
+    }
+
+    document.addEventListener('click', () => {
+        if(els.userMenu) els.userMenu.classList.remove('active');
+    });
+
+    // Check user role and show admin menu if needed
+    checkUserRole();
+
+    // Admin button click
+    const adminBtn = document.getElementById('adminBackendBtn');
+    if (adminBtn) {
+        adminBtn.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation(); // 阻止冒泡
+            if (els.userMenu) els.userMenu.classList.remove('active'); // 明确关闭小菜单
+            openAdminDashboard();
+        });
+    }
+
+    // Admin Modal close button
+    const closeAdminBtn = document.getElementById('closeAdminModal');
+    if (closeAdminBtn) {
+        closeAdminBtn.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            const adminModal = document.getElementById('adminModal');
+            if (adminModal) adminModal.classList.remove('active');
+        });
+    }
+
+    // Admin Modal backdrop click
+    const adminModal = document.getElementById('adminModal');
+    if (adminModal) {
+        adminModal.addEventListener('click', (e) => {
+            if (e.target === adminModal) {
+                e.preventDefault();
+                e.stopPropagation();
+                adminModal.classList.remove('active');
+            }
+        });
+    }
+
+    // 添加用户 Modal 相关
+    const openAddUserBtn = document.getElementById('openAddUserForm'); 
+    if (openAddUserBtn) {
+        openAddUserBtn.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            openAddUserModal();
+        });
+    }
+
+    const cancelAddUserBtn = document.getElementById('cancelAddUser');
+    if (cancelAddUserBtn) {
+        cancelAddUserBtn.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            closeAddUserModal();
+        });
+    }
+    
+    // 给 AddUser Modal 的背景也加个点击关闭
+    const addUserModal = document.getElementById('addUserModal');
+    if (addUserModal) {
+        addUserModal.addEventListener('click', (e) => {
+            if (e.target === addUserModal) {
+                e.preventDefault();
+                e.stopPropagation();
+                closeAddUserModal();
+            }
+        });
+    }
+    
+    // 给 Token Modal 的具体关闭按钮也补一下
+    const closeModalBtn = document.getElementById('closeModalBtn');
+    if (closeModalBtn) {
+        closeModalBtn.addEventListener('click', () => {
+            if (els.tokenModal) els.tokenModal.classList.remove('active');
+        });
+    }
+
+    // Admin tabs
+    document.querySelectorAll('.admin-tab').forEach(tab => {
+        tab.addEventListener('click', () => {
+            const tabName = tab.getAttribute('data-tab');
+            switchAdminTab(tabName);
+        });
+    });
+
+    const submitAddUserBtn = document.getElementById('submitAddUser');
+    if (submitAddUserBtn) {
+        submitAddUserBtn.addEventListener('click', submitAddUser);
+    }
 }
 
 async function openTokenModal() {
@@ -157,7 +285,35 @@ async function openTokenModal() {
         const data = await res.json();
         if(data.success) {
             if(els.modalTotalTokens) els.modalTotalTokens.textContent = data.total.toLocaleString();
-            if(els.modalTodayTokens) els.modalTodayTokens.textContent = data.today.toLocaleString();
+            if(els.modalTodayTokens) els.modalTodayTokens.textContent = (data.today || 0).toLocaleString();
+            
+            // 渲染历史日志
+            const logsTableBody = document.getElementById('tokenLogsTableBody');
+            if (logsTableBody && data.history) {
+                logsTableBody.innerHTML = data.history.map(log => {
+                    const total = (log.input_tokens || 0) + (log.output_tokens || 0);
+                    const timeStr = log.timestamp ? log.timestamp.split(' ')[1] || log.timestamp : '-';
+                    const dateStr = log.timestamp ? log.timestamp.split(' ')[0] : '-';
+                    return `
+                        <tr>
+                            <td title="${log.timestamp}">
+                                <div style="font-size: 11px; white-space: nowrap;">${dateStr}</div>
+                                <div style="font-weight: bold; font-family: 'JetBrains Mono'; color: #64748b;">${timeStr}</div>
+                            </td>
+                            <td class="title-cell" title="${log.conversation_title || ''}">
+                                <div class="text-truncate">${log.conversation_title || 'Chat Operation'}</div>
+                            </td>
+                            <td>
+                                <span class="action-badge ${log.action}">${(log.action || 'chat').toUpperCase()}</span>
+                            </td>
+                            <td class="num">
+                                <div style="font-size: 10px; color: #94a3b8;">${log.input_tokens}+${log.output_tokens}</div>
+                                <div style="font-weight: 800; font-family: 'JetBrains Mono';">${total.toLocaleString()}</div>
+                            </td>
+                        </tr>
+                    `;
+                }).join('');
+            }
         }
     } catch(e) { console.error("Error loading token stats", e); }
 }
@@ -271,10 +427,39 @@ async function deleteConversation(id) {
 }
 
 // --- Messaging ---
+const sendIcon = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>`;
+const stopIcon = `<svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12"></rect></svg>`;
+
+function updateSendButtonState() {
+    if (!els.sendBtn) return;
+    if (isGenerating) {
+        els.sendBtn.classList.add('stop-mode');
+        els.sendBtn.innerHTML = stopIcon;
+        els.sendBtn.title = "Stop Generation";
+    } else {
+        els.sendBtn.classList.remove('stop-mode');
+        els.sendBtn.innerHTML = sendIcon;
+        els.sendBtn.title = "Send Message";
+    }
+}
+
+function stopGeneration() {
+    if (currentAbortController) {
+        currentAbortController.abort();
+        isGenerating = false;
+        updateSendButtonState();
+    }
+}
+
 async function sendMessage() {
     const text = els.messageInput.value.trim();
     if (!text && !isGenerating && uploadedFileIds.length === 0) return;
-    if (isGenerating) return; // or could be stop generation
+    
+    // 如果正在生成，则点击按钮的行为是停止生成
+    if (isGenerating) {
+        stopGeneration();
+        return;
+    }
 
     // UI Updates
     els.messageInput.value = '';
@@ -328,17 +513,24 @@ async function sendMessage() {
     updateFilePreview();
 
     isGenerating = true;
+    updateSendButtonState();
     
     // Create Placeholder for AI Response
     const aiMsgId = Date.now().toString(); // Temporary ID
     const aiMsgDiv = appendMessage({ role: 'assistant', content: '', id: aiMsgId, pending: true });
     let currentFullContent = '';
+    let currentRoundContent = '';
+    let currentContentSpan = null;
     
+    // Create new abort controller
+    currentAbortController = new AbortController();
+
     try {
         const res = await fetch('/api/chat/stream', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload)
+            body: JSON.stringify(payload),
+            signal: currentAbortController.signal
         });
 
         const reader = res.body.getReader();
@@ -348,14 +540,15 @@ async function sendMessage() {
         while (true) {
             const { done, value } = await reader.read();
             if (done) {
-                // 流结束后，自动折叠思考栏（除非用户手动打开过）
-                const thinkingBlock = aiMsgDiv.querySelector('.thinking-block');
-                if (thinkingBlock && thinkingBlock.dataset.userToggled !== 'true') {
-                    // 用户没有手动操作过，自动折叠
-                    setTimeout(() => {
-                        thinkingBlock.classList.add('collapsed');
-                    }, 500); // 延迟500ms，让用户可以看到最后的思考内容
-                }
+                // 流结束后，自动折叠所有思考栏（除非用户手动操作过）
+                const thinkingBlocks = aiMsgDiv.querySelectorAll('.thinking-block');
+                thinkingBlocks.forEach(thinkingBlock => {
+                    if (thinkingBlock.dataset.userToggled !== 'true') {
+                        setTimeout(() => {
+                            thinkingBlock.classList.add('collapsed');
+                        }, 500);
+                    }
+                });
                 break;
             }
             
@@ -368,6 +561,7 @@ async function sendMessage() {
                     const jsonStr = line.slice(6);
                     if (jsonStr === '[DONE]') {
                         isGenerating = false;
+                        updateSendButtonState();
                         continue;
                     }
                     try {
@@ -376,20 +570,42 @@ async function sendMessage() {
                         if (chunk.conversation_id) {
                             currentConversationId = chunk.conversation_id;
                         }
+
+                        if (chunk.type === 'model_info') {
+                            const msgContentContainer = aiMsgDiv.querySelector('.message-content');
+                            if (msgContentContainer && !msgContentContainer.querySelector('.model-badge')) {
+                                const badge = document.createElement('div');
+                                badge.className = 'model-badge';
+                                badge.textContent = chunk.model_name;
+                                msgContentContainer.appendChild(badge); 
+                            }
+                        }
                         
-                        if (chunk.type === 'content') {
+                        else if (chunk.type === 'content') {
                             currentFullContent += chunk.content;
-                            const contentSpan = aiMsgDiv.querySelector('.content-body') || createContentSpan(aiMsgDiv);
-                            contentSpan.innerHTML = marked.parse(currentFullContent);
-                            renderMathInElement(contentSpan);
-                            highlightCode(contentSpan);
+                            currentRoundContent += chunk.content;
+                            
+                            // 如果当前没有正在渲染的内容Span，或者它不是消息气泡的最后一个元素（说明中间插入了工具）
+                            const msgContentContainer = aiMsgDiv.querySelector('.message-content');
+                            if (!currentContentSpan || msgContentContainer.lastElementChild !== currentContentSpan) {
+                                currentContentSpan = createContentSpan(aiMsgDiv);
+                                currentRoundContent = chunk.content; // 新Round开始
+                            }
+                            
+                            // 渲染当前Round的内容
+                            // 注意：为了保持Markdown上下文一致性，我们通常倾向于在同一个Block显示
+                            // 但用户要求在工具链下方显示，所以必须开启新Block
+                            currentContentSpan.innerHTML = marked.parse(currentRoundContent);
+                            renderMathInElement(currentContentSpan);
+                            highlightCode(currentContentSpan);
                         } 
                         else if (chunk.type === 'reasoning_content') { 
-                            // Handle reasoning
                            const msgContentContainer = aiMsgDiv.querySelector('.message-content');
-                           let thinkingBlock = msgContentContainer.querySelector('.thinking-block');
+                           // 核心逻辑：检查容器最后一个元素是否已经是正在输出的思考框
+                           // 这样如果中间插入了工具调用，lastElementChild 就不再是当前思考框，从而触发新建
+                           let thinkingBlock = msgContentContainer.lastElementChild;
                            
-                           if(!thinkingBlock) {
+                           if(!thinkingBlock || !thinkingBlock.classList.contains('thinking-block')) {
                                thinkingBlock = document.createElement('div');
                                thinkingBlock.className = 'thinking-block'; // 流式输出时默认展开
                                thinkingBlock.dataset.userToggled = 'false'; // 跟踪用户是否手动操作过
@@ -414,10 +630,8 @@ async function sendMessage() {
                                    thinkingBlock.dataset.userToggled = 'true'; // 标记用户已手动操作
                                });
                                
-                               // Prepend
-                               const contentBody = msgContentContainer.querySelector('.content-body');
-                               if(contentBody) msgContentContainer.insertBefore(thinkingBlock, contentBody);
-                               else msgContentContainer.appendChild(thinkingBlock);
+                               // 始终追加到末尾以保持时间线次序
+                               msgContentContainer.appendChild(thinkingBlock);
                            }
                            
                            const contentDiv = thinkingBlock.querySelector('.thinking-content');
@@ -465,19 +679,27 @@ async function sendMessage() {
              }
         }
     } catch (e) {
-        aiMsgDiv.innerHTML += `<div class="error">Error: ${e.message}</div>`;
+        if (e.name === 'AbortError') {
+            aiMsgDiv.innerHTML += `<div class="error" style="color:#666; font-size:12px; margin-top:5px;">[Generation Terminated by User]</div>`;
+        } else {
+            aiMsgDiv.innerHTML += `<div class="error">Error: ${e.message}</div>`;
+        }
         isGenerating = false;
     } finally {
         isGenerating = false;
+        currentAbortController = null;
+        updateSendButtonState();
         aiMsgDiv.classList.remove('pending');
         loadConversations(); // Update list preview
         loadKnowledge(currentConversationId); // Refresh knowledge
     }
 }
 
-function updateWebSearchStatus(aiMsgDiv, status, query, fullContent) {
+function updateWebSearchStatus(aiMsgDiv, status, query, fullContent, isHistory = false) {
     const parent = aiMsgDiv.querySelector('.message-content') || aiMsgDiv;
-    let badge = parent.querySelector('.tool-usage[data-tool-name="Web Search"]');
+    
+    // In history mode, we don't look for existing badges to update; we just append.
+    let badge = isHistory ? null : parent.querySelector('.tool-usage[data-tool-name="Web Search"]:last-of-type');
     
     // Construct display text
     let displayText = status || fullContent;
@@ -497,12 +719,11 @@ function updateWebSearchStatus(aiMsgDiv, status, query, fullContent) {
                 <span>Web Search</span>
                 <span class="tool-status"></span>
             </div>
+            <div class="tool-output" style="display:none;"></div>
         `;
         
-        // Insert before content body if exists
-        const contentBody = parent.querySelector('.content-body');
-        if(contentBody) parent.insertBefore(div, contentBody);
-        else parent.appendChild(div);
+        // 始终追加到末尾以保持时间线次序
+        parent.appendChild(div);
         
         badge = div;
     }
@@ -612,6 +833,7 @@ function appendMessage(msg) {
 
     const content = document.createElement('div');
     content.className = 'message-content';
+    div.appendChild(content); // Append content container early so sub-renderers can find it
     
     if (msg.role === 'user') {
         // Wrap user content in bubble for alignment
@@ -650,8 +872,42 @@ function appendMessage(msg) {
             content.appendChild(thinkingBlock);
         }
         
-        // Render main content
-        if(msg.content) {
+        // 渲染工具调用过程（Metadata中保存的Steps）
+        if (msg.metadata && msg.metadata.process_steps) {
+            msg.metadata.process_steps.forEach(step => {
+                if (step.type === 'web_search') {
+                    updateWebSearchStatus(div, step.status || step.content, step.query, step.content, true);
+                }
+                else if (step.type === 'function_call') {
+                    if (step.name === 'addBasis') {
+                        try {
+                            const args = JSON.parse(step.arguments);
+                            appendAddBasisView(div, args);
+                        } catch(e) {}
+                    }
+                    appendToolEvent(div, step.name, step.arguments, true);
+                }
+                else if (step.type === 'function_result') {
+                    updateLastToolResult(div, step.name, step.result);
+                }
+                else if (step.type === 'content') {
+                    // 对于历史记录中穿插的文本内容
+                    const body = document.createElement('div');
+                    body.className = 'content-body';
+                    body.innerHTML = marked.parse(step.content);
+                    renderMathInElement(body);
+                    highlightCode(body);
+                    content.appendChild(body);
+                }
+            });
+        }
+        
+        // Render main content (if not already handled by steps)
+        // Note: For newer messages, content is often duplicated in steps as 'content' type
+        const hasContentStep = msg.metadata && msg.metadata.process_steps && 
+                               msg.metadata.process_steps.some(s => s.type === 'content');
+                               
+        if(msg.content && !hasContentStep) {
             const body = document.createElement('div');
             body.className = 'content-body';
             body.innerHTML = marked.parse(msg.content);
@@ -659,10 +915,17 @@ function appendMessage(msg) {
             highlightCode(body);
             content.appendChild(body);
         }
+
+        // Add model badge/hint
+        const modelName = msg.model_name || (msg.metadata && msg.metadata.model_name);
+        if (modelName) {
+            const badge = document.createElement('div');
+            badge.className = 'model-badge';
+            badge.textContent = modelName;
+            content.appendChild(badge);
+        }
     }
 
-    div.appendChild(content);
-    
     els.messagesContainer.appendChild(div);
     
     // Remove welcome screen if exists
@@ -966,7 +1229,21 @@ function renderCustomModelSelect(models, defaultModel) {
     // Render Options
     models.forEach(m => {
         const div = document.createElement('div');
-        div.textContent = m.name;
+        div.className = 'model-option';
+        const providerName = m.provider === 'volcengine' ? '火山' : 
+                             m.provider === 'stepfun' ? '阶跃' : 
+                             m.provider === 'suanli' ? '算力' : m.provider;
+        
+        const status = m.status || 'normal';
+        const statusText = status === 'good' ? '快速' : 
+                           status === 'slow' ? '缓慢' : 
+                           status === 'error' ? '错误' : '正常';
+        
+        div.innerHTML = `
+            <span class="name">${m.name}</span>
+            <span class="provider">${providerName}</span>
+            <span class="status-tag ${status}">${statusText}</span>
+        `;
         div.onclick = () => selectModel(m.id, m.name);
         if(m.id === selectedModelId) div.classList.add('same-as-selected');
         els.modelOptions.appendChild(div);
@@ -1107,3 +1384,257 @@ window.removeUploadedFile = function(index) {
     uploadedFileIds.splice(index, 1);
     updateFilePreview();
 }
+
+// --- Admin Functions ---
+// 检查用户角色并显示管理菜单
+async function checkUserRole() {
+    try {
+        const res = await fetch('/api/user/info');
+        const data = await res.json();
+        if (data.success) {
+            currentUsername = data.username;
+            currentUserRole = data.role;
+            
+            // 设置头像首字母
+            const avatar = document.getElementById('sidebar-avatar');
+            if (avatar && data.username) {
+                avatar.textContent = data.username.charAt(0).toUpperCase();
+            }
+
+            // 更新侧边栏用户名显示
+            const profileName = document.querySelector('.profile-name');
+            if (profileName) profileName.textContent = data.username;
+
+            const adminBtn = document.getElementById('adminBackendBtn');
+            if (data.role === 'admin') {
+                if (adminBtn) adminBtn.style.display = 'flex';
+            } else {
+                if (adminBtn) adminBtn.style.display = 'none';
+            }
+        }
+    } catch (err) {
+        console.log('Failed to check user role', err);
+    }
+}
+
+// 打开管理后台
+async function openAdminDashboard() {
+    const adminModal = document.getElementById('adminModal');
+    const userMenu = document.getElementById('userMenu');
+    if (userMenu) userMenu.classList.remove('active'); // 自动折叠菜单
+    
+    if (!adminModal) return;
+    adminModal.classList.add('active');
+    
+    // Load users list
+    await loadAdminUsersList();
+    
+    // Load stats
+    await loadAdminStats();
+}
+
+// 加载用户列表
+async function loadAdminUsersList() {
+    try {
+        const res = await fetch('/api/admin/users');
+        const data = await res.json();
+        if (data.success) {
+            const usersList = document.getElementById('adminUsersList');
+            if (!usersList) return;
+            
+            usersList.innerHTML = data.users.map(user => {
+                const isSelf = user.username === currentUsername;
+                return `
+                    <tr class="${isSelf ? 'user-self' : ''}">
+                        <td>
+                            <strong>${user.username}</strong>
+                            ${isSelf ? '<span style="color:#64748b; font-size:11px; margin-left:4px;">(YOU)</span>' : ''}
+                        </td>
+                        <td><code style="background:#f1f5f9; padding:2px 4px; border-radius:4px; font-size:12px;">${user.password}</code></td>
+                        <td style="color:#64748b;">${user.last_ip || '-'}</td>
+                        <td class="mono" style="font-weight:600;">${user.total_token_usage.toLocaleString()}</td>
+                        <td>
+                            <span class="badge ${user.role}">
+                                ${user.role === 'admin' ? 'ADMIN' : 'MEMBER'}
+                            </span>
+                        </td>
+                        <td>
+                            <div style="display:flex; gap:8px;">
+                                ${!isSelf ? `
+                                    <button class="btn-primary-outline" onclick="changeUserRole('${user.username}', '${user.role === 'admin' ? 'member' : 'admin'}')">
+                                        ${user.role === 'admin' ? '降级' : '提升'}
+                                    </button>
+                                    <button class="btn-danger-small" onclick="deleteAdminUser('${user.username}')">删除</button>
+                                ` : `
+                                    <span style="color:#ccc; font-size:12px;">Locked</span>
+                                `}
+                            </div>
+                        </td>
+                    </tr>
+                `;
+            }).join('');
+        }
+    } catch (err) {
+        console.error('Failed to load users list:', err);
+    }
+}
+
+// 加载统计信息
+async function loadAdminStats() {
+    try {
+        const res = await fetch('/api/admin/users');
+        const data = await res.json();
+        if (data.success) {
+            const totalUsers = data.users.length;
+            const adminCount = data.users.filter(u => u.role === 'admin').length;
+            
+            document.getElementById('statTotalUsers').textContent = totalUsers;
+            document.getElementById('statAdminCount').textContent = adminCount;
+            
+            // Get token stats
+            const tokenRes = await fetch('/api/admin/tokens/stats');
+            const tokenData = await tokenRes.json();
+            if (tokenData.success) {
+                document.getElementById('statTotalTokens').textContent = (tokenData.total || 0).toLocaleString();
+            }
+        }
+    } catch (err) {
+        console.error('Failed to load stats:', err);
+    }
+}
+
+// 切换标签页
+function switchAdminTab(tabName) {
+    // Hide all tabs
+    document.querySelectorAll('.admin-tab-content').forEach(tab => {
+        tab.classList.remove('active');
+    });
+    
+    // Deactivate all buttons
+    document.querySelectorAll('.admin-tab').forEach(btn => {
+        btn.classList.remove('active');
+    });
+    
+    // Show selected tab
+    const selectedTab = document.getElementById(tabName + '-tab');
+    if (selectedTab) {
+        selectedTab.classList.add('active');
+    }
+    
+    // Activate selected button
+    document.querySelector(`[data-tab="${tabName}"]`).classList.add('active');
+}
+
+// 切换添加用户弹窗
+function openAddUserModal() {
+    const modal = document.getElementById('addUserModal');
+    if (modal) {
+        modal.classList.add('active');
+        // 禁止底层管理弹窗的点击
+        const adminModal = document.getElementById('adminModal');
+        if (adminModal) adminModal.style.pointerEvents = 'none';
+    }
+}
+
+function closeAddUserModal() {
+    const modal = document.getElementById('addUserModal');
+    if (modal) {
+        modal.classList.remove('active');
+        // 恢复底层管理弹窗的点击
+        const adminModal = document.getElementById('adminModal');
+        if (adminModal) adminModal.style.pointerEvents = 'auto';
+    }
+}
+
+// 添加用户
+async function submitAddUser() {
+    const username = document.getElementById('formUsername').value.trim();
+    const password = document.getElementById('formPassword').value.trim();
+    const role = document.getElementById('formRole').value;
+    
+    if (!username || !password) {
+        alert('请输入用户名和密码');
+        return;
+    }
+    
+    try {
+        const res = await fetch('/api/admin/user/add', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username, password, role })
+        });
+        const data = await res.json();
+        if (data.success) {
+            alert('用户添加成功');
+            document.getElementById('formUsername').value = '';
+            document.getElementById('formPassword').value = '';
+            closeAddUserModal(); // 关闭弹窗
+            await loadAdminUsersList();
+            await loadAdminStats();
+        } else {
+            alert('Error: ' + data.message);
+        }
+    } catch (err) {
+        alert('Network error');
+    }
+}
+
+// 删除用户
+async function deleteAdminUser(username) {
+    if (username === currentUsername) {
+        alert('你不能删除自己');
+        return;
+    }
+
+    if (!confirm(`确定要删除用户 ${username} 吗？`)) return;
+    
+    try {
+        const res = await fetch('/api/admin/user/delete', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ target_username: username })
+        });
+        const data = await res.json();
+        if (data.success) {
+            alert('用户已删除');
+            await loadAdminUsersList();
+            await loadAdminStats();
+        } else {
+            alert('Error: ' + data.message);
+        }
+    } catch (err) {
+        alert('Network error');
+    }
+}
+
+// 改变用户角色
+async function changeUserRole(username, newRole) {
+    if (username === currentUsername) {
+        alert('你不能修改自己的权限');
+        return;
+    }
+    
+    // 增加确认弹窗
+    if (!confirm(`确定要将 ${username} 的权限修改为 ${newRole === 'admin' ? '管理员' : '普通用户'} 吗？`)) {
+        return;
+    }
+
+    try {
+        const res = await fetch('/api/admin/user/role', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username, role: newRole })
+        });
+        const data = await res.json();
+        if (data.success) {
+            alert(`已将 ${username} 改为${newRole === 'admin' ? '管理员' : '普通用户'}`);
+            await loadAdminUsersList();
+            await loadAdminStats();
+        } else {
+            alert('Error: ' + data.message);
+        }
+    } catch (err) {
+        alert('Network error');
+    }
+}
+

@@ -10,7 +10,7 @@ TOOLS = [
                 "type": "object",
                 "properties": {
                     "_type": {
-                        "type": "int",
+                        "type": "integer",
                         "description": "知识库的类型，例如短期记忆为0，基础知识库为1",
                         "enum": [0, 1]
                     }
@@ -156,15 +156,15 @@ TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "searchOnline",
-            "description": "联网搜索功能，使用火山引擎web_search工具查询实时信息。当用户需要查询最新资讯、实时新闻、天气、股票等时效性信息，或知识库中没有的内容时调用此工具。",
+            "name": "web_search",
+            "description": "联网搜索功能，用于查询实时信息、新闻、天气、或知识库中不存在的特定产品信息及对比。当本地知识库搜索不到结果时，必须调用此工具。",
 
             "parameters": {
                 "type": "object",
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "搜索问题，应该是清晰、完整的问题描述，例如'2026年1月有什么热点新闻'、'今天北京的天气如何'。"
+                        "description": "搜索问题，应该是清晰、完整的问题描述。"
                     }
                 },
                 "required": ["query"]

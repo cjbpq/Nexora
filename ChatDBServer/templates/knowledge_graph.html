@@ -8,88 +8,630 @@
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     
-    <!-- CSS 重构：极简 SaaS 风格 -->
+    <!-- CSS 重构：现代 AI 仪表盘风格 -->
+    <link rel="stylesheet" href="/static/css/knowledge_graph_div.css">
     <style>
         :root {
-            --primary: #2563eb;
-            --bg: #f8fafc;
+            --primary: #3b82f6;
+            --primary-light: #eff6ff;
+            --secondary: #d946ef;
+            --bg: #fdfdfd;
             --surface: #ffffff;
-            --text: #0f172a;
+            --text: #1e293b;
             --text-muted: #64748b;
             --border: #e2e8f0;
-            --sidebar-width: 400px;
+            --sidebar-width: 380px;
+            --radius: 12px;
+            --shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -2px rgba(0, 0, 0, 0.05);
+            --shadow-lg: 0 20px 25px -5px rgba(0, 0, 0, 0.05), 0 8px 10px -6px rgba(0, 0, 0, 0.05);
         }
 
         * { box-sizing: border-box; }
         body, html { 
             margin: 0; padding: 0; width: 100%; height: 100%; 
-            font-family: 'Inter', sans-serif; background: var(--bg); color: var(--text);
+            font-family: 'Inter', -apple-system, system-ui, sans-serif; 
+            background: var(--bg); color: var(--text);
             overflow: hidden;
+            -webkit-font-smoothing: antialiased;
         }
 
         .layout { display: flex; height: 100vh; width: 100vw; position: relative; }
 
-        /* 左侧：可视化图谱区域 */
-        .canvas-area { flex: 1; position: relative; background: radial-gradient(#e2e8f0 1.2px, transparent 1.2px); background-size: 30px 30px; }
-        #cy { width: 100%; height: 100%; }
+        /* 可视化图谱区域 */
+        .canvas-area { 
+            flex: 1; 
+            position: relative; 
+            background-color: var(--bg);
+            background-image: 
+                radial-gradient(circle at 1px 1px, #e2e8f0 1px, transparent 0);
+            background-size: 32px 32px;
+        }
 
-        /* 顶部控制栏 */
+        /* 顶部控制栏 - 悬浮设计 */
         .top-bar {
-            position: absolute; top: 20px; left: 20px; right: 20px;
-            display: flex; justify-content: space-between; align-items: center;
+            position: absolute; top: 24px; left: 24px; right: 24px;
+            display: flex; gap: 16px; align-items: center;
             z-index: 10; pointer-events: none;
         }
         .top-bar > * { pointer-events: auto; }
         
         .search-container {
-            background: var(--surface); border: 1px solid var(--border);
-            border-radius: 14px; padding: 10px 20px; display: flex; align-items: center;
-            box-shadow: 0 10px 15px -3px rgb(0 0 0 / 0.1); width: 350px;
+            background: var(--surface); 
+            border: 1px solid var(--border);
+            border-radius: 16px; 
+            padding: 0 18px; 
+            display: flex; 
+            align-items: center;
+            box-shadow: var(--shadow-lg); 
+            width: 320px;
+            height: 48px;
+            transition: width 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+        .search-container:focus-within {
+            width: 400px;
+            border-color: var(--primary);
         }
         .search-container input { 
-            border: none; outline: none; margin-left: 10px; width: 100%; font-size: 14px; 
-            background: transparent;
+            border: none; outline: none; margin-left: 12px; width: 100%; 
+            font-size: 14px; background: transparent; color: var(--text);
         }
 
-        .btn-group { display: flex; gap: 10px; }
+        .btn-group { display: flex; gap: 12px; }
         .btn {
-            background: var(--surface); border: 1px solid var(--border);
-            padding: 10px 20px; border-radius: 12px; cursor: pointer;
-            font-size: 14px; font-weight: 500; display: flex; align-items: center; gap: 8px;
-            box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1); transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+            background: var(--surface); 
+            border: 1px solid var(--border);
+            height: 48px;
+            padding: 0 20px; 
+            border-radius: 16px; 
+            cursor: pointer;
+            font-size: 14px; 
+            font-weight: 600; 
+            display: flex; 
+            align-items: center; 
+            gap: 10px;
+            box-shadow: var(--shadow); 
+            transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+            color: var(--text-muted);
         }
-        .btn:hover { background: #f8fafc; transform: translateY(-2px); box-shadow: 0 10px 15px -3px rgb(0 0 0 / 0.1); }
+        .btn i { font-size: 16px; }
+        .btn:hover { 
+            background: #fff; 
+            transform: translateY(-2px); 
+            box-shadow: var(--shadow-lg); 
+            color: var(--text);
+            border-color: #cbd5e1;
+        }
         .btn:active { transform: translateY(0); }
-        .btn-primary { background: var(--primary); color: white; border: none; }
-        .btn-primary:hover { background: #1d4ed8; }
+        .btn-primary { 
+            background: var(--primary); 
+            color: white; 
+            border: none; 
+        }
+        .btn-primary:hover { background: #2563eb; color: white; }
 
-        /* 右侧：详情面板 */
+        /* 右侧详情面板 - 玻璃拟态 */
         .inspector {
-            width: var(--sidebar-width); background: var(--surface);
-            border-left: 1px solid var(--border); display: flex; flex-direction: column;
-            transform: translateX(100%); transition: transform 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+            width: var(--sidebar-width); 
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(16px);
+            border-left: 1px solid var(--border); 
+            display: flex; 
+            flex-direction: column;
+            transform: translateX(100%); 
+            transition: transform 0.4s cubic-bezier(0.4, 0, 0.2, 1);
             position: absolute; right: 0; top: 0; bottom: 0; z-index: 100;
-            box-shadow: -10px 0 25px -5px rgb(0 0 0 / 0.1);
+            box-shadow: -20px 0 40px -10px rgba(0, 0, 0, 0.05);
         }
         .inspector.open { transform: translateX(0); }
 
         .inspector-header {
-            padding: 24px 32px; border-bottom: 1px solid var(--border);
-            display: flex; justify-content: space-between; align-items: center;
-            background: #fff; position: sticky; top: 0;
+            padding: 32px; 
+            border-bottom: 1px solid var(--border);
+            display: flex; 
+            justify-content: space-between; 
+            align-items: center;
         }
-        .inspector-header h2 { margin: 0; font-size: 20px; font-weight: 700; color: #1e293b; }
+        .inspector-header h2 { margin: 0; font-size: 22px; font-weight: 800; color: #0f172a; letter-spacing: -0.02em; }
         
-        .inspector-body { flex: 1; padding: 32px; overflow-y: auto; background: #fff; }
+        .inspector-body { 
+            flex: 1; 
+            padding: 32px; 
+            overflow-y: auto; 
+            display: flex;
+            flex-direction: column;
+            gap: 24px;
+        }
         
-        .editor-container { height: 100%; display: flex; flex-direction: column; gap: 20px; }
+        .editor-container { flex: 1; display: flex; flex-direction: column; gap: 12px; }
+        .editor-container label { font-size: 13px; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; }
         .editor-container textarea { 
-            flex: 1; width: 100%; border: 1.5px solid var(--border); border-radius: 12px;
+            flex: 1; width: 100%; border: 1px solid var(--border); border-radius: var(--radius);
             padding: 16px; font-family: inherit; font-size: 15px; line-height: 1.6;
-            resize: none; outline: none; transition: border-color 0.2s;
-            background: #fcfcfc;
+            resize: none; outline: none; transition: all 0.2s;
+            background: #f8fafc;
         }
-        .editor-container textarea:focus { border-color: var(--primary); background: #fff; }
+        .editor-container textarea:focus { 
+            border-color: var(--primary); 
+            background: #fff; 
+            box-shadow: 0 0 0 4px rgba(59, 130, 246, 0.1);
+        }
+
+        /* 底部操作 */
+        .inspector-footer {
+            padding: 24px 32px;
+            border-top: 1px solid var(--border);
+            display: flex;
+            gap: 12px;
+        }
+        .inspector-footer .btn { flex: 1; justify-content: center; height: 44px; }
+
+        /* 浮动缩放控制 */
+        .zoom-controls {
+            position: absolute; bottom: 24px; left: 24px; display: flex; flex-direction: column; gap: 8px;
+        }
+        .btn-icon { 
+            width: 40px; height: 40px; border-radius: 12px; padding: 0; 
+            justify-content: center; align-items: center;
+        }
+
+        /* 提示框 */
+        .toast {
+            position: fixed; bottom: 32px; left: 50%; transform: translateX(-50%);
+            background: #0f172a; color: #fff; padding: 14px 28px; border-radius: 16px;
+            font-size: 14px; font-weight: 500; z-index: 2000; box-shadow: var(--shadow-lg);
+            animation: slideUp 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+        }
+        @keyframes slideUp { from { transform: translate(-50%, 100%); opacity: 0; } to { transform: translate(-50%, 0); opacity: 1; } }
+
+        /* 加载遮罩 */
+        .loading-overlay {
+            position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(255,255,255,0.7); display: none;
+            justify-content: center; align-items: center; z-index: 1000;
+            backdrop-filter: blur(4px);
+        }
+        .loading-spinner {
+            width: 50px; height: 50px; border: 5px solid #e2e8f0;
+            border-top: 5px solid var(--primary); border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+
+        /* 标签 */
+        .tag { font-size: 12px; padding: 4px 12px; border-radius: 6px; background: #eff6ff; color: #1d4ed8; font-weight: 600; }
+    </style>
+
+    <!-- D3.js & Div Graph Logic -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.8.5/d3.min.js"></script>
+    <script src="/static/js/knowledge_graph_div.js"></script>
+</head>
+<body>
+    <div class="loading-overlay" id="loadingOverlay">
+        <div class="loading-spinner"></div>
+    </div>
+    <div class="layout">
+        <div class="canvas-area">
+            <div id="graph-container" class="graph-container"></div>
+            
+            <div class="top-bar">
+                <div class="search-container">
+                    <i class="fa-solid fa-search" style="color:var(--text-muted)"></i>
+                    <input type="text" id="searchNodes" placeholder="搜索知识点并定位...">
+                </div>
+                <div class="btn-group">
+                    <button class="btn" id="aiOrganize"><i class="fa-solid fa-wand-magic-sparkles" style="color:#d946ef"></i> AI 整理</button>
+                    <button class="btn" id="aiScan"><i class="fa-solid fa-link" style="color:#3b82f6"></i> 脉络重构</button>
+                    <button class="btn" onclick="window.location.href='/'"><i class="fa-solid fa-house"></i></button>
+                </div>
+            </div>
+
+            <div class="zoom-controls">
+                <button class="btn btn-icon" id="zoomIn" title="放大"><i class="fa-solid fa-plus"></i></button>
+                <button class="btn btn-icon" id="zoomOut" title="缩小"><i class="fa-solid fa-minus"></i></button>
+                <button class="btn btn-icon" id="fitView" title="适应窗口"><i class="fa-solid fa-expand"></i></button>
+            </div>
+        </div>
+
+        <aside class="inspector" id="inspector">
+            <div class="inspector-header">
+                <h2 id="nodeTitle">笔记详情</h2>
+                <button class="btn btn-icon" id="closeInspector" style="border:none;box-shadow:none;background:transparent;"><i class="fa-solid fa-xmark"></i></button>
+            </div>
+            <div class="inspector-body">
+                <div class="editor-container">
+                    <div id="nodeTags" style="display:flex; gap:8px;"></div>
+                    <textarea id="nodeContent" placeholder="在此编辑知识内容..."></textarea>
+                    <div style="display:flex; gap:12px;">
+                        <button class="btn btn-primary" id="saveNode" style="flex:1">更新保存</button>
+                        <button class="btn" id="deleteNode" style="color:#ef4444; border-color:#fee2e2">删除笔记</button>
+                    </div>
+                </div>
+            </div>
+        </aside>
+    </div>
+
+    <script>
+        let graph;
+        let currentNoteTitle = null;
+
+        document.addEventListener('DOMContentLoaded', () => {
+            initGraph();
+            setupEvents();
+            loadData();
+        });
+
+        function initGraph() {
+            graph = new KnowledgeGraph('graph-container');
+            
+            // Handle Custom Event from the class
+            document.getElementById('graph-container').addEventListener('nodeclick', (e) => {
+                const node = e.detail;
+                if (node.type === 'KNOWLEDGE') {
+                    showNote(node.label);
+                } else {
+                    hideInspector();
+                }
+            });
+            
+            // Click outside to hide inspector
+            document.getElementById('graph-container').addEventListener('click', (e) => {
+                if (e.target.id === 'graph-container' || e.target.classList.contains('graph-content')) {
+                    hideInspector();
+                }
+            });
+        }
+
+        async function loadData() {
+            try {
+                toggleLoading(true);
+                const res = await fetch('/api/knowledge/graph');
+                const data = await res.json();
+                if (data.success) {
+                    processAndRender(data.graph);
+                }
+            } catch (e) { 
+                console.error(e); 
+            } finally {
+                toggleLoading(false);
+            }
+        }
+
+        function processAndRender(data) {
+            const nodes = [];
+            const links = [];
+            
+            // Root
+            nodes.push({ id: 'root', label: '知识空间', type: 'ROOT' });
+
+            // Categories
+            Object.keys(data.categories).forEach(catName => {
+                const cat = data.categories[catName];
+                const catId = `cat_${catName}`;
+                nodes.push({ id: catId, label: catName, type: 'CATEGORY' });
+                links.push({ source: 'root', target: catId });
+
+                // Knowledge nodes
+                cat.knowledge_ids.forEach(title => {
+                    const kId = `k_${title}`;
+                    nodes.push({ id: kId, label: title, type: 'KNOWLEDGE' });
+                    links.push({ source: catId, target: kId });
+                });
+            });
+
+            // Extra connections
+            if (data.connections) {
+                data.connections.forEach(conn => {
+                    links.push({
+                        id: conn.id,
+                        source: `k_${conn.from}`,
+                        target: `k_${conn.to}`,
+                        label: conn.type,
+                        type: 'CONNECTION'
+                    });
+                });
+            }
+
+            graph.setData(nodes, links);
+        }
+
+        async function showNote(title) {
+            currentNoteTitle = title;
+            document.getElementById('nodeTitle').innerText = title;
+            document.getElementById('nodeTags').innerHTML = '<span class="tag">基础知识</span>';
+            try {
+                const res = await fetch(`/api/knowledge/basis/${encodeURIComponent(title)}`);
+                const data = await res.json();
+                document.getElementById('nodeContent').value = data.content;
+                document.getElementById('inspector').classList.add('open');
+            } catch (e) { 
+                showToast('加载详情失败'); 
+            }
+        }
+
+        function hideInspector() {
+            document.getElementById('inspector').classList.remove('open');
+            d3.selectAll('.node').classed('selected', false);
+        }
+
+        function setupEvents() {
+            document.getElementById('closeInspector').onclick = hideInspector;
+
+            document.getElementById('saveNode').onclick = async () => {
+                const content = document.getElementById('nodeContent').value;
+                const res = await fetch(`/api/knowledge/basis/${encodeURIComponent(currentNoteTitle)}`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ content })
+                });
+                const data = await res.json();
+                if(data.success) showToast('笔记已保存');
+            };
+
+            document.getElementById('deleteNode').onclick = async () => {
+                if(!confirm('确定删除此笔记及所有关联脉络吗？')) return;
+                const res = await fetch(`/api/knowledge/basis/${encodeURIComponent(currentNoteTitle)}`, { method: 'DELETE' });
+                const data = await res.json();
+                if(data.success) {
+                    showToast('笔记已删除');
+                    hideInspector();
+                    loadData();
+                }
+            };
+
+            document.getElementById('searchNodes').oninput = (e) => {
+                const q = e.target.value.toLowerCase();
+                const nodes = d3.selectAll('.node');
+                if(!q) {
+                    nodes.style('opacity', 1);
+                    return;
+                }
+                nodes.style('opacity', function(d) {
+                    return d.label.toLowerCase().includes(q) ? 1 : 0.1;
+                });
+            };
+
+            document.getElementById('zoomIn').onclick = () => {
+                d3.select('#graph-container').transition().call(graph.zoom.scaleBy, 1.3);
+            };
+            document.getElementById('zoomOut').onclick = () => {
+                d3.select('#graph-container').transition().call(graph.zoom.scaleBy, 0.7);
+            };
+            document.getElementById('fitView').onclick = () => {
+                graph.fit();
+            };
+
+            // Sidebar tools (delegated back to existing APIs)
+            document.getElementById('aiScan').onclick = async () => {
+                showToast('正在重构语义脉络...');
+                toggleLoading(true);
+                try {
+                    await fetch('/api/knowledge/ai/scan', { method: 'POST' });
+                    await loadData();
+                } finally { toggleLoading(false); }
+            };
+
+            document.getElementById('aiOrganize').onclick = async () => {
+                if(!confirm('AI 将重新识别全量知识的深层脉络并自动分类，是否继续？')) return;
+                showToast('AI 正在思考全域逻辑...');
+                toggleLoading(true);
+                try {
+                    await fetch('/api/knowledge/ai/organize', { method: 'POST' });
+                    await loadData();
+                } finally { toggleLoading(false); }
+            };
+        }
+
+        function toggleLoading(show) {
+            document.getElementById('loadingOverlay').style.display = show ? 'flex' : 'none';
+        }
+
+        function showToast(msg) {
+            const toast = document.createElement('div');
+            toast.className = 'toast';
+            toast.innerText = msg;
+            toast.style.cssText = "position:fixed; bottom:20px; left:50%; transform:translateX(-50%); background:#1e293b; color:white; padding:8px 16px; border-radius:8px; z-index:2000; font-size:14px; box-shadow:0 4px 12px rgba(0,0,0,0.2);";
+            document.body.appendChild(toast);
+            setTimeout(() => toast.remove(), 3000);
+        }
+    </script>
+</body>
+</html>
+    <link rel="stylesheet" href="/static/css/knowledge_graph_div.css">
+    <style>
+        :root {
+            --primary: #3b82f6;
+            --primary-light: #eff6ff;
+            --secondary: #d946ef;
+            --bg: #fdfdfd;
+            --surface: #ffffff;
+            --text: #1e293b;
+            --text-muted: #64748b;
+            --border: #e2e8f0;
+            --sidebar-width: 380px;
+            --radius: 12px;
+            --shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -2px rgba(0, 0, 0, 0.05);
+            --shadow-lg: 0 20px 25px -5px rgba(0, 0, 0, 0.05), 0 8px 10px -6px rgba(0, 0, 0, 0.05);
+        }
+
+        * { box-sizing: border-box; }
+        body, html { 
+            margin: 0; padding: 0; width: 100%; height: 100%; 
+            font-family: 'Inter', -apple-system, system-ui, sans-serif; 
+            background: var(--bg); color: var(--text);
+            overflow: hidden;
+            -webkit-font-smoothing: antialiased;
+        }
+
+        .layout { display: flex; height: 100vh; width: 100vw; position: relative; }
+
+        /* 可视化图谱区域 */
+        .canvas-area { 
+            flex: 1; 
+            position: relative; 
+            background-color: var(--bg);
+            background-image: 
+                radial-gradient(circle at 1px 1px, #e2e8f0 1px, transparent 0);
+            background-size: 32px 32px;
+        }
+        #cy { width: 100%; height: 100%; }
+
+        /* 顶部控制栏 - 悬浮设计 */
+        .top-bar {
+            position: absolute; top: 24px; left: 24px; right: 24px;
+            display: flex; gap: 16px; align-items: center;
+            z-index: 10; pointer-events: none;
+        }
+        .top-bar > * { pointer-events: auto; }
+        
+        .search-container {
+            background: var(--surface); 
+            border: 1px solid var(--border);
+            border-radius: 16px; 
+            padding: 0 18px; 
+            display: flex; 
+            align-items: center;
+            box-shadow: var(--shadow-lg); 
+            width: 320px;
+            height: 48px;
+            transition: width 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+        .search-container:focus-within {
+            width: 400px;
+            border-color: var(--primary);
+        }
+        .search-container input { 
+            border: none; outline: none; margin-left: 12px; width: 100%; 
+            font-size: 14px; background: transparent; color: var(--text);
+        }
+
+        .btn-group { display: flex; gap: 12px; }
+        .btn {
+            background: var(--surface); 
+            border: 1px solid var(--border);
+            height: 48px;
+            padding: 0 20px; 
+            border-radius: 16px; 
+            cursor: pointer;
+            font-size: 14px; 
+            font-weight: 600; 
+            display: flex; 
+            align-items: center; 
+            gap: 10px;
+            box-shadow: var(--shadow); 
+            transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+            color: var(--text-muted);
+        }
+        .btn i { font-size: 16px; }
+        .btn:hover { 
+            background: #fff; 
+            transform: translateY(-2px); 
+            box-shadow: var(--shadow-lg); 
+            color: var(--text);
+            border-color: #cbd5e1;
+        }
+        .btn:active { transform: translateY(0); }
+        .btn-primary { 
+            background: var(--primary); 
+            color: white; 
+            border: none; 
+        }
+        .btn-primary:hover { background: #2563eb; color: white; }
+
+        /* 右侧详情面板 - 玻璃拟态 */
+        .inspector {
+            width: var(--sidebar-width); 
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(16px);
+            border-left: 1px solid var(--border); 
+            display: flex; 
+            flex-direction: column;
+            transform: translateX(100%); 
+            transition: transform 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+            position: absolute; right: 0; top: 0; bottom: 0; z-index: 100;
+            box-shadow: -20px 0 40px -10px rgba(0, 0, 0, 0.05);
+        }
+        .inspector.open { transform: translateX(0); }
+
+        .inspector-header {
+            padding: 32px; 
+            border-bottom: 1px solid var(--border);
+            display: flex; 
+            justify-content: space-between; 
+            align-items: center;
+        }
+        .inspector-header h2 { margin: 0; font-size: 22px; font-weight: 800; color: #0f172a; letter-spacing: -0.02em; }
+        
+        .inspector-body { 
+            flex: 1; 
+            padding: 32px; 
+            overflow-y: auto; 
+            display: flex;
+            flex-direction: column;
+            gap: 24px;
+        }
+        
+        .editor-container { flex: 1; display: flex; flex-direction: column; gap: 12px; }
+        .editor-container label { font-size: 13px; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; }
+        .editor-container textarea { 
+            flex: 1; width: 100%; border: 1px solid var(--border); border-radius: var(--radius);
+            padding: 16px; font-family: inherit; font-size: 15px; line-height: 1.6;
+            resize: none; outline: none; transition: all 0.2s;
+            background: #f8fafc;
+        }
+        .editor-container textarea:focus { 
+            border-color: var(--primary); 
+            background: #fff; 
+            box-shadow: 0 0 0 4px rgba(59, 130, 246, 0.1);
+        }
+
+        /* 底部操作 */
+        .inspector-footer {
+            padding: 24px 32px;
+            border-top: 1px solid var(--border);
+            display: flex;
+            gap: 12px;
+        }
+        .inspector-footer .btn { flex: 1; justify-content: center; height: 44px; }
+
+        /* 浮动缩放控制 */
+        .zoom-controls {
+            position: absolute; bottom: 24px; left: 24px; display: flex; flex-direction: column; gap: 8px;
+        }
+        .btn-icon { 
+            width: 40px; height: 40px; border-radius: 12px; padding: 0; 
+            justify-content: center; align-items: center;
+        }
+
+        /* 标签 */
+        .tag-pill { 
+            font-size: 11px; 
+            padding: 4px 10px; 
+            border-radius: 20px; 
+            background: var(--primary-light); 
+            color: var(--primary); 
+            font-weight: 700;
+            display: inline-block;
+            margin-bottom: 8px;
+        }
+
+        /* 节点入场动画 */
+        @keyframes nodeAppear {
+            from { opacity: 0; transform: scale(0.8); }
+            to { opacity: 1; transform: scale(1); }
+        }
+        .canvas-area #cy canvas { 
+            animation: fadeIn 0.8s ease-out;
+        }
+        @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+        
+        /* 提示框 */
+        .toast {
+            position: fixed; bottom: 32px; left: 50%; transform: translateX(-50%);
+            background: #0f172a; color: #fff; padding: 14px 28px; border-radius: 16px;
+            font-size: 14px; font-weight: 500; z-index: 2000; box-shadow: var(--shadow-lg);
+            animation: slideUp 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+        }
+        @keyframes slideUp { from { transform: translate(-50%, 100%); opacity: 0; } to { transform: translate(-50%, 0); opacity: 1; } }
 
         /* 浮动缩放控制 */
         .zoom-controls {
@@ -124,10 +666,9 @@
         @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
     </style>
 
-    <!-- Cytoscape JS & Advanced Layouts -->
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/cytoscape/3.26.0/cytoscape.min.js"></script>
-    <script src="https://unpkg.com/klayjs@0.4.1/klay.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/cytoscape-klay@3.1.4/cytoscape-klay.min.js"></script>
+    <!-- D3.js & Div Graph Logic -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.8.5/d3.min.js"></script>
+    <script src="/static/js/knowledge_graph_div.js"></script>
 </head>
 <body>
     <div class="loading-overlay" id="loadingOverlay">
@@ -135,7 +676,7 @@
     </div>
     <div class="layout">
         <div class="canvas-area">
-            <div id="cy"></div>
+            <div id="graph-container" class="graph-container"></div>
             
             <div class="top-bar">
                 <div class="search-container">
@@ -193,35 +734,37 @@
                         selector: 'node',
                         style: {
                             'label': 'data(displayLabel)',
-                            'background-color': 'data(color)',
-                            'color': '#334155',
-                            'font-family': 'Inter',
-                            'font-size': '11px',
-                            'font-weight': '500',
+                            'background-color': '#ffffff',
+                            'color': '#1e293b',
+                            'font-family': '"Inter", system-ui, sans-serif',
+                            'font-size': '12px',
+                            'font-weight': '600',
                             'text-valign': 'center',
                             'text-halign': 'center',
-                            'border-width': 1.5,
-                            'border-color': '#e2e8f0',
+                            'border-width': '2px',
+                            'border-color': 'data(color)',
                             'text-wrap': 'wrap',
-                            'text-max-width': '120px',
-                            'padding': '8px',
+                            'text-max-width': '100px',
+                            'padding': '10px',
                             'shape': 'round-rectangle',
-                            'width': '140px',
-                            'height': '40px',
-                            'transition-property': 'background-color, border-color, width, height',
+                            'width': '150px',
+                            'height': '45px',
+                            'corner-radius': 10,
+                            'transition-property': 'all',
                             'transition-duration': '0.3s'
                         }
                     },
                     {
                         selector: 'node[type="ROOT"]',
                         style: {
-                            'background-color': '#0f172a',
+                            'background-color': '#1e293b',
                             'color': '#ffffff',
-                            'width': '80px',
-                            'height': '80px',
-                            'shape': 'ellipse',
-                            'font-weight': '700',
-                            'font-size': '12px'
+                            'width': '180px',
+                            'height': '56px',
+                            'font-size': '14px',
+                            'font-weight': '800',
+                            'border-width': 0,
+                            'shape': 'round-rectangle'
                         }
                     },
                     {
@@ -247,14 +790,17 @@
                     {
                         selector: 'edge',
                         style: {
-                            'width': 1.5,
+                            'width': 2,
                             'line-color': '#cbd5e1',
-                            'curve-style': 'bezier',
+                            'curve-style': 'taxi',
+                            'taxi-direction': 'auto',
+                            'taxi-turn': '25px',
                             'target-arrow-shape': 'triangle',
                             'target-arrow-color': '#cbd5e1',
-                            'arrow-scale': 0.8,
-                            'target-distance-from-node': '4px',
-                            'opacity': 0.6
+                            'arrow-scale': 1.0,
+                            'opacity': 0.6,
+                            'transition-property': 'all',
+                            'transition-duration': '0.3s'
                         }
                     },
                     {
@@ -296,10 +842,10 @@
                 layout: { 
                     name: 'klay',
                     klay: {
+                        spacing: 80,
                         direction: 'RIGHT',
-                        spacing: 60,
-                        edgeSpacingFactor: 0.5,
-                        inLayerSpacingFactor: 1.5,
+                        edgeSpacingFactor: 0.2,
+                        inLayerSpacingFactor: 2.0,
                         layoutHierarchy: true
                     }
                 },

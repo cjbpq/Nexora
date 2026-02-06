@@ -208,6 +208,16 @@ class ConversationManager:
         
         with open(conversation_path, 'r', encoding='utf-8') as f:
             return json.load(f)
+
+    def get_message_count(self, conversation_id):
+        """
+        获取对话中的消息总数
+        """
+        try:
+            conversation = self.get_conversation(conversation_id)
+            return len(conversation.get('messages', []))
+        except:
+            return 0
     
     def list_conversations(self):
         """

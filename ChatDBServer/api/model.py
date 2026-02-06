@@ -11,6 +11,7 @@ import time
 from datetime import datetime
 from typing import List, Dict, Any, Optional, Generator
 from volcenginesdkarkruntime import Ark
+from openai import OpenAI
 from tools import TOOLS
 from database import User
 from conversation_manager import ConversationManager
@@ -24,10 +25,16 @@ def load_config():
         with open(CONFIG_PATH, 'r', encoding='utf-8') as f:
             return json.load(f)
     return {
+        "providers": {
+            "volcengine": {
+                "api_key": "",
+                "base_url": "https://ark.cn-beijing.volces.com/api/v3"
+            }
+        },
         "models": {
             "doubao-seed-1-6-251015": {
                 "name": "Doubao Seed 1.6 (251015)",
-                "api_key": ""
+                "provider": "volcengine"
             }
         },
         "default_model": "doubao-seed-1-6-251015"
@@ -42,10 +49,10 @@ if 'HTTPS_PROXY' in os.environ:
     del os.environ['HTTPS_PROXY']
 
 # 全局客户端缓存，实现连接池复用 (Keep-Alive)
-_ARK_CLIENT_CACHE = {}
+_CLIENT_CACHE = {}
 
 class Model:
-    """火山引擎大模型封装类"""
+    """大模型封装类 - 支持多供应商"""
     
     def __init__(
         self,
@@ -91,137 +98,90 @@ class Model:
         # 系统提示词
         self.system_prompt = system_prompt or self._get_default_system_prompt()
         
-        # 获取API Key
+        # 获取模型配置和供应商信息
         model_info = CONFIG.get('models', {}).get(self.model_name, {})
-        api_key = model_info.get('api_key', "")
+        self.provider = model_info.get('provider', 'volcengine')
+        provider_info = CONFIG.get('providers', {}).get(self.provider, {})
+        
+        api_key = provider_info.get('api_key', "")
+        base_url = provider_info.get('base_url')
 
-        # 初始化Ark客户端 (使用全局缓存实现连接复用)
-        # 这可以节省TCP握手和SSL协商的时间 (每次请求约减少 200ms - 500ms)
-        global _ARK_CLIENT_CACHE
-        if api_key in _ARK_CLIENT_CACHE:
-            self.client = _ARK_CLIENT_CACHE[api_key]
+        # 初始化客户端 (使用全局缓存实现连接复用)
+        global _CLIENT_CACHE
+        cache_key = f"{self.provider}_{api_key}"
+        
+        if cache_key in _CLIENT_CACHE:
+            self.client = _CLIENT_CACHE[cache_key]
         else:
             # 首次连接
-            print(f"[INIT] 创建新的Ark客户端连接 (Key: ...{api_key[-4:]})")
-            # 可以在这里通过 base_url 或 timeout 进行更细致的配置
-            self.client = Ark(
-                api_key=api_key,
-                timeout=120.0, # 增加默认超时以应对长时间思考
-                max_retries=2  # 网络抖动自动重试
-            )
-            _ARK_CLIENT_CACHE[api_key] = self.client
+            print(f"[INIT] 创建新的 {self.provider} 客户端连接 (Key: ...{api_key[-4:]})")
+            
+            if self.provider == 'volcengine':
+                self.client = Ark(
+                    api_key=api_key,
+                    base_url=base_url,
+                    timeout=120.0,
+                    max_retries=2
+                )
+            else:
+                # Stepfun 或其他 OpenAI 兼容接口
+                self.client = OpenAI(
+                    api_key=api_key,
+                    base_url=base_url,
+                    timeout=120.0
+                )
+            _CLIENT_CACHE[cache_key] = self.client
         
         # 工具定义
         self.tools = self._parse_tools(TOOLS)
     
     def _get_default_system_prompt(self) -> str:
-        """获取默认系统提示词"""
-        return """你是智能助手，可以管理知识库并回答问题。
+        """获取极简高效的系统提示词"""
+        return """你是智能知识库管家。
+**核心：**主动理解意图，禁止臆测。
+**流程：**优先 searchKeyword；查详情用 getBasisContent。联网、写长文、搜资料请直接 web_search 并 addBasis (无需询问)。
+**addBasis 标准：**学术报告级。包含：背景、核心概念(含表格对比)、深度分析、数据支撑、引用(含链接)、结论。要求详尽（3000字+）。
+**存库要求：**长文必存 Basis。用户偏好/重要近况存 Short。**禁止**自动记录系统提供的当前时间或环境信息到 Short 中，除非用户明确要求。
+**回复：**默认简洁，存库需详尽。所有总结需标注精确引用。使用 Markdown 格式。"""
 
-**核心原则：**
-1. 理解用户的真实意图，主动完成任务而不是反问
-2. 禁止编造或臆测用户没有问过的内容
-
-**知识库查询流程：**
-1. 优先使用 searchKeyword 快速搜索
-2. 如需完整内容，使用 getKnowledgeList + getBasisContent
-3. 历史对话查询：getContext / getContext_findKeyword / getMainTitle
-
-**工具使用规范：**
-- 当用户要求"添加XXX到知识库"或"丰富XXX资料"时，主动使用web_search联网搜索
-- 完成工具调用后必须给用户确认消息（如"已成功保存XXX"）
-- 禁止重复调用相同工具和参数
-- 失败后应调整参数或更换工具，多次失败直接告知用户
-
-**联网搜索规则：**
-- 用户要求查询最新信息、添加知识、丰富资料时，直接使用web_search
-- 不要问用户"需要搜索吗"，直接执行搜索
-- 搜索完成后立即整理结果并保存到知识库（使用addBasis）
-
-**内容质量要求：**
-- 用户要求攥写长篇文章的时候自动保存到知识库
-- 总结内容到知识库的时候必须详细表示引用和引用连接到文章末尾，包括连接和资料精确位置
-- 总结内容的时候特殊数据例如百分比信息、统计数据、时间节点等必须精确无误和引用来源
-
-**字数要求**
-- 用户要求简介输出的时候自行控制字数
-- 用户要求添加内容到知识库的时候必须详细精确、至少回复一段内容，但越详细越好
-- 用户要求总结知识库的时候或你自行总结知识库的时候需要区分短期记忆和长期记忆
-- 长期记忆即知识库
-- 短期记忆用于记录用户的喜好偏向、最近在做的事，这个需要频繁主动记录
-
-**基础知识（长期记忆）写作标准 - 核心要求：**
-使用 addBasis 保存长期记忆时，必须按照以下学术报告级别的标准执行：
-
-1. **内容深度与广度：**
-   - 最低要求：3000字以上，优秀标准：5000-10000字
-   - 必须包含：背景介绍、核心概念、详细分析、数据支撑、对比总结、展望结论
-   - 横向对比时：逐项对比所有关键参数，制作完整对比表格
-   - 技术说明时：原理、实现、优缺点、应用场景、最佳实践全面覆盖
-
-2. **数据与引用要求：**
-   - 所有数据必须精确标注来源（含页码/章节/时间戳）
-   - 引用格式：`[来源名称](链接) - 第X页/第X章节 - 发布时间`
-   - 统计数据必须包含：数值、单位、统计时间、样本量、数据源
-   - 文末必须有完整的「参考资料」章节，列出所有引用来源
-
-3. **结构化组织：**
-   - 使用清晰的Markdown层级标题（# ## ### ####）
-   - 复杂信息必须使用表格对比（| 参数 | 型号A | 型号B | 说明 |）
-   - 关键概念用列表展开（- 要点1: 详细说明...）
-   - 技术参数用代码块标注
-
-4. **质量检查清单：**
-   ✓ 是否包含至少3个主要章节？
-   ✓ 每个关键论点是否有数据/案例支撑？
-   ✓ 是否提供了至少3个有效引用链接？
-   ✓ 对比分析是否覆盖所有核心维度？
-   ✓ 结论是否有前瞻性观点？
-
-**错误示例（禁止）：**
-❌ "索尼A7 IV是一款全画幅相机，3300万像素，性能不错。"
-
-**正确示例（参考）：**
-✅ 完整报告包含：
-- 产品背景与市场定位（500字+）
-- 核心技术参数详解（1000字+，含表格对比）
-- 性能测试数据分析（800字+，引用专业评测）
-- 与竞品横向对比（1000字+，多维度表格）
-- 使用场景与最佳实践（500字+）
-- 总结与选购建议（300字+）
-- 参考资料（完整链接列表）
-
-使用 Markdown 格式回复。"""
-    
     def _parse_tools(self, tools_config: List[Dict]) -> List[Dict]:
-        """解析工具定义为API格式"""
+        """解析工具定义为API格式 - 兼容不同供应商"""
         parsed_tools = []
         
-        # 添加内置web_search工具
-        # 注意: 某些新版模型可能更倾向于使用 "web_search" type 显式声明
-        parsed_tools.append({
-            "type": "web_search"
-            # 移除 "limit": 10，使用默认值，避免 invalid parameter error
-        })
+        # 1. 火山引擎专用：内置 web_search
+        provider = getattr(self, 'provider', 'volcengine')
+        if provider == 'volcengine':
+            parsed_tools.append({
+                "type": "web_search"
+            })
         
-        # 解析自定义function工具
+        # 2. 解析自定义 function 工具
         for tool in tools_config:
             if tool["type"] == "function":
                 func_def = tool["function"]
-                # 不要排除 searchOnline。如果模型习惯调用它，我们应该允许。
-                # 并在 _execute_function 中将其映射到 web_search 逻辑，或者提示模型改用 web_search。
-                # 但更简单的做法是：仍然排除它，但在System Prompt里强调 "Use web_search tool".
                 
-                # 之前代码排除 searchOnline 是为了强制模型使用 native web_search
-                if func_def["name"] == "searchOnline":
+                # 排除被 native web_search 替代的冗余工具
+                if func_def["name"] in ["searchOnline", "web_search"] and provider == 'volcengine':
                      continue
                 
-                parsed_tools.append({
-                    "type": "function",
-                    "name": func_def["name"],
-                    "description": func_def["description"],
-                    "parameters": func_def.get("parameters", {})
-                })
+                if provider == 'volcengine':
+                    # 火山引擎 responses API 使用扁平结构
+                    parsed_tools.append({
+                        "type": "function",
+                        "name": func_def["name"],
+                        "description": func_def["description"],
+                        "parameters": func_def.get("parameters", {})
+                    })
+                else:
+                    # 标准 OpenAI 格式 (Stepfun 等)
+                    parsed_tools.append({
+                        "type": "function",
+                        "function": {
+                            "name": func_def["name"],
+                            "description": func_def["description"],
+                            "parameters": func_def.get("parameters", {})
+                        }
+                    })
         return parsed_tools
     
     def _execute_function(self, function_name: str, arguments: str) -> str:
@@ -257,12 +217,33 @@ class Model:
                             return f"错误：参数 '{key}' 的值似乎是嵌套函数调用 '{value[:50]}'。请先单独调用该函数获取结果。"
             
             # 执行函数
-            return self._execute_function_impl(function_name, args)
+            raw_result = self._execute_function_impl(function_name, args)
+            
+            # [TOKEN 优化] 智能脱水处理
+            return self._sanitize_function_result(raw_result, function_name)
             
         except json.JSONDecodeError as e:
             return f"错误：参数JSON解析失败 - {str(e)}"
         except Exception as e:
             return f"错误：{str(e)}"
+
+    def _sanitize_function_result(self, result: Any, func_name: str) -> str:
+        """对函数输出进行'脱水'处理，防止 Context 溢出"""
+        if not isinstance(result, str):
+            result = str(result)
+            
+        # 设定阈值：2500 字符 (约 1500-2000 tokens)
+        limit = 2500
+        if len(result) <= limit:
+            return result
+            
+        # 超过限制，保留头部 1200 和 尾部 800
+        print(f"[TOKEN_OPT] 对工具 {func_name} 的结果进行了脱水 (原长度: {len(result)})")
+        prefix = result[:1200]
+        suffix = result[-800:]
+        omitted_len = len(result) - 2000
+        
+        return f"{prefix}\n\n... [数据过长，已自动省略 {omitted_len} 字符。如果需要读取中间内容，请使用 getContext 指定范围阅读] ...\n\n{suffix}"
     
     def _execute_function_impl(self, function_name: str, args: Dict) -> str:
         """函数执行实现"""
@@ -399,6 +380,71 @@ class Model:
                 args.get("offset", 0)
             )
         
+        elif function_name == "web_search":
+            query = args.get("query", "")
+            print(f"[SEARCH] 执行联网搜索: {query}")
+            
+            # 如果是外部模型调用此函数，我们使用一个支持搜索的火山引擎模型来中转获取结果
+            try:
+                # 寻找配置好的搜索模型，默认回退
+                volc_provider = CONFIG.get('providers', {}).get('volcengine', {})
+                volc_key = volc_provider.get('api_key')
+                volc_url = volc_provider.get('base_url')
+                
+                # 优先使用配置中的 websearch_model
+                volc_model = CONFIG.get('websearch_model')
+                
+                # 如果没配 websearch_model，则找第一个火山模型
+                if not volc_model:
+                    for m_id, m_info in CONFIG.get('models', {}).items():
+                        if m_info.get('provider') == 'volcengine':
+                            volc_model = m_id
+                            break
+                
+                if not volc_key or not volc_model:
+                    return f"错误：未配置火山引擎(Ark)模型或API Key，无法执行联网搜索。"
+                
+                print(f"[SEARCH] 使用搜索中转模型: {volc_model}")
+                
+                from volcenginesdkarkruntime import Ark
+                search_client = Ark(api_key=volc_key, base_url=volc_url)
+                
+                # 调用带搜索插件的模型
+                # 对于火山引擎，开启联网搜索的最佳实践是使用 extra_headers
+                # 并且不一定要传入 tools (除非是必须通过 tools 触发生命周期的模型)
+                response = search_client.chat.completions.create(
+                    model=volc_model,
+                    messages=[
+                        {"role": "system", "content": "你是一个联网搜索助手。请根据搜索结果直接回答用户的问题，不要解释搜索过程。"},
+                        {"role": "user", "content": query}
+                    ],
+                    # 提示模型立即使用搜索
+                    extra_headers={"x-ark-enable-web-search": "true"}, 
+                    stream=False
+                )
+                
+                # 获取结果，同时兼容思维链和正文
+                search_result = ""
+                message = response.choices[0].message
+                
+                # 优先获取 content
+                if hasattr(message, 'content') and message.content:
+                    search_result = message.content
+                
+                # 如果正文为空，尝试获取 reasoning_content (针对推理模型如 R1)
+                elif hasattr(message, 'reasoning_content') and message.reasoning_content:
+                    search_result = f"[思考过程]\n{message.reasoning_content}"
+                
+                # 如果还是为空，由于开启了 web_search，可能结果在 tool_calls 的输出里（虽然 stream=False 通常不该这样）
+                if not search_result:
+                    search_result = "联网搜索成功，但模型未返回具体文本结果。可能该关键词没有找到对应的信息，或模型策略拦截了输出。"
+                
+                return f"联网搜索结果 for '{query}':\n\n{search_result}"
+                
+            except Exception as e:
+                print(f"[ERROR] 联网搜索失败: {e}")
+                return f"联网搜索执行失败: {str(e)}"
+        
         # 知识图谱
         elif function_name == "analyzeConnections":
             connections = self.user.get_knowledge_connections(args.get("title", ""))
@@ -464,7 +510,12 @@ class Model:
             if not self.conversation_id:
                 self.conversation_id = self.conversation_manager.create_conversation()
             
-            # 保存用户消息
+            # 发送模型信息（前端显示模型小字提示）
+            yield {
+                "type": "model_info", 
+                "model_name": self.model_name, 
+                "provider": self.provider
+            }
             # 暂存 file_ids 到 metadata
             metadata = {}
             if file_ids:
@@ -538,25 +589,29 @@ class Model:
                         previous_response_id=previous_response_id,
                         enable_thinking=enable_thinking,
                         enable_tools=enable_tools,
-                        current_function_outputs=current_function_outputs  # 传递当前轮的function结果
+                        current_function_outputs=current_function_outputs
                     )
                     
-                    # 调用API
-                    print(f"[DEBUG_API] 发送请求 (Input Type: {'Messages' if 'messages' in str(request_params.get('input')) else 'Other'})")
+                    # 关键：清除已消耗的函数输出，防止在下一轮中重复发送
+                    current_function_outputs = []
                     
-                    # -------------------------------------------------------------
-                    # Robust Retry Logic for Context Mismatch (400)
-                    # -------------------------------------------------------------
+                    # 调用API
+                    print(f"[DEBUG_API] 发送请求 (Provider: {self.provider})")
+                    
                     response_iterator = None
                     try:
-                        response_iterator = self.client.responses.create(**request_params)
-                        # Test iterator initialization by peeking (optional, but iteration triggers validation)
+                        if self.provider == 'volcengine':
+                            response_iterator = self.client.responses.create(**request_params)
+                        else:
+                            # Stepfun / OpenAI 兼容接口
+                            response_iterator = self.client.chat.completions.create(**request_params)
                     except Exception as e:
-                         pass # Handle below
+                         # 统一错误处理，稍后会由 retry 逻辑捕捉或重抛
+                         pass
 
-                    # We need to wrap the iteration in a way that catches the error 
-                    # which might happen during the First yield of the stream
-                    
+                    # -------------------------------------------------------------
+                    # Robust Retry Logic (主用于火山引擎 Context Mismatch)
+                    # -------------------------------------------------------------
                     def safe_iter(iterator):
                         try:
                             for item in iterator:
@@ -564,22 +619,22 @@ class Model:
                         except Exception as e:
                             raise e 
                     
-                    # Manual Retry Loop
-                    # We use a flag to indicate if we are in the "Retry" phase
                     is_retry_mode = False
-                    
                     try:
-                         # Attempt 1
-                         if response_iterator is None: # Creation failed
-                             # Re-create inside try to catch creation errors
-                             response_iterator = self.client.responses.create(**request_params)
-                         
+                         if response_iterator is None:
+                             if self.provider == 'volcengine':
+                                 response_iterator = self.client.responses.create(**request_params)
+                             else:
+                                 response_iterator = self.client.chat.completions.create(**request_params)
                          chunks = safe_iter(response_iterator)
                     except Exception as e:
                         error_str = str(e)
-                        if "previous_response_id" in error_str and "400" in error_str and "previous_response_id" in request_params:
-                             print(f"[ERROR] 捕获 Context Mismatch (400) on Init. Retrying without ID...")
-                             del request_params["previous_response_id"]
+                        if self.provider == 'volcengine' and "previous_response_id" in error_str and "400" in error_str:
+                             print(f"[ERROR] 捕获 Context Mismatch (400). Retrying with FULL context...")
+                             # 关键修复：当 resumption 失败时，必须将 input 恢复为完整的 messages 历史，否则模型会丢失上下文
+                             request_params["input"] = messages
+                             if "previous_response_id" in request_params:
+                                 del request_params["previous_response_id"]
                              previous_response_id = None
                              response_iterator = self.client.responses.create(**request_params)
                              chunks = safe_iter(response_iterator)
@@ -588,133 +643,143 @@ class Model:
                              raise e
 
                     # Process Stream
-                    print(f"[DEBUG_API] 请求返回，开始处理流... (Retry Mode: {is_retry_mode})")
+                    print(f"[DEBUG_API] 请求返回，开始处理流... (Round: {round_num + 1}, Retry: {is_retry_mode})")
                     
                     # 处理响应流（直接在这里处理以支持实时yield）
                     round_content = ""
                     function_calls = []
                     has_web_search = False
-                    current_function_outputs = []  # 重置当前轮的function输出
-                    if not is_retry_mode:
-                         # implied previous_response_id logic... but we reset it for the loop
-                         pass 
-                    previous_response_id = None # Will be updated from stream
                     
-                    # 记录本轮的事件
-                    current_round_steps = []
+                    # [FIX] 内部去重标志：防止某些模型同时输出 reasoning_text 和 reasoning_summary_text 导致前端重复
+                    has_received_detail_reasoning = False
                     
                     try:
                         for chunk in chunks:
-                            chunk_type = getattr(chunk, 'type', None)
+                            # --- 处理：火山引擎 (Ark Responses API 专用结构) ---
+                            if self.provider == 'volcengine':
+                                chunk_type = getattr(chunk, 'type', None)
+                                chunk_type_str = str(chunk_type)
+                                
+                                # 获取 response_id
+                                if hasattr(chunk, 'response'):
+                                    response_obj = getattr(chunk, 'response')
+                                    if hasattr(response_obj, 'id') and response_obj.id:
+                                        # 更新 persistent ID 供下轮使用
+                                        previous_response_id = response_obj.id
+                                
+                                # 文本增量 - 兼容多种可能的 chunk 类型
+                                if chunk_type in ['response.output_text.delta', 'response.message.delta']:
+                                    delta = getattr(chunk, 'delta', '')
+                                    if delta:
+                                        round_content += delta
+                                        accumulated_content += delta
+                                        yield {"type": "content", "content": delta}
                             
-                            # 获取 response_id
-                            if hasattr(chunk, 'response'):
-                                response_obj = getattr(chunk, 'response')
-                                if hasattr(response_obj, 'id'):
-                                    previous_response_id = response_obj.id
-                            
-                            # 文本增量 - 立即yield给前端
-                            if chunk_type == 'response.output_text.delta':
-                                delta = getattr(chunk, 'delta', '')
-                                round_content += delta
-                                accumulated_content += delta
-                                yield {"type": "content", "content": delta}
-                        
-                            # 思考过程增量 (如果模型支持)
-                            elif chunk_type in ['response.reasoning_text.delta', 'response.reasoning_summary_text.delta']:
-                                delta = getattr(chunk, 'delta', '')
-                                accumulated_reasoning += delta  # 累积思维链
-                                yield {"type": "reasoning_content", "content": delta}
+                                # 思考过程增量 (核心修复: 重新兼容 summary 类型，并防止 detail 和 summary 同时出现时的视觉重复)
+                                elif 'reasoning' in chunk_type_str and 'delta' in chunk_type_str:
+                                    # 优先判断是否是详情型推理
+                                    is_detail = 'reasoning_text.delta' in chunk_type_str or 'reasoning.delta' == chunk_type_str
+                                    is_summary = 'reasoning_summary_text.delta' in chunk_type_str
+                                    
+                                    if is_detail:
+                                        has_received_detail_reasoning = True
+                                        
+                                    # 如果已经收到过详情(Detail)，则忽略后续可能的摘要(Summary)，防止重复显示
+                                    if is_summary and has_received_detail_reasoning:
+                                        continue
+                                        
+                                    delta = getattr(chunk, 'delta', '')
+                                    if delta:
+                                        accumulated_reasoning += delta
+                                        yield {"type": "reasoning_content", "content": delta}
 
-                            # 函数参数增量 - 静默处理
-                            elif chunk_type == 'response.function_call_arguments.delta':
-                                pass
-                        
-                            # -------------------------------------------------------------
-                            # 核心修复: 过滤掉云端自动注入的"Current time"类系统干扰
-                            # -------------------------------------------------------------
-                            elif chunk_type == 'response.output_item.done':
-                                item = getattr(chunk, 'item', None)
-                                if item:
-                                    # 1. 提取 Search Keyword
-                                    item_type = getattr(item, 'type', '')
-                                    if 'web_search_call' in item_type:
-                                        action = getattr(item, 'action', None)
-                                        if action:
-                                            query = getattr(action, 'query', None)
-                                            if query:
-                                                print(f"[WEB_SEARCH] 捕捉到关键词: {query}")
-                                                # 前端即使收到中间状态，只要 query 字段有值就会更新UI
-                                                step = {
-                                                    "type": "web_search", 
-                                                    "content": f"正在搜索: {query}",
-                                                    "status": "正在搜索",
-                                                    "query": query
-                                                }
+                                # 核心修复: 过滤干扰并按序提取
+                                elif chunk_type == 'response.output_item.done':
+                                    item = getattr(chunk, 'item', None)
+                                    if item:
+                                        item_type = getattr(item, 'type', '')
+                                        # 1. 提取 Search Keyword
+                                        if 'web_search' in item_type:
+                                            action = getattr(item, 'action', None)
+                                            if action and hasattr(action, 'query'):
+                                                query = action.query
+                                                step = {"type": "web_search", "content": f"正在搜索: {query}", "status": "正在搜索", "query": query}
                                                 yield step
                                                 process_steps.append(step)
-                            
-                            # Web搜索事件
-                            elif chunk_type in ['response.web_search_call.in_progress',
-                                            'response.web_search_call.searching', 
-                                            'response.web_search_call.completed']:
-                                has_web_search = True
-                                status_map = {
-                                    'response.web_search_call.in_progress': '准备搜索',
-                                    'response.web_search_call.searching': '正在搜索',
-                                    'response.web_search_call.completed': '搜索完成'
-                                }
-                                status = status_map.get(chunk_type, chunk_type)
+                                        
+                                        # 2. 只有在没有产生任何 delta 文本的情况下才使用 done 的文本，防止重复
+                                        elif item_type == 'text' and not round_content:
+                                            text_content = getattr(item, 'content', '')
+                                            if text_content:
+                                                round_content += text_content
+                                                accumulated_content += text_content
+                                                yield {"type": "content", "content": text_content}
                                 
-                                # 注意: 搜索关键词通常在 response.output_item.done 事件中，这里可能拿不到
-                                # 但保留此处的逻辑以防万一
-                                query_text = ""
-                                ws_obj = getattr(chunk, 'web_search_call', None) or getattr(chunk, 'web_search', None)
-                                if ws_obj:
-                                    query_text = getattr(ws_obj, 'query', "")
-                                
-                                step_content = f"{status}: {query_text}" if query_text else status
-                                print(f"[WEB_SEARCH] {status}")
-
-                                # 避免重复发送"搜索完成"且无内容的消息，防止前端闪烁或重复
-                                if chunk_type == 'response.web_search_call.completed':
-                                    pass
-                                else:
-                                    step = {
-                                        "type": "web_search", 
-                                        "content": step_content,
-                                        "status": status,
-                                        "query": query_text
-                                    }
+                                # Web搜索实时状态
+                                elif 'web_search_call.searching' in str(chunk_type) or 'web_search_call.completed' in str(chunk_type):
+                                    has_web_search = True
+                                    status = '正在搜索' if 'searching' in str(chunk_type) else '搜索完成'
+                                    query_text = ""
+                                    ws_obj = getattr(chunk, 'web_search_call', None) or getattr(chunk, 'web_search', None)
+                                    if ws_obj: query_text = getattr(ws_obj, 'query', "")
+                                    step = {"type": "web_search", "content": f"{status}: {query_text}" if query_text else status, "status": status, "query": query_text}
                                     yield step
                                     process_steps.append(step)
 
-
-                            # 响应完成 - 提取函数调用
-                            elif chunk_type == 'response.completed':
-                                response_obj = getattr(chunk, 'response', None)
-                                if response_obj and hasattr(response_obj, 'output'):
-                                    output = response_obj.output
-                                    for item in output:
-                                        item_type = getattr(item, 'type', None)
-                                        if item_type == 'function_call':
-                                            function_calls.append({
-                                                "name": getattr(item, 'name', None),
-                                                "arguments": getattr(item, 'arguments', '{}'),
-                                                "call_id": getattr(item, 'call_id', None)
-                                            })
-                                
                                 # Token统计
-                                if hasattr(response_obj, 'usage'):
-                                    usage = response_obj.usage
-                                    print(f"[TOKEN] Input: {usage.input_tokens}, Output: {usage.output_tokens}, Total: {usage.total_tokens}")
-                                    yield {
-                                        "type": "token_usage",
-                                        "input_tokens": usage.input_tokens,
-                                        "output_tokens": usage.output_tokens,
-                                        "total_tokens": usage.total_tokens
-                                    }
-                                    # 记录日志到文件
+                                elif chunk_type == 'response.completed':
+                                    response_obj = getattr(chunk, 'response', None)
+                                    if response_obj and hasattr(response_obj, 'output'):
+                                        output = response_obj.output
+                                        for item in output:
+                                            if getattr(item, 'type', None) == 'function_call':
+                                                function_calls.append({"name": getattr(item, 'name', None), "arguments": getattr(item, 'arguments', '{}'), "call_id": getattr(item, 'call_id', None)})
+                                    
+                                    # Token统计
+                                    if hasattr(response_obj, 'usage'):
+                                        usage = response_obj.usage
+                                        yield {"type": "token_usage", "input_tokens": usage.input_tokens, "output_tokens": usage.output_tokens, "total_tokens": usage.total_tokens}
+                                        self._log_token_usage_safe(usage, has_web_search, function_calls, process_steps, msg)
+                                
+                                else:
+                                    # 未知类型记录 (仅调试)
+                                    # print(f"[DEBUG_CHUNK] Unknown Volc chunk type: {chunk_type}")
+                                    pass
+                            
+                            # --- 处理：标准 OpenAI / Stepfun 结构 ---
+                            else:
+                                if not chunk.choices:
+                                    continue
+                                
+                                delta = chunk.choices[0].delta
+                                
+                                # 文本内容
+                                if hasattr(delta, 'content') and delta.content:
+                                    round_content += delta.content
+                                    accumulated_content += delta.content
+                                    yield {"type": "content", "content": delta.content}
+                                
+                                # 思维链 (Stepfun/Kimi/DeepSeek 兼容字段)
+                                if hasattr(delta, 'reasoning_content') and delta.reasoning_content:
+                                    accumulated_reasoning += delta.reasoning_content
+                                    yield {"type": "reasoning_content", "content": delta.reasoning_content}
+                                
+                                # 函数调用 (OpenAI 标准流式格式)
+                                if hasattr(delta, 'tool_calls') and delta.tool_calls:
+                                    for tc in delta.tool_calls:
+                                        if tc.index >= len(function_calls):
+                                            function_calls.append({"name": "", "arguments": "", "call_id": tc.id})
+                                        
+                                        f_info = function_calls[tc.index]
+                                        if tc.id: f_info["call_id"] = tc.id
+                                        if tc.function:
+                                            if tc.function.name: f_info["name"] += tc.function.name
+                                            if tc.function.arguments: f_info["arguments"] += tc.function.arguments
+
+                                # Token统计 (部分 OpenAI Provider 在最后一个 chunk 的 usage 字段)
+                                if hasattr(chunk, 'usage') and chunk.usage:
+                                    usage = chunk.usage
+                                    yield {"type": "token_usage", "input_tokens": usage.prompt_tokens, "output_tokens": usage.completion_tokens, "total_tokens": usage.total_tokens}
                                     self._log_token_usage_safe(usage, has_web_search, function_calls, process_steps, msg)
                     
                     
@@ -726,24 +791,23 @@ class Model:
                              print("[CRITICAL] Context consistency error detected.")
                         raise e
 
-                    # 检查 previous_response_id 获取情况
-                    if previous_response_id:
-                        print(f"[DEBUG] 已捕获 Response ID: {previous_response_id}")
-                    else:
-                        print(f"[WARNING] 本轮未能捕获 Response ID，下轮将回退到全量上下文传输 (Token开销增加)")
+                    # 检查 previous_response_id 获取情况 (仅针对火山引擎)
+                    if self.provider == 'volcengine':
+                        if previous_response_id:
+                            print(f"[DEBUG] 已捕获 Response ID: {previous_response_id}")
+                        else:
+                            print(f"[WARNING] 本轮未能捕获 Response ID，下轮将回退到全量上下文传输 (Token开销增加)")
 
                     # 本轮文本内容作为步骤加入
                     if round_content:
-                        # 注意：这里我们加入的是本轮产生的content，方便前端按顺序渲染
                         process_steps.append({"type": "content", "content": round_content})
-                        # yield {"type": "content", "content": round_content} # 之前已经yield了delta
                     
                     # 处理函数调用
                     if function_calls:
                         # -------------------------------------------------------------
                         # [FIX] 核心修复: 构建 Assistant Message (Tool Calls) 并加入历史
                         # 确保多轮对话上下文完整 (User -> Assistant[Call] -> Tool[Output])
-                        # 否则在 Context Cache 失效回退时，Tool Output 会成为无头消息，导致模型死循环
+                        # 对于 OpenAI/GitHub 等模型，content 必须为 None 或省略，如果只有 tool_calls
                         # -------------------------------------------------------------
                         tool_calls_payload = []
                         for fc in function_calls:
@@ -756,12 +820,18 @@ class Model:
                                 }
                             })
                         
-                        # 只有当messages不为空时才追加(理论上肯定不为空)
-                        messages.append({
+                        # 构建助手的工具调用消息
+                        assistant_tool_msg = {
                             "role": "assistant",
-                            "content": round_content or "",
                             "tool_calls": tool_calls_payload
-                        })
+                        }
+                        # 对于标准 OpenAI 格式，如果 content 为空字符串，建议设为 None 或完全不传
+                        if round_content:
+                            assistant_tool_msg["content"] = round_content
+                        else:
+                            assistant_tool_msg["content"] = None
+                            
+                        messages.append(assistant_tool_msg)
                         
                         function_outputs = []
                         
@@ -797,10 +867,29 @@ class Model:
                             yield step_result
                             
                             # 收集函数输出
+                            if self.provider == 'volcengine':
+                                current_function_outputs.append({
+                                    "type": "function_call_output",
+                                    "call_id": call_id,
+                                    "output": result
+                                })
+                            else:
+                                # OpenAI 标准格式需要 role: tool
+                                current_function_outputs.append({
+                                    "role": "tool",
+                                    "tool_call_id": call_id,
+                                    "content": result
+                                })
+                        
+                        # [FIX] 在工具调用结束后，添加一个隐形的引导提示，防止模型复读或卡住
+                        # 仅针对火山引擎 (Ark Responses API)，帮助其更好地从工具结果切换回文本回复
+                        if self.provider == 'volcengine':
+                            # 提取本次调用的工具名称
+                            tool_names = list(set([fc["name"] for fc in function_calls]))
+                            # 使用 system 角色提供指令引导，使用中文以符合主要交互语言
                             current_function_outputs.append({
-                                "type": "function_call_output",
-                                "call_id": call_id,
-                                "output": result
+                                "role": "system",
+                                "content": f"[系统指令] 你已完成工具调用: {', '.join(tool_names)}。请根据返回的工具结果，继续完成对用户的回答或做出最终总结。"
                             })
                         
                         # 继续下一轮（保持messages累积，但current_function_outputs已重置）
@@ -812,8 +901,7 @@ class Model:
                             print(f"[DEBUG_HIST] 倒数第二条: {messages[-2].get('role')} (Tools: {len(messages[-2].get('tool_calls', []))})")
                             print(f"[DEBUG_HIST] 最后一条: {messages[-1].get('role')} (Type: {messages[-1].get('type', 'text')})")
 
-                        # 通知前端清除上一轮的临时content显示（如果需要清空以便重新生成解释）
-                        # 但这里我们希望保留历史content，所以不需要 clear_round_content
+                        # 继续循环下一轮
                         continue
                     
                     # 没有函数调用，对话结束
@@ -829,15 +917,25 @@ class Model:
                 # 只有当有内容或有步骤时才保存
                 if accumulated_content or process_steps:
                     print(f"[DEBUG] 保存助手消息，Steps: {len(process_steps)}")
-                    metadata = {"process_steps": process_steps}
+                    metadata = {
+                        "process_steps": process_steps,
+                        "model_name": self.model_name
+                    }
                     
-                    # 自动生成对话标题（使用conclusion_model）
+                    # 自动生成对话标题（根据配置决定是否每轮都总结）
                     if accumulated_content:
                         try:
-                            title = self._generate_conversation_title(msg, accumulated_content)
-                            metadata["exchange_summary"] = title
-                            # 更新对话标题
-                            self.conversation_manager.update_conversation_title(self.conversation_id, title)
+                            # 仅在第一轮或开启 continuous_summary 时生成标题
+                            should_generate = True
+                            if not CONFIG.get("continuous_summary", False):
+                                is_first_round = self.conversation_manager.get_message_count(self.conversation_id) <= 2 # user + assistant=2
+                                should_generate = is_first_round
+                            
+                            if should_generate:
+                                title = self._generate_conversation_title(msg, accumulated_content)
+                                metadata["exchange_summary"] = title
+                                # 更新对话标题
+                                self.conversation_manager.update_conversation_title(self.conversation_id, title)
                         except Exception as e:
                             print(f"[ERROR] 自动生成标题失败: {e}")
                     
@@ -922,43 +1020,40 @@ class Model:
                     except:
                         pass
                 
+            # 适配不同 SDK 的 Token 字段命名 (OpenAI 使用 prompt_tokens/completion_tokens)
+            input_tokens = getattr(usage, 'input_tokens', getattr(usage, 'prompt_tokens', 0))
+            output_tokens = getattr(usage, 'output_tokens', getattr(usage, 'completion_tokens', 0))
+                
             self.user.log_token_usage(
                 self.conversation_id or "unknown", 
                 conv_title, 
                 action_type, 
-                usage.input_tokens, 
-                usage.output_tokens
+                input_tokens, 
+                output_tokens
             )
         except Exception as e:
             print(f"[WARNING] 记录Token日志失败: {e}")
 
     def _build_initial_messages(self, user_msg: str) -> List[Dict]:
-        """构建初始消息列表"""
-        messages = [
-            {"role": "system", "content": self.system_prompt}
-        ]
+        """构建初始消息列表 (优化 Prefix Caching)"""
+        # 合并 System Prompt 和 历史摘要到第一条消息，以最大化 Prompt Caching 命中率
+        full_system_content = self.system_prompt
         
         # 添加最近交流概览（上下文）
         if self.conversation_id:
             recent_summaries = self.conversation_manager.get_recent_exchange_summaries(
-                self.conversation_id, limit=2  # 优化：从3减少到2，减少Token使用和上下文处理时间
+                self.conversation_id, limit=3
             )
             if recent_summaries:
-                context_summary = "## 最近交流概览\n"
+                context_summary = "\n\n## 历史上下文概览 (Stable Context)\n"
                 for i, exchange in enumerate(recent_summaries, 1):
-                    # 截断过长的用户输入
-                    user_text = exchange['user']
-                    if len(user_text) > 50:
-                        user_text = user_text[:50] + "..."
-                    
-                    context_summary += f"{i}. 用户: {user_text}\n"
-                    if 'summary' in exchange:
-                         context_summary += f"   AI总结: {exchange['summary']}\n"
-                
-                messages.append({
-                    "role": "system",
-                    "content": context_summary + "\n(历史摘要已简化，如需精确历史请调用 getContext)"
-                })
+                    user_text = exchange['user'][:40] + "..." if len(exchange['user']) > 40 else exchange['user']
+                    context_summary += f"{i}. 用户: {user_text} | AI总结: {exchange.get('summary', '无')}\n"
+                full_system_content += context_summary
+
+        messages = [
+            {"role": "system", "content": full_system_content}
+        ]
         
         # 添加用户消息
         messages.append({"role": "user", "content": user_msg})
@@ -973,7 +1068,13 @@ class Model:
         """剔除消息中的reasoning_content字段（符合文档要求）"""
         cleaned = []
         for msg in messages:
-            cleaned_msg = {"role": msg["role"], "content": msg["content"]}
+            # [FIX] 增加安全性：检查 role 字段是否存在
+            # 针对火山引擎 (Ark)，某些消息可能是 OutputItem (如 function_call_output)，没有 role
+            if "role" not in msg:
+                cleaned.append(dict(msg)) # 直接保留副本
+                continue
+                
+            cleaned_msg = {"role": msg["role"], "content": msg.get("content", "")}
             # 保留其他必要字段（如tool_calls等），但排除reasoning_content
             for key in msg:
                 if key not in ["role", "content", "reasoning_content", "metadata"]:
@@ -986,15 +1087,24 @@ class Model:
         try:
             conclusion_model = CONFIG.get('conclusion_model', 'doubao-seed-1-6-flash-250828')
             model_info = CONFIG.get('models', {}).get(conclusion_model, {})
-            api_key = model_info.get('api_key', "")
+            provider_name = model_info.get('provider', 'volcengine')
+            provider_info = CONFIG.get('providers', {}).get(provider_name, {})
             
-            # 创建临时客户端用于生成标题
-            global _ARK_CLIENT_CACHE
-            if api_key in _ARK_CLIENT_CACHE:
-                client = _ARK_CLIENT_CACHE[api_key]
+            api_key = provider_info.get('api_key', "")
+            base_url = provider_info.get('base_url')
+            
+            # 使用统一的缓存逻辑
+            global _CLIENT_CACHE
+            cache_key = f"{provider_name}_{api_key}"
+            
+            if cache_key in _CLIENT_CACHE:
+                client = _CLIENT_CACHE[cache_key]
             else:
-                client = Ark(api_key=api_key, timeout=30.0)
-                _ARK_CLIENT_CACHE[api_key] = client
+                if provider_name == 'volcengine':
+                    client = Ark(api_key=api_key, base_url=base_url, timeout=30.0)
+                else:
+                    client = OpenAI(api_key=api_key, base_url=base_url, timeout=30.0)
+                _CLIENT_CACHE[cache_key] = client
             
             # 构建prompt
             prompt = f"""根据以下对话内容，生成一个简洁准确的标题（10-20字）。
@@ -1011,11 +1121,18 @@ class Model:
 标题："""
             
             # 调用API
-            response = client.chat.completions.create(
-                model=conclusion_model,
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=50
-            )
+            if provider_name == 'volcengine':
+                response = client.chat.completions.create(
+                    model=conclusion_model,
+                    messages=[{"role": "user", "content": prompt}],
+                    stream=False
+                )
+            else:
+                response = client.chat.completions.create(
+                    model=conclusion_model,
+                    messages=[{"role": "user", "content": prompt}],
+                    stream=False
+                )
             
             title = response.choices[0].message.content.strip()
             # 清理可能的引号
@@ -1037,50 +1154,71 @@ class Model:
         enable_tools: bool,
         current_function_outputs: List[Dict] = None
     ) -> Dict:
-        """构建API请求参数"""
+        """构建API请求参数 - 兼容不同供应商"""
+        
+        # 基础参数
         params = {
             "model": self.model_name,
-            "stream": True,
-            # 设置最大输出长度，支持详尽的报告级内容（回答+思维链总长度）
-            # doubao-seed-1-6-251015的上下文窗口为96k，思维链窗口32k
-            # 设置16k可支持5000-10000字的详细报告（约15000-30000 tokens）
-            "max_output_tokens": 65536   # 16k tokens，足够支持详尽的学术报告
+            "stream": True
         }
-        
-        # 启用深度思考（新版模型支持与Tools同时使用）
-        if enable_thinking:
-            params["thinking"] = {"type": "enabled"}
-        else:
-             params["thinking"] = {"type": "disabled"}
-        
-        if enable_tools:
-            params["tools"] = self.tools
-            # 注意：max_tool_calls 仅支持内置工具，自定义function不支持
-        
-        # 核心逻辑修改：支持 Context Caching
-        if previous_response_id is None:
-            # 场景1：无缓存，发送完整历史
-            params["input"] = messages
-            print(f"[DEBUG_REQ] Round 1 (No Cache) Input Messages Count: {len(messages)}")
-        else:
-            params["previous_response_id"] = previous_response_id
+
+        # --- 火山引擎 (Ark Responses API) 专用逻辑 ---
+        if self.provider == 'volcengine':
+            # params["max_output_tokens"] = 65536
             
-            # 场景2：函数调用中间轮（有 Function Outputs）
-            if current_function_outputs:
-                params["input"] = current_function_outputs
-                print(f"[DEBUG_REQ] Continuing Round - Func Outputs: {len(current_function_outputs)}")
-            
-            # 场景3：Context Caching 命中（首轮，但有之前的ID）
-            # 此时 messages 应该只包含新的用户消息
-            elif messages:
-                params["input"] = messages
-                print(f"[DEBUG_REQ] Round 1 (Cache Hit) Input Messages Count: {len(messages)}")
-            
+            if enable_thinking:
+                params["thinking"] = {"type": "enabled"}
             else:
-                # 场景4：异常空输入
-                print("[WARNING] 发送了空User消息！")
-                params["input"] = [{"role": "user", "content": ""}]
-        
+                 params["thinking"] = {"type": "disabled"}
+            
+            if enable_tools:
+                params["tools"] = self.tools
+            
+            if previous_response_id is None:
+                params["input"] = messages
+            else:
+                params["previous_response_id"] = previous_response_id
+                if current_function_outputs:
+                    params["input"] = current_function_outputs
+                elif messages:
+                    params["input"] = messages
+                else:
+                    params["input"] = [{"role": "user", "content": ""}]
+                    
+        # --- 通用 OpenAI / Stepfun 逻辑 ---
+        else:
+            # Stepfun / OpenAI 标准参数
+            # [FIX] 对于 OpenAI o1/o3 或 GPT-5 等新模型，'max_tokens' 被替换为 'max_completion_tokens'
+            is_new_reasoning_model = any(x in self.model_name.lower() for x in ["o1", "o3", "gpt-5", "gpt5", "reasoning"])
+            
+            # if is_new_reasoning_model:
+            #     params["max_completion_tokens"] = 8192
+            # else:
+            #     params["max_tokens"] = 8192  # 标准模型通常限制在 4k 或 8k，除非特定长文本模型
+            
+            if enable_tools:
+                # [FIX] GitHub Inference 的 Phi-4-reasoning 和 DeepSeek-R1 等模型不支持工具调用
+                # 即使提供了 tools，后端也会报错: "auto" tool choice requires --enable-auto-tool-choice
+                # 因此我们需要彻底剥离这些模型在特定 Provider 下的工具参数
+                is_reasoning_only = any(x in self.model_name.lower() for x in ["-reasoning", "deepseek-r1", "qwq-32b"])
+                
+                # 如果是这类模型，我们强制不开启 tools
+                if is_reasoning_only and self.provider in ["github", "suanli"]:
+                     print(f"[DEBUG] [Phi-4-FIX] 模型 {self.model_name} 在 {self.provider} 下检测到 Reasoning，屏蔽 tools 以避免 400 错误。")
+                else:
+                    params["tools"] = self.tools
+                    # [FIX] 针对 GitHub 上的普通 Phi-4 模型，不要传 tool_choice，否则可能 400
+                    if "phi-4" in self.model_name.lower() and self.provider == "github":
+                        pass
+                    else:
+                        # 只有非 Phi-4/Reasoning 模型才显式设置或允许 auto 行为（由 API 默认控制）
+                        pass
+            
+            # 标准 OpenAI 格式使用 messages 数组
+            # 注意：对于非火山引擎模型，messages 列表已经由 sendMessage 循环维护好了正确的 role
+            # 剔除可能存在的 reasoning_content 或其他非标准字段，确保兼容性
+            params["messages"] = self._strip_reasoning_content(list(messages))
+            
         return params
     
     def _append_function_outputs(

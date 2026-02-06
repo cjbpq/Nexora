@@ -61,8 +61,14 @@ def login():
         if users[username]['password'] != password:
             return jsonify({'success': False, 'message': '密码错误'})
         
+        # 更新登录IP
+        users[username]['last_ip'] = request.remote_addr
+        with open('./data/user.json', 'w', encoding='utf-8') as f:
+            json.dump(users, f, indent=4, ensure_ascii=False)
+            
         # 登录成功
         session['username'] = username
+        session['role'] = users[username].get('role', 'member')
         session.permanent = True
         return jsonify({'success': True, 'message': '登录成功'})
         
@@ -86,6 +92,226 @@ def require_login(f):
             return jsonify({'success': False, 'message': '请先登录'}), 401
         return f(*args, **kwargs)
     return decorated_function
+
+
+def require_admin(f):
+    """管理员专用装饰器"""
+    from functools import wraps
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if 'username' not in session:
+            return jsonify({'success': False, 'message': '请先登录'}), 401
+        if session.get('role') != 'admin':
+            return jsonify({'success': False, 'message': '权限不足，仅管理员可访问'}), 403
+        return f(*args, **kwargs)
+    return decorated_function
+
+
+# ==================== 用户信息 API ====================
+
+@app.route('/api/user/info', methods=['GET'])
+def get_user_info():
+    """获取当前登录用户的信息"""
+    if 'username' not in session:
+        return jsonify({'success': False, 'message': '未登录'}), 401
+    return jsonify({
+        'success': True,
+        'username': session.get('username'),
+        'role': session.get('role', 'member')
+    })
+
+
+# ==================== 管理后台 API ====================
+
+@app.route('/api/admin/users', methods=['GET'])
+@require_admin
+def admin_get_users():
+    """获取所有用户信息"""
+    try:
+        with open('./data/user.json', 'r', encoding='utf-8') as f:
+            users = json.load(f)
+        
+        user_list = []
+        for uname, info in users.items():
+            # 计算总 token 消耗 (从 token_usage.json 读取)
+            total_tokens = 0
+            # 这里我们简化一下，假设存在一个全局或用户目录下的 token_usage.json
+            user_token_file = os.path.join(os.path.dirname(__file__), f"data/users/{uname}/token_usage.json")
+            if os.path.exists(user_token_file):
+                try:
+                    with open(user_token_file, 'r', encoding='utf-8') as tf:
+                        tokens = json.load(tf)
+                        for log in tokens:
+                            total_tokens += log.get('input_tokens', 0) + log.get('output_tokens', 0)
+                except:
+                    pass
+            
+            user_list.append({
+                'username': uname,
+                'password': info.get('password'), # 管理员可见密码，符合用户要求
+                'role': info.get('role', 'member'),
+                'last_ip': info.get('last_ip', '未知'),
+                'total_token_usage': total_tokens
+            })
+            
+        return jsonify({'success': True, 'users': user_list})
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)})
+
+
+@app.route('/api/admin/user/add', methods=['POST'])
+@require_admin
+def admin_add_user():
+    """添加用户"""
+    data = request.get_json()
+    username = data.get('username')
+    password = data.get('password')
+    role = data.get('role', 'member')
+    
+    if not username or not password:
+        return jsonify({'success': False, 'message': '用户名和密码不能为空'})
+        
+    try:
+        with open('./data/user.json', 'r', encoding='utf-8') as f:
+            users = json.load(f)
+            
+        if username in users:
+            return jsonify({'success': False, 'message': '用户已存在'})
+            
+        # 初始化用户目录
+        user_path = f"./data/users/{username}/"
+        os.makedirs(user_path, exist_ok=True)
+        os.makedirs(user_path + "database/", exist_ok=True)
+        os.makedirs(user_path + "conversations/", exist_ok=True)
+        
+        # 初始化 database.json
+        db_file = user_path + "database.json"
+        if not os.path.exists(db_file):
+            with open(db_file, 'w', encoding='utf-8') as f:
+                json.dump({"data_short": {}, "data_basis": {}}, f, indent=4, ensure_ascii=False)
+        
+        users[username] = {
+            "username": username,
+            "password": password,
+            "path": user_path,
+            "role": role,
+            "last_ip": "从未登录"
+        }
+        
+        with open('./data/user.json', 'w', encoding='utf-8') as f:
+            json.dump(users, f, indent=4, ensure_ascii=False)
+            
+        return jsonify({'success': True, 'message': '用户添加成功'})
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)})
+
+
+@app.route('/api/admin/user/delete', methods=['POST'])
+@require_admin
+def admin_delete_user():
+    """删除用户"""
+    data = request.get_json()
+    username = data.get('target_username')
+    
+    if username == session['username']:
+        return jsonify({'success': False, 'message': '不能删除自己'})
+        
+    try:
+        with open('./data/user.json', 'r', encoding='utf-8') as f:
+            users = json.load(f)
+            
+        if username not in users:
+            return jsonify({'success': False, 'message': '用户不存在'})
+            
+        del users[username]
+        
+        with open('./data/user.json', 'w', encoding='utf-8') as f:
+            json.dump(users, f, indent=4, ensure_ascii=False)
+            
+        # 注意：此处不主动删除磁盘文件，以防操作失误（数据无价）
+        return jsonify({'success': True, 'message': '用户账号已注销'})
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)})
+
+
+@app.route('/api/admin/user/role', methods=['POST'])
+@require_admin
+def admin_set_role():
+    """修改用户权限"""
+    data = request.get_json()
+    username = data.get('username') or data.get('target_username')
+    new_role = data.get('role') # 'admin' or 'member'
+    
+    if not username or not new_role:
+        return jsonify({'success': False, 'message': '参数不完整'})
+        
+    if username == session.get('username'):
+        return jsonify({'success': False, 'message': '管理员不能修改自己的权限'})
+        
+    try:
+        with open('./data/user.json', 'r', encoding='utf-8') as f:
+            users = json.load(f)
+            
+        if username not in users:
+            return jsonify({'success': False, 'message': '用户不存在'})
+            
+        users[username]['role'] = new_role
+        
+        with open('./data/user.json', 'w', encoding='utf-8') as f:
+            json.dump(users, f, indent=4, ensure_ascii=False)
+            
+        return jsonify({'success': True, 'message': f'用户 {username} 已设为 {new_role}'})
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)})
+
+@app.route('/api/admin/user/password', methods=['POST'])
+@require_admin
+def admin_set_password():
+    """修改用户密码"""
+    data = request.get_json()
+    username = data.get('target_username')
+    new_password = data.get('password')
+    
+    if not username or not new_password:
+        return jsonify({'success': False, 'message': '参数不完整'})
+        
+    try:
+        with open('./data/user.json', 'r', encoding='utf-8') as f:
+            users = json.load(f)
+            
+        if username not in users:
+            return jsonify({'success': False, 'message': '用户不存在'})
+            
+        users[username]['password'] = new_password
+        
+        with open('./data/user.json', 'w', encoding='utf-8') as f:
+            json.dump(users, f, indent=4, ensure_ascii=False)
+            
+        return jsonify({'success': True, 'message': '密码重置成功'})
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)})
+
+
+@app.route('/api/admin/tokens/stats', methods=['GET'])
+@require_admin
+def admin_token_stats():
+    """获取所有用户的总 token 消耗"""
+    try:
+        total_tokens = 0
+        user_dir = os.path.join(os.path.dirname(__file__), "data/users")
+        for username in os.listdir(user_dir):
+            token_file = os.path.join(user_dir, username, "token_usage.json")
+            if os.path.exists(token_file):
+                try:
+                    with open(token_file, 'r', encoding='utf-8') as f:
+                        logs = json.load(f)
+                        for log in logs:
+                            total_tokens += log.get('input_tokens', 0) + log.get('output_tokens', 0)
+                except:
+                    pass
+        return jsonify({'success': True, 'total': total_tokens})
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)})
 
 
 # ==================== 聊天相关 ====================
@@ -219,7 +445,9 @@ def get_config():
             for model_id, info in config.get('models', {}).items():
                 models_info.append({
                     'id': model_id,
-                    'name': info['name']
+                    'name': info['name'],
+                    'provider': info.get('provider', 'volcengine'),
+                    'status': info.get('status', 'normal')
                 })
                 
             return jsonify({

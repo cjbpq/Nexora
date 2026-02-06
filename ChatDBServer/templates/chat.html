@@ -13,6 +13,7 @@
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/easymde/dist/easymde.min.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/11.1.1/marked.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
@@ -28,7 +29,7 @@
         <!-- Sidebar: Navigation -->
         <nav class="sidebar" id="sidebar">
             <div class="sidebar-header">
-                <div class="logo">ChatDB<span class="dot">.</span></div>
+                <div class="logo">ChatDB<span class="dot"></span></div>
                 <button class="btn-icon" id="toggleSidebarMobile" style="display:none;">
                     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
                 </button>
@@ -47,14 +48,31 @@
             <div class="sidebar-footer">
                 <a href="/knowledge_graph" class="footer-link">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><line x1="2" y1="12" x2="22" y2="12"></line><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path></svg>
-                    <span>Knowledge Graph</span>
+                    <span>知识图谱</span>
                 </a>
-                <div class="user-profile">
-                    <div class="avatar">{{ username[0] | upper }}</div>
-                    <div class="username" title="{{ username }}">{{ username }}</div>
-                    <button class="btn-logout" onclick="window.location.href='/logout'" title="Logout">
-                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path><polyline points="16 17 21 12 16 7"></polyline><line x1="21" y1="12" x2="9" y2="12"></line></svg>
-                    </button>
+                
+                <div class="user-profile-button" id="usernameBtn">
+                    <div class="avatar-circle" id="sidebar-avatar">{{ username[0] | upper }}</div>
+                    <div class="user-info">
+                        <span class="user-name profile-name">{{ username }}</span>
+                    </div>
+                    <i class="fa-solid fa-ellipsis"></i>
+                    
+                    <div class="user-menu" id="userMenu">
+                        <a href="#" class="menu-item">
+                            <i class="fa-solid fa-gear"></i>
+                            <span>设置</span>
+                        </a>
+                        <a href="#" class="menu-item admin-only" id="adminBackendBtn" style="display:none;">
+                            <i class="fa-solid fa-shield-halved"></i>
+                            <span>管理</span>
+                        </a>
+                        <div class="menu-divider"></div>
+                        <a href="/logout" class="menu-item logout">
+                            <i class="fa-solid fa-right-from-bracket"></i>
+                            <span>退出</span>
+                        </a>
+                    </div>
                 </div>
             </div>
         </nav>
@@ -171,17 +189,51 @@
 
         <!-- Token Modal (Overlay) -->
         <div id="tokenModal" class="modal-backdrop">
-            <div class="modal">
+            <div class="modal token-modal-custom">
                 <div class="modal-head">
-                    <h3>Token Usage</h3>
-                    <button id="closeModalBtn" class="btn-icon-small">✕</button>
+                    <div class="head-title">
+                        <h3>Token 使用详情</h3>
+                    </div>
+                    <button id="closeModalBtn" class="btn-close-circle" type="button">×</button>
                 </div>
                 <div class="modal-body">
-                    <div class="stat-row">
-                        <span>Total:</span> <span id="modalTotalTokens" class="mono">0</span>
+                    <div class="token-summary-grid">
+                        <div class="stat-card total">
+                            <span class="label">累计消耗</span>
+                            <span id="modalTotalTokens" class="value mono">0</span>
+                        </div>
+                        <div class="stat-card today">
+                            <span class="label">今日消耗</span>
+                            <span id="modalTodayTokens" class="value mono">0</span>
+                        </div>
                     </div>
-                    <div class="stat-row">
-                        <span>Today:</span> <span id="modalTodayTokens" class="mono">0</span>
+                    
+                    <div class="token-logs-section">
+                        <div class="section-header">
+                            <h4>最近记录</h4>
+                            <span class="hint">显示最近 20 条</span>
+                        </div>
+                        <div class="token-table-wrapper">
+                            <table class="token-table">
+                                <colgroup>
+                                    <col class="col-time">
+                                    <col class="col-title">
+                                    <col class="col-type">
+                                    <col class="col-num">
+                                </colgroup>
+                                <thead>
+                                    <tr>
+                                        <th>时间</th>
+                                        <th>对话/操作</th>
+                                        <th>类型</th>
+                                        <th class="num">合计</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="tokenLogsTableBody">
+                                    <!-- 由 JS 注入 -->
+                                </tbody>
+                            </table>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -189,7 +241,105 @@
     </div>
 
     <!-- Scripts -->
-    <script src="/static/js/chat.js?v=20260204"></script>
+    <script src="/static/js/chat.js?v=20260205"></script>
+
+    <!-- 管理后台模态窗口 -->
+    <div id="adminModal" class="modal-backdrop">
+        <div class="modal admin-modal-custom">
+            <div class="modal-head">
+                <div class="head-title">
+                    <h3>管理后台</h3>
+                </div>
+                <button id="closeAdminModal" class="btn-close-circle" type="button">×</button>
+            </div>
+            <div class="modal-body">
+                <div class="admin-tabs">
+                    <button class="admin-tab active" data-tab="users">用户管理</button>
+                    <button class="admin-tab" data-tab="stats">统计信息</button>
+                </div>
+
+                <!-- 用户管理标签 -->
+                <div id="users-tab" class="admin-tab-content active">
+                    <div style="margin-bottom: 16px;">
+                        <button class="btn-primary" id="openAddUserForm">+ 添加新用户</button>
+                    </div>
+
+                    <!-- 用户列表 -->
+                    <div class="admin-table-wrapper">
+                        <table class="admin-table">
+                            <thead>
+                                <tr>
+                                    <th>用户名</th>
+                                    <th>密码</th>
+                                    <th>最后登入IP</th>
+                                    <th>消耗(Tokens)</th>
+                                    <th>角色</th>
+                                    <th>操作</th>
+                                </tr>
+                            </thead>
+                            <tbody id="adminUsersList"></tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- 统计信息标签 -->
+                <div id="stats-tab" class="admin-tab-content">
+                    <div class="admin-stats-grid">
+                        <div class="stat-card">
+                            <span class="label">总用户数</span>
+                            <span id="statTotalUsers" class="value mono">-</span>
+                        </div>
+                        <div class="stat-card">
+                            <span class="label">管理员数</span>
+                            <span id="statAdminCount" class="value mono">-</span>
+                        </div>
+                        <div class="stat-card">
+                            <span class="label">总Token消耗</span>
+                            <span id="statTotalTokens" class="value mono">-</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 添加用户表单 -->
+    <div id="addUserModal" class="modal-backdrop" style="z-index: 2200;">
+        <div class="modal" style="width: 400px; padding: 0;">
+            <div class="modal-head">
+                <div class="head-title">
+                    <h3>新增用户</h3>
+                </div>
+                <button id="cancelAddUser" class="btn-close-circle" type="button">×</button>
+            </div>
+            <div class="modal-body" style="padding: 16px 20px;">
+                <div class="admin-form">
+                    <div class="form-group">
+                        <label>用户名</label>
+                        <input type="text" id="formUsername" class="input-modern" placeholder="用户名...">
+                    </div>
+                    <div class="form-group">
+                        <label>密码</label>
+                        <input type="password" id="formPassword" class="input-modern" placeholder="密码...">
+                    </div>
+                    <div class="form-group">
+                        <label>角色</label>
+                        <select id="formRole" class="input-modern">
+                            <option value="member">Member</option>
+                            <option value="admin">Admin</option>
+                        </select>
+                    </div>
+                    <div class="form-footer" style="margin-top: 16px;">
+                        <button id="addUserBtn" class="btn-primary" style="width: 100%;">确认添加</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+            </div>
+        </div>
+    </div>
+
     <style>
         /* Specific overrides */
         .knowledge-sidebar.visible { width: 300px; border-left: 1px solid #eee; }
