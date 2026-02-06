@@ -189,6 +189,18 @@ function initUI() {
     // Check user role and show admin menu if needed
     checkUserRole();
 
+    // Settings button click
+    const settingsBtn = document.getElementById('settingsBtn');
+    if (settingsBtn) {
+        settingsBtn.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            if (els.userMenu) els.userMenu.classList.remove('active');
+            // Currently settings is a placeholder
+            showToast('设置功能稍后上线');
+        });
+    }
+
     // Admin button click
     const adminBtn = document.getElementById('adminBackendBtn');
     if (adminBtn) {
@@ -818,10 +830,16 @@ function createContentSpan(parentMsgDiv) {
     return span;
 }
 
-function appendMessage(msg) {
+function appendMessage(msg, index) {
+    // If index is not provided (live message), calculate it based on current message count
+    if (index === undefined || index === null) {
+        index = els.messagesContainer.querySelectorAll('.message').length;
+    }
+    
     const div = document.createElement('div');
     div.className = `message ${msg.role}`;
     if (msg.pending) div.classList.add('pending');
+    div.dataset.index = index;
     
     // Avatar for AI
     if (msg.role === 'assistant') {
@@ -841,6 +859,17 @@ function appendMessage(msg) {
         bubble.className = 'message-bubble';
         bubble.textContent = msg.content;
         content.appendChild(bubble);
+        
+        // User Message Actions (only delete)
+        const actions = document.createElement('div');
+        actions.className = 'msg-actions';
+        actions.innerHTML = `
+            <button class="btn-action btn-del" onclick="confirmDelete(${index})" title="删除">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"></path></svg>
+            </button>
+        `;
+        content.appendChild(actions);
+
     } else {
         // AI Message
         
@@ -924,6 +953,41 @@ function appendMessage(msg) {
             badge.textContent = modelName;
             content.appendChild(badge);
         }
+
+        // AI Message Actions (Delete, Regenerate, Versioning)
+        const actions = document.createElement('div');
+        actions.className = 'msg-actions';
+        
+        // Branching (Versions)
+        const versions = msg.metadata?.versions || [];
+        if (versions.length > 0) {
+            // 在我们的逻辑中，versions 数组里存的是之前的版本
+            // 假设 versions 有 2 个元素，那么当前是第 3 个版本
+            const totalVersions = versions.length + 1;
+            const currentVerNum = totalVersions; // 默认当前显示的是最新的
+
+            actions.innerHTML += `
+                <div class="version-switcher">
+                    <button class="btn-ver" onclick="switchVersion(${index}, ${versions.length - 1})" title="查看上一版本">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="15 18 9 12 15 6"></polyline></svg>
+                    </button>
+                    <span>${currentVerNum} / ${totalVersions}</span>
+                    <button class="btn-ver" disabled title="已经是最新版本">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"></polyline></svg>
+                    </button>
+                </div>
+            `;
+        }
+
+        actions.innerHTML += `
+            <button class="btn-action" onclick="confirmRegenerate(${index})" title="重新回答">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 4v6h-6"></path><path d="M20.49 15a9 9 0 11-2.12-9.36L23 10"></path></svg>
+            </button>
+            <button class="btn-action btn-del" onclick="confirmDelete(${index})" title="删除">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"></path></svg>
+            </button>
+        `;
+        content.appendChild(actions);
     }
 
     els.messagesContainer.appendChild(div);
@@ -933,18 +997,291 @@ function appendMessage(msg) {
     if(welcome) welcome.remove();
 
     // Scroll
-    els.messagesContainer.scrollTop = els.messagesContainer.scrollHeight;
+    if (shouldAutoScroll) {
+        els.messagesContainer.scrollTop = els.messagesContainer.scrollHeight;
+    }
     
     return div; // Return main message div
 }
 
-function renderMessages(messages) {
+function renderMessages(messages, noScroll) {
     // preserve welcome if empty
     if(!messages || messages.length === 0) return;
     
+    // Save current scroll position
+    const oldScrollTop = els.messagesContainer.scrollTop;
+    const oldScrollHeight = els.messagesContainer.scrollHeight;
+
     els.messagesContainer.innerHTML = '';
-    messages.forEach(appendMessage);
+    messages.forEach((m, i) => appendMessage(m, i));
+    
+    // Restore or scroll
+    if (noScroll) {
+        // Try to maintain the relative scroll position if desired, 
+        // but usually for delete/version-switch we just want to stay where we are
+        els.messagesContainer.scrollTop = oldScrollTop;
+    } else if (shouldAutoScroll) {
+        els.messagesContainer.scrollTop = els.messagesContainer.scrollHeight;
+    }
 }
+
+// Global modal functions
+window.confirmDelete = function(index) {
+    if (!currentConversationId) {
+        alert("此对话尚未保存，无法删除");
+        return;
+    }
+    showConfirm("删除确认", "确定要删除这条消息及其后的所有内容吗？此操作不可撤销。", "danger", async () => {
+        try {
+            const res = await fetch('/api/delete_message', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    conversation_id: currentConversationId,
+                    index: index
+                })
+            });
+            const data = await res.json();
+            if(data.success) {
+                // Silent reload: fetch data and render without triggering initial animation effects
+                const convRes = await fetch(`/api/conversations/${currentConversationId}`);
+                const convData = await convRes.json();
+                if (convData.success) {
+                    renderMessages(convData.conversation.messages, true);
+                }
+            } else {
+                alert("删除失败: " + data.message);
+            }
+        } catch(e) { console.error(e); }
+    });
+};
+
+window.confirmRegenerate = function(index) {
+    if (!currentConversationId) {
+        alert("此对话尚未保存，无法重新回答");
+        return;
+    }
+    showConfirm("重新回答", "我们将保留当前回答并生成一个新版本，确定要重新生成吗？", "primary", async () => {
+        // Trigger regeneration
+        startRegenerate(index);
+    });
+};
+
+async function startRegenerate(index) {
+    if (isGenerating) return;
+    
+    const modelName = selectedModelId;
+    
+    // Setup UI for generation
+    isGenerating = true;
+    updateSendButtonState();
+    currentAbortController = new AbortController();
+    
+    try {
+        const response = await fetch('/api/chat/stream', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                conversation_id: currentConversationId,
+                model_name: modelName,
+                is_regenerate: true,
+                regenerate_index: index,
+                enable_thinking: els.checkThinking.checked,
+                enable_web_search: els.checkSearch.checked,
+                enable_tools: els.checkTools.checked,
+                show_token_usage: true
+            }),
+            signal: currentAbortController.signal
+        });
+
+        if (!response.ok) throw new Error("HTTP " + response.status);
+        
+        // Target specific message index for regeneration
+        const messageDiv = document.querySelector(`.message[data-index="${index}"]`);
+        if (messageDiv) {
+            const content = messageDiv.querySelector('.message-content');
+            // Clean content while keeping model badge and actions toolbar skeletal
+            const body = messageDiv.querySelector('.content-body');
+            if (body) body.innerHTML = '';
+            
+            // Remove existing thinking blocks to restart
+            const oldThinking = messageDiv.querySelector('.thinking-block');
+            if (oldThinking) oldThinking.remove();
+        }
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        
+        let accumulatedContent = "";
+
+        while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            
+            const chunk = decoder.decode(value);
+            const lines = chunk.split('\n');
+            
+            for (const line of lines) {
+                if (!line.startsWith('data: ')) continue;
+                try {
+                    const data = jsonParseSafe(line.substring(6));
+                    if(!data) continue;
+                    
+                    if (data.type === 'content') {
+                        accumulatedContent += data.content;
+                        updateMessageDivContent(index, accumulatedContent);
+                    } else if (data.type === 'reasoning_content') {
+                        updateMessageDivThinking(index, data.content);
+                    } else if (data.type === 'web_search' || data.type === 'function_call' || data.type === 'function_result') {
+                        updateMessageDivTools(index, data);
+                    }
+                } catch (e) { }
+            }
+        }
+        
+    } catch (e) {
+        if (e.name === 'AbortError') console.log("Generation stopped.");
+        else console.error(e);
+    } finally {
+        isGenerating = false;
+        updateSendButtonState();
+        
+        // Final refresh to ensure all metadata/indices are locked
+        const convRes = await fetch(`/api/conversations/${currentConversationId}`);
+        const convData = await convRes.json();
+        if (convData.success) {
+            renderMessages(convData.conversation.messages, true);
+        }
+    }
+}
+
+function jsonParseSafe(str) {
+    try { return JSON.parse(str); } catch(e) { return null; }
+}
+
+function updateMessageDivContent(index, fullText) {
+    const messageDiv = document.querySelector(`.message[data-index="${index}"]`);
+    if (!messageDiv) return;
+    
+    let body = messageDiv.querySelector('.content-body');
+    if (!body) {
+        body = document.createElement('div');
+        body.className = 'content-body';
+        messageDiv.querySelector('.message-content').appendChild(body);
+    }
+    
+    body.innerHTML = marked.parse(fullText);
+    renderMathInElement(body);
+    highlightCode(body);
+    
+    if (shouldAutoScroll) els.messagesContainer.scrollTop = els.messagesContainer.scrollHeight;
+}
+
+function updateMessageDivThinking(index, delta) {
+    const messageDiv = document.querySelector(`.message[data-index="${index}"]`);
+    if (!messageDiv) return;
+    
+    const content = messageDiv.querySelector('.message-content');
+    let thinkingBlock = messageDiv.querySelector('.thinking-block');
+    
+    if (!thinkingBlock) {
+        thinkingBlock = document.createElement('div');
+        thinkingBlock.className = 'thinking-block'; // No collapsed by default during live gen
+        thinkingBlock.innerHTML = `
+            <div class="thinking-header">
+                <svg class="thinking-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <circle cx="12" cy="12" r="10"></circle>
+                    <path d="M12 6v6l4 2"></path>
+                </svg>
+                <span class="thinking-title">思考过程</span>
+                <svg class="chevron-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <polyline points="6 9 12 15 18 9"></polyline>
+                </svg>
+            </div>
+            <div class="thinking-content"></div>
+        `;
+        content.prepend(thinkingBlock); 
+        
+        const header = thinkingBlock.querySelector('.thinking-header');
+        header.addEventListener('click', () => thinkingBlock.classList.toggle('collapsed'));
+    }
+    
+    const textTarget = thinkingBlock.querySelector('.thinking-content');
+    textTarget.textContent += delta;
+}
+
+function updateMessageDivTools(index, data) {
+    const messageDiv = document.querySelector(`.message[data-index="${index}"]`);
+    if (!messageDiv) return;
+    
+    if (data.type === 'web_search') {
+        updateWebSearchStatus(messageDiv, data.status, data.query, data.content);
+    } else if (data.type === 'function_call') {
+        appendToolEvent(messageDiv, data.name, data.arguments);
+    } else if (data.type === 'function_result') {
+        updateLastToolResult(messageDiv, data.name, data.result);
+    }
+}
+
+// Logic for Modal
+window.showConfirm = function(title, message, type, onOk) {
+    const backdrop = document.getElementById('confirmBackdrop');
+    const titleEl = document.getElementById('confirmTitle');
+    const msgEl = document.getElementById('confirmMessage');
+    const okBtn = document.getElementById('confirmOkBtn');
+    
+    if (!backdrop || !okBtn) return;
+
+    titleEl.textContent = title;
+    msgEl.textContent = message;
+    
+    // Cleanup old event listeners
+    const newOkBtn = okBtn.cloneNode(true);
+    okBtn.parentNode.replaceChild(newOkBtn, okBtn);
+    
+    // Explicitly set text and style to ensure visibility
+    if(type === 'danger') {
+        newOkBtn.textContent = "确认删除";
+        newOkBtn.className = "btn-confirm btn-confirm-del";
+    } else {
+        newOkBtn.textContent = "确定重新生成";
+        newOkBtn.className = "btn-confirm";
+    }
+    
+    backdrop.classList.add('active');
+    
+    newOkBtn.addEventListener('click', () => {
+        backdrop.classList.remove('active');
+        onOk();
+    });
+};
+
+window.closeConfirmModal = function() {
+    document.getElementById('confirmBackdrop').classList.remove('active');
+};
+
+window.switchVersion = async function(msgIndex, verIndex) {
+    try {
+        const res = await fetch('/api/switch_version', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                conversation_id: currentConversationId,
+                message_index: msgIndex,
+                version_index: verIndex
+            })
+        });
+        const data = await res.json();
+        if(data.success) {
+            // Switch also should be silent
+            const convRes = await fetch(`/api/conversations/${currentConversationId}`);
+            const convData = await convRes.json();
+            if (convData.success) {
+                renderMessages(convData.conversation.messages, true);
+            }
+        }
+    } catch(e) { console.error(e); }
+};
 
 
 // --- Knowledge ---
@@ -1407,9 +1744,15 @@ async function checkUserRole() {
 
             const adminBtn = document.getElementById('adminBackendBtn');
             if (data.role === 'admin') {
-                if (adminBtn) adminBtn.style.display = 'flex';
+                document.body.classList.add('is-admin');
+                if (adminBtn) {
+                    adminBtn.style.setProperty('display', 'flex', 'important');
+                }
             } else {
-                if (adminBtn) adminBtn.style.display = 'none';
+                document.body.classList.remove('is-admin');
+                if (adminBtn) {
+                    adminBtn.style.setProperty('display', 'none', 'important');
+                }
             }
         }
     } catch (err) {
@@ -1460,6 +1803,7 @@ async function loadAdminUsersList() {
                         </td>
                         <td>
                             <div style="display:flex; gap:8px;">
+                                <button class="btn-primary-outline" style="padding: 2px 8px; font-size: 11px;" onclick="openUserModelPerm('${user.username}')">模型</button>
                                 ${!isSelf ? `
                                     <button class="btn-primary-outline" onclick="changeUserRole('${user.username}', '${user.role === 'admin' ? 'member' : 'admin'}')">
                                         ${user.role === 'admin' ? '降级' : '提升'}
@@ -1475,9 +1819,92 @@ async function loadAdminUsersList() {
             }).join('');
         }
     } catch (err) {
-        console.error('Failed to load users list:', err);
+        console.error('Failed to load users list', err);
     }
 }
+
+// --- 模型权限管理 ---
+let currentTargetPermUser = null;
+
+window.openUserModelPerm = async function(username) {
+    currentTargetPermUser = username;
+    const modal = document.getElementById('modelPermModal');
+    if (!modal) return;
+    
+    const targetUserSpan = document.getElementById('permTargetUser');
+    if(targetUserSpan) targetUserSpan.textContent = username;
+    modal.classList.add('active');
+    
+    const listContainer = document.getElementById('modelPermList');
+    if(listContainer) {
+        listContainer.innerHTML = '<div style="padding: 20px; text-align: center; color: #666;">加载模型列表中...</div>';
+    }
+    
+    try {
+        const res = await fetch(`/api/admin/user/models?username=${encodeURIComponent(username)}`);
+        const data = await res.json();
+        
+        if (data.success && listContainer) {
+            listContainer.innerHTML = data.models.map(m => `
+                <div class="perm-item" style="display: flex; align-items: center; padding: 12px 20px; border-bottom: 1px solid #f1f5f9;">
+                    <label style="display: flex; align-items: center; cursor: pointer; width: 100%; margin: 0;">
+                        <input type="checkbox" class="model-perm-checkbox" data-id="${m.id}" ${!m.is_blocked ? 'checked' : ''} style="margin-right: 12px; width: 16px; height: 16px;">
+                        <div style="display: flex; flex-direction: column;">
+                            <span style="font-weight: 600; font-size: 14px; color: #1e293b;">${m.name}</span>
+                            <span style="font-size: 11px; color: #64748b; font-family: monospace;">${m.id}</span>
+                        </div>
+                    </label>
+                </div>
+            `).join('');
+        } else if (listContainer) {
+            listContainer.innerHTML = `<div style="padding: 20px; color: #ef4444;">${data.message || '获取失败'}</div>`;
+        }
+    } catch (err) {
+        if (listContainer) listContainer.innerHTML = '<div style="padding: 20px; color: #ef4444;">网络请求失败</div>';
+    }
+};
+
+window.saveUserModelPermissions = async function() {
+    if (!currentTargetPermUser) return;
+    
+    const checkboxes = document.querySelectorAll('.model-perm-checkbox');
+    const blocked_models = [];
+    checkboxes.forEach(cb => {
+        if (!cb.checked) {
+            blocked_models.push(cb.getAttribute('data-id'));
+        }
+    });
+    
+    try {
+        const res = await fetch('/api/admin/user/models/update', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                username: currentTargetPermUser,
+                blocked_models: blocked_models
+            })
+        });
+        const data = await res.json();
+        if (data.success) {
+            showToast('权限更新成功');
+            closeModelPermModal();
+            // 如果修改的是当前登录用户，则刷新页面
+            if (currentTargetPermUser === currentUsername) {
+                setTimeout(() => location.reload(), 800);
+            }
+        } else {
+            showToast('更新失败: ' + data.message);
+        }
+    } catch (err) {
+        showToast('保存时发生错误');
+    }
+};
+
+window.closeModelPermModal = function() {
+    const modal = document.getElementById('modelPermModal');
+    if (modal) modal.classList.remove('active');
+    currentTargetPermUser = null;
+};
 
 // 加载统计信息
 async function loadAdminStats() {

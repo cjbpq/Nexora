@@ -151,7 +151,7 @@ class ConversationManager:
             
             return last_id
 
-    def add_message(self, conversation_id, role, content, metadata=None):
+    def add_message(self, conversation_id, role, content, metadata=None, index=None):
         """
         添加消息到对话
         
@@ -160,6 +160,7 @@ class ConversationManager:
             role: 角色 (user/assistant/function)
             content: 消息内容
             metadata: 额外元数据（如函数调用信息、交流总结等）
+            index: 如果提供且有效，则覆盖该索引处的消息（用于重新生成覆盖旧回答）
         """
         conversation_path = os.path.join(self.base_path, f"{conversation_id}.json")
         
@@ -170,7 +171,7 @@ class ConversationManager:
         with open(conversation_path, 'r', encoding='utf-8') as f:
             conversation_data = json.load(f)
         
-        # 添加消息
+        # 准备消息
         message = {
             "role": role,
             "content": content,
@@ -178,19 +179,161 @@ class ConversationManager:
         }
         
         if metadata:
-            message["metadata"] = metadata
+            # 如果是覆盖现有消息（重新回答），保留原有的 versions 历史
+            if index is not None and 0 <= index < len(conversation_data["messages"]):
+                old_msg = conversation_data["messages"][index]
+                if "metadata" in old_msg and "versions" in old_msg["metadata"]:
+                    if "metadata" not in message:
+                        message["metadata"] = {}
+                    message["metadata"]["versions"] = old_msg["metadata"]["versions"]
+            
+            # 合并新传入的 metadata
+            if "metadata" not in message:
+                message["metadata"] = {}
+            message["metadata"].update(metadata)
         
         # 如果是assistant消息，且有exchange_summary，记录这次交流的总结
         if role == "assistant" and metadata and "exchange_summary" in metadata:
             message["exchange_summary"] = metadata["exchange_summary"]
         
-        conversation_data["messages"].append(message)
+        if index is not None and 0 <= index < len(conversation_data["messages"]):
+            conversation_data["messages"][index] = message
+        else:
+            conversation_data["messages"].append(message)
+            
         conversation_data["updated_at"] = datetime.now().isoformat()
         
         # 保存对话
         with open(conversation_path, 'w', encoding='utf-8') as f:
             json.dump(conversation_data, f, ensure_ascii=False, indent=2)
-    
+
+    def delete_message(self, conversation_id, message_index):
+        """
+        从对话中删除指定索引的消息
+        如果删除的是user消息，通常也会连带删除后面紧随的assistant消息
+        """
+        conversation_path = os.path.join(self.base_path, f"{conversation_id}.json")
+        if not os.path.exists(conversation_path):
+            return False
+            
+        with open(conversation_path, 'r', encoding='utf-8') as f:
+            conversation_data = json.load(f)
+            
+        messages = conversation_data.get("messages", [])
+        if 0 <= message_index < len(messages):
+            # 记录要删除的消息
+            msg_to_delete = messages[message_index]
+            
+            # 如果删除的是 user，且后面跟着 assistant，则一并删除这个“回合”
+            if msg_to_delete.get('role') == 'user' and message_index + 1 < len(messages):
+                if messages[message_index + 1].get('role') == 'assistant':
+                    messages.pop(message_index + 1)
+            
+            # 删除目标消息
+            messages.pop(message_index)
+            
+            conversation_data["updated_at"] = datetime.now().isoformat()
+            
+            with open(conversation_path, 'w', encoding='utf-8') as f:
+                json.dump(conversation_data, f, ensure_ascii=False, indent=2)
+            return True
+        return False
+
+    def save_message_version(self, conversation_id, message_index):
+        """
+        为指定消息保存一个历史版本（用于重新回答切换）
+        将当前内容移入元数据的 versions 列表中
+        """
+        conversation_path = os.path.join(self.base_path, f"{conversation_id}.json")
+        if not os.path.exists(conversation_path):
+            return False
+            
+        with open(conversation_path, 'r', encoding='utf-8') as f:
+            conversation_data = json.load(f)
+            
+        messages = conversation_data.get("messages", [])
+        if 0 <= message_index < len(messages):
+            msg = messages[message_index]
+            if msg.get('role') != 'assistant':
+                return False
+                
+            # 初始化 metadata 和 versions
+            if "metadata" not in msg:
+                msg["metadata"] = {}
+            if "versions" not in msg["metadata"]:
+                msg["metadata"]["versions"] = []
+                
+            # 保存当前内容到版本列表 (不含 versions 自身以防无限嵌套)
+            version_data = {
+                "content": msg.get("content", ""),
+                "timestamp": msg.get("timestamp", ""),
+                "metadata": {k: v for k, v in msg.get("metadata", {}).items() if k != "versions"}
+            }
+            if "exchange_summary" in msg:
+                version_data["exchange_summary"] = msg["exchange_summary"]
+                
+            msg["metadata"]["versions"].append(version_data)
+            
+            # 清空当前内容以便重新生成填充
+            msg["content"] = ""
+            # 保留除了 versions 以外的元数据作为骨架，或者视情况重置
+            # 这里我们重置 content，流式输出会更新它
+            
+            conversation_data["updated_at"] = datetime.now().isoformat()
+            with open(conversation_path, 'w', encoding='utf-8') as f:
+                json.dump(conversation_data, f, ensure_ascii=False, indent=2)
+            return True
+        return False
+
+    def switch_message_version(self, conversation_id, message_index, version_index):
+        """
+        切换到指定的历史版本
+        """
+        conversation_path = os.path.join(self.base_path, f"{conversation_id}.json")
+        if not os.path.exists(conversation_path):
+            return False
+            
+        with open(conversation_path, 'r', encoding='utf-8') as f:
+            conversation_data = json.load(f)
+            
+        messages = conversation_data.get("messages", [])
+        if 0 <= message_index < len(messages):
+            msg = messages[message_index]
+            versions = msg.get("metadata", {}).get("versions", [])
+            
+            if 0 <= version_index <= len(versions):
+                # 如果 version_index == len(versions)，表示当前就是最新（或正在切换回当前路径）
+                # 这里逻辑需要稍微绕一下：versions里存的是“旧版本”
+                # 我们把当前内容和目标版本互换
+                
+                # 简单做法：把当前所有可能的状态（当前+历史）看做一个池子
+                all_variants = versions + [{
+                    "content": msg.get("content", ""),
+                    "timestamp": msg.get("timestamp", ""),
+                    "metadata": {k: v for k, v in msg.get("metadata", {}).items() if k != "versions"},
+                    "exchange_summary": msg.get("exchange_summary")
+                }]
+                
+                target = all_variants[version_index]
+                
+                # 更新消息
+                msg["content"] = target["content"]
+                msg["timestamp"] = target["timestamp"]
+                if target.get("exchange_summary"):
+                    msg["exchange_summary"] = target["exchange_summary"]
+                elif "exchange_summary" in msg:
+                    del msg["exchange_summary"]
+                
+                # 更新元数据（保留 versions 列表）
+                msg["metadata"] = target.get("metadata", {})
+                msg["metadata"]["versions"] = [v for i, v in enumerate(all_variants) if i != version_index]
+                
+                conversation_data["updated_at"] = datetime.now().isoformat()
+                with open(conversation_path, 'w', encoding='utf-8') as f:
+                    json.dump(conversation_data, f, ensure_ascii=False, indent=2)
+                return True
+        return False
+
     def get_conversation(self, conversation_id):
         """
         获取对话记录

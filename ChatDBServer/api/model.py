@@ -500,7 +500,9 @@ class Model:
         enable_web_search: bool = True,
         enable_tools: bool = True,
         show_token_usage: bool = False,
-        file_ids: List[str] = None
+        file_ids: List[str] = None,
+        is_regenerate: bool = False,
+        regenerate_index: int = None
     ) -> Generator[Dict[str, Any], None, None]:
         """
         发送消息（支持多轮对话、流式输出、文件和Context Caching）
@@ -516,11 +518,22 @@ class Model:
                 "model_name": self.model_name, 
                 "provider": self.provider
             }
+
+            # 如果是重新生成，先处理版本保存
+            if is_regenerate and regenerate_index is not None:
+                # 注意：此时 msg 是触发重新生成的那个 user 消息
+                # 我们需要在添加新消息前，先把要覆盖的那个 assistant 消息存为版本
+                # 逻辑在 server.py 处理更合适，这里只负责清除 cache 强制重算
+                pass
+
             # 暂存 file_ids 到 metadata
             metadata = {}
             if file_ids:
                 metadata["file_ids"] = file_ids
-            self.conversation_manager.add_message(self.conversation_id, "user", msg, metadata=metadata)
+            
+            # 重新生成逻辑：不添加新消息，而是使用历史消息
+            if not is_regenerate:
+                self.conversation_manager.add_message(self.conversation_id, "user", msg, metadata=metadata)
             
             # 构造本次用户消息内容 (多模态)
             # 如果没有文件，直接使用字符串，避免API兼容性问题 (Error: unknown type: text)
@@ -542,6 +555,12 @@ class Model:
                 self.conversation_id, 
                 current_model_name=self.model_name
             )
+            
+            # 如果是重新生成，必须清除 last_response_id，因为上下文已经改变（分支了）
+            if is_regenerate:
+                print(f"[REGENERATE] Cleared Context Cache for branching.")
+                last_response_id = None
+
             previous_response_id = None
             messages = []
 
@@ -947,7 +966,8 @@ class Model:
                         self.conversation_id,
                         "assistant",
                         accumulated_content,
-                        metadata=metadata
+                        metadata=metadata,
+                        index=regenerate_index if is_regenerate else None
                     )
                 
                 # 保存 Context Cache ID

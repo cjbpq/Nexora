@@ -112,12 +112,26 @@ def require_admin(f):
 @app.route('/api/user/info', methods=['GET'])
 def get_user_info():
     """获取当前登录用户的信息"""
-    if 'username' not in session:
+    username = session.get('username')
+    if not username:
         return jsonify({'success': False, 'message': '未登录'}), 401
+    
+    # 实时从数据库/文件读取角色，确保权限更改实时生效
+    role = 'member'
+    try:
+        with open('./data/user.json', 'r', encoding='utf-8') as f:
+            users = json.load(f)
+            if username in users:
+                role = users[username].get('role', 'member')
+                # 同时更新 session 以保持同步
+                session['role'] = role
+    except Exception as e:
+        print(f"Error reading user info: {e}")
+        
     return jsonify({
         'success': True,
-        'username': session.get('username'),
-        'role': session.get('role', 'member')
+        'username': username,
+        'role': role
     })
 
 
@@ -429,20 +443,75 @@ def delete_conversation(conv_id):
     return jsonify({'success': success})
 
 
+@app.route('/api/delete_message', methods=['POST'])
+@require_login
+def delete_message():
+    data = request.json
+    if not data:
+        return jsonify({"success": False, "message": "No data provided"}), 400
+        
+    username = session['username']
+    conv_id = data.get('conversation_id')
+    index = data.get('index')
+    
+    if conv_id is None:
+        return jsonify({"success": False, "message": "Missing conversation_id"}), 400
+    if index is None:
+        return jsonify({"success": False, "message": "Missing index"}), 400
+        
+    manager = ConversationManager(username)
+    if manager.delete_message(conv_id, int(index)):
+        return jsonify({"success": True})
+    return jsonify({"success": False, "message": "Failed to delete"}), 500
+
+
+@app.route('/api/switch_version', methods=['POST'])
+@require_login
+def switch_version():
+    data = request.json
+    if not data:
+        return jsonify({"success": False, "message": "No data provided"}), 400
+        
+    username = session['username']
+    conv_id = data.get('conversation_id')
+    msg_index = data.get('message_index')
+    ver_index = data.get('version_index')
+    
+    if conv_id is None or msg_index is None or ver_index is None:
+        return jsonify({"success": False, "message": "Missing data"}), 400
+        
+    manager = ConversationManager(username)
+    if manager.switch_message_version(conv_id, int(msg_index), int(ver_index)):
+        return jsonify({"success": True})
+    return jsonify({"success": False, "message": "Failed to switch version"}), 500
+
 
 @app.route('/api/config', methods=['GET'])
 @require_login
 def get_config():
-    """获取系统配置（模型列表等）"""
+    """获取系统配置（根据权限过滤模型列表）"""
+    username = session.get('username')
     try:
+        # 加载黑名单配置
+        blacklist_path = './data/model_permissions.json'
+        blacklist = []
+        if os.path.exists(blacklist_path):
+            with open(blacklist_path, 'r', encoding='utf-8') as f:
+                perm_config = json.load(f)
+                # 获取该用户的黑名单
+                user_blacklists = perm_config.get('user_blacklists', {})
+                blacklist = user_blacklists.get(username, perm_config.get('default_blacklist', []))
+
         CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.json')
         if os.path.exists(CONFIG_PATH):
             with open(CONFIG_PATH, 'r', encoding='utf-8') as f:
                 config = json.load(f)
                 
-            # 只返回前端需要的信息，不返回API Key
+            # 只返回前端需要的信息，并排除黑名单中的模型
             models_info = []
             for model_id, info in config.get('models', {}).items():
+                if model_id in blacklist:
+                    continue
                 models_info.append({
                     'id': model_id,
                     'name': info['name'],
@@ -457,6 +526,81 @@ def get_config():
             })
     except Exception as e:
         return jsonify({'success': False, 'message': str(e)})
+
+# ==================== 管理员：模型权限控制 API ====================
+
+@app.route('/api/admin/user/models', methods=['GET'])
+@require_admin
+def admin_get_user_models():
+    """获取用户可用的模型列表（带黑名单标记）"""
+    target_username = request.args.get('username')
+    if not target_username:
+        return jsonify({"success": False, "message": "Missing username"}), 400
+        
+    try:
+        # 1. 获取所有可用模型
+        CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.json')
+        with open(CONFIG_PATH, 'r', encoding='utf-8') as f:
+            full_config = json.load(f)
+            all_models = full_config.get('models', {})
+
+        # 2. 获取该用户的黑名单
+        blacklist_path = './data/model_permissions.json'
+        blacklist = []
+        if os.path.exists(blacklist_path):
+            with open(blacklist_path, 'r', encoding='utf-8') as f:
+                perm_config = json.load(f)
+                blacklist = perm_config.get('user_blacklists', {}).get(target_username, [])
+
+        # 3. 组织数据
+        model_list = []
+        for mid, info in all_models.items():
+            model_list.append({
+                'id': mid,
+                'name': info.get('name', mid),
+                'is_blocked': mid in blacklist
+            })
+            
+        return jsonify({
+            'success': True,
+            'username': target_username,
+            'models': model_list
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)})
+
+@app.route('/api/admin/user/models/update', methods=['POST'])
+@require_admin
+def admin_update_user_models():
+    """更新用户的模型黑名单"""
+    data = request.get_json()
+    target_username = data.get('username')
+    blocked_models = data.get('blocked_models', []) # 传递 ID 列表
+    
+    if not target_username:
+        return jsonify({"success": False, "message": "Missing username"}), 400
+        
+    try:
+        blacklist_path = './data/model_permissions.json'
+        if not os.path.exists(blacklist_path):
+            perm_config = {"default_blacklist": [], "user_blacklists": {}}
+        else:
+            with open(blacklist_path, 'r', encoding='utf-8') as f:
+                perm_config = json.load(f)
+        
+        # 更新黑名单
+        if 'user_blacklists' not in perm_config:
+            perm_config['user_blacklists'] = {}
+            
+        perm_config['user_blacklists'][target_username] = blocked_models
+        
+        with open(blacklist_path, 'w', encoding='utf-8') as f:
+            json.dump(perm_config, f, indent=4, ensure_ascii=False)
+            
+        return jsonify({'success': True, 'message': f'用户 {target_username} 的模型权限已更新'})
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)})
+
     
     return jsonify({'success': False, 'message': '配置加载失败'})
 
@@ -474,11 +618,26 @@ def chat_stream():
     enable_tools = data.get('enable_tools', True)
     show_token_usage = data.get('show_token_usage', False)
     
-    if not message:
+    # 重新生成标志
+    is_regenerate = data.get('is_regenerate', False)
+    regenerate_index = data.get('regenerate_index')
+    
+    if not message and not is_regenerate:
         return jsonify({'success': False, 'message': '消息不能为空'})
     
     username = session['username']
     
+    # 如果是重新生成，处理版本保存逻辑
+    if is_regenerate and conversation_id and regenerate_index is not None:
+        manager = ConversationManager(username)
+        # 将当前的 assistant 消息存为历史版本
+        manager.save_message_version(conversation_id, regenerate_index)
+        # 如果前端没传 message，从历史中取出触发该回答的 user 消息
+        if not message:
+            convo = manager.get_conversation(conversation_id)
+            if convo and regenerate_index > 0:
+                message = convo['messages'][regenerate_index - 1].get('content', "")
+
     def generate():
         """生成流式响应"""
         try:
@@ -501,7 +660,9 @@ def chat_stream():
                 enable_thinking=enable_thinking,
                 enable_web_search=enable_web_search,
                 enable_tools=enable_tools,
-                show_token_usage=show_token_usage
+                show_token_usage=show_token_usage,
+                is_regenerate=is_regenerate,
+                regenerate_index=regenerate_index
             ):
                 chunk_data = json.dumps(chunk, ensure_ascii=False)
                 yield f"data: {chunk_data}\n\n"
