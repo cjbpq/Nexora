@@ -1,0 +1,564 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Knowledge Hub - ChatDB</title>
+    <!-- Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    
+    <!-- CSS 重构：极简 SaaS 风格 -->
+    <style>
+        :root {
+            --primary: #2563eb;
+            --bg: #f8fafc;
+            --surface: #ffffff;
+            --text: #0f172a;
+            --text-muted: #64748b;
+            --border: #e2e8f0;
+            --sidebar-width: 400px;
+        }
+
+        * { box-sizing: border-box; }
+        body, html { 
+            margin: 0; padding: 0; width: 100%; height: 100%; 
+            font-family: 'Inter', sans-serif; background: var(--bg); color: var(--text);
+            overflow: hidden;
+        }
+
+        .layout { display: flex; height: 100vh; width: 100vw; position: relative; }
+
+        /* 左侧：可视化图谱区域 */
+        .canvas-area { flex: 1; position: relative; background: radial-gradient(#e2e8f0 1.2px, transparent 1.2px); background-size: 30px 30px; }
+        #cy { width: 100%; height: 100%; }
+
+        /* 顶部控制栏 */
+        .top-bar {
+            position: absolute; top: 20px; left: 20px; right: 20px;
+            display: flex; justify-content: space-between; align-items: center;
+            z-index: 10; pointer-events: none;
+        }
+        .top-bar > * { pointer-events: auto; }
+        
+        .search-container {
+            background: var(--surface); border: 1px solid var(--border);
+            border-radius: 14px; padding: 10px 20px; display: flex; align-items: center;
+            box-shadow: 0 10px 15px -3px rgb(0 0 0 / 0.1); width: 350px;
+        }
+        .search-container input { 
+            border: none; outline: none; margin-left: 10px; width: 100%; font-size: 14px; 
+            background: transparent;
+        }
+
+        .btn-group { display: flex; gap: 10px; }
+        .btn {
+            background: var(--surface); border: 1px solid var(--border);
+            padding: 10px 20px; border-radius: 12px; cursor: pointer;
+            font-size: 14px; font-weight: 500; display: flex; align-items: center; gap: 8px;
+            box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1); transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+        .btn:hover { background: #f8fafc; transform: translateY(-2px); box-shadow: 0 10px 15px -3px rgb(0 0 0 / 0.1); }
+        .btn:active { transform: translateY(0); }
+        .btn-primary { background: var(--primary); color: white; border: none; }
+        .btn-primary:hover { background: #1d4ed8; }
+
+        /* 右侧：详情面板 */
+        .inspector {
+            width: var(--sidebar-width); background: var(--surface);
+            border-left: 1px solid var(--border); display: flex; flex-direction: column;
+            transform: translateX(100%); transition: transform 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+            position: absolute; right: 0; top: 0; bottom: 0; z-index: 100;
+            box-shadow: -10px 0 25px -5px rgb(0 0 0 / 0.1);
+        }
+        .inspector.open { transform: translateX(0); }
+
+        .inspector-header {
+            padding: 24px 32px; border-bottom: 1px solid var(--border);
+            display: flex; justify-content: space-between; align-items: center;
+            background: #fff; position: sticky; top: 0;
+        }
+        .inspector-header h2 { margin: 0; font-size: 20px; font-weight: 700; color: #1e293b; }
+        
+        .inspector-body { flex: 1; padding: 32px; overflow-y: auto; background: #fff; }
+        
+        .editor-container { height: 100%; display: flex; flex-direction: column; gap: 20px; }
+        .editor-container textarea { 
+            flex: 1; width: 100%; border: 1.5px solid var(--border); border-radius: 12px;
+            padding: 16px; font-family: inherit; font-size: 15px; line-height: 1.6;
+            resize: none; outline: none; transition: border-color 0.2s;
+            background: #fcfcfc;
+        }
+        .editor-container textarea:focus { border-color: var(--primary); background: #fff; }
+
+        /* 浮动缩放控制 */
+        .zoom-controls {
+            position: absolute; bottom: 20px; left: 20px; display: flex; flex-direction: column; gap: 10px;
+        }
+        .btn-icon { width: 44px; height: 44px; border-radius: 14px; padding: 0; justify-content: center; }
+
+        /* 标签 */
+        .tag { font-size: 12px; padding: 4px 12px; border-radius: 6px; background: #eff6ff; color: #1d4ed8; font-weight: 600; }
+        
+        /* 操作反馈 */
+        .toast {
+            position: fixed; bottom: 30px; left: 50%; transform: translateX(-50%);
+            background: #1e293b; color: #fff; padding: 12px 24px; border-radius: 12px;
+            font-size: 14px; z-index: 2000; box-shadow: 0 20px 25px -5px rgb(0 0 0 / 0.1);
+            animation: slideUp 0.3s ease-out;
+        }
+        @keyframes slideUp { from { transform: translate(-50%, 100%); opacity: 0; } to { transform: translate(-50%, 0); opacity: 1; } }
+
+        /* 加载遮罩 */
+        .loading-overlay {
+            position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(255,255,255,0.7); display: none;
+            justify-content: center; align-items: center; z-index: 1000;
+            backdrop-filter: blur(4px);
+        }
+        .loading-spinner {
+            width: 50px; height: 50px; border: 5px solid #e2e8f0;
+            border-top: 5px solid var(--primary); border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+    </style>
+
+    <!-- Cytoscape JS & Advanced Layouts -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/cytoscape/3.26.0/cytoscape.min.js"></script>
+    <script src="https://unpkg.com/klayjs@0.4.1/klay.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/cytoscape-klay@3.1.4/cytoscape-klay.min.js"></script>
+</head>
+<body>
+    <div class="loading-overlay" id="loadingOverlay">
+        <div class="loading-spinner"></div>
+    </div>
+    <div class="layout">
+        <div class="canvas-area">
+            <div id="cy"></div>
+            
+            <div class="top-bar">
+                <div class="search-container">
+                    <i class="fa-solid fa-search" style="color:var(--text-muted)"></i>
+                    <input type="text" id="searchNodes" placeholder="搜索知识点并定位...">
+                </div>
+                <div class="btn-group">
+                    <button class="btn" id="aiOrganize"><i class="fa-solid fa-wand-magic-sparkles" style="color:#d946ef"></i> AI 整理</button>
+                    <button class="btn" id="aiScan"><i class="fa-solid fa-link" style="color:#3b82f6"></i> 脉络重构</button>
+                    <button class="btn" onclick="window.location.href='/'"><i class="fa-solid fa-house"></i></button>
+                </div>
+            </div>
+
+            <div class="zoom-controls">
+                <button class="btn btn-icon" id="zoomIn" title="放大"><i class="fa-solid fa-plus"></i></button>
+                <button class="btn btn-icon" id="zoomOut" title="缩小"><i class="fa-solid fa-minus"></i></button>
+                <button class="btn btn-icon" id="fitView" title="适应窗口"><i class="fa-solid fa-expand"></i></button>
+            </div>
+        </div>
+
+        <aside class="inspector" id="inspector">
+            <div class="inspector-header">
+                <h2 id="nodeTitle">笔记详情</h2>
+                <button class="btn btn-icon" id="closeInspector" style="border:none;box-shadow:none;background:transparent;"><i class="fa-solid fa-xmark"></i></button>
+            </div>
+            <div class="inspector-body">
+                <div class="editor-container">
+                    <div id="nodeTags" style="display:flex; gap:8px;"></div>
+                    <textarea id="nodeContent" placeholder="在此编辑知识内容..."></textarea>
+                    <div style="display:flex; gap:12px;">
+                        <button class="btn btn-primary" id="saveNode" style="flex:1">更新保存</button>
+                        <button class="btn" id="deleteNode" style="color:#ef4444; border-color:#fee2e2">删除笔记</button>
+                    </div>
+                </div>
+            </div>
+        </aside>
+    </div>
+
+    <script>
+        let cy;
+        let currentNoteTitle = null;
+        let linkMode = { active: false, source: null };
+
+        document.addEventListener('DOMContentLoaded', () => {
+            initGraph();
+            setupEvents();
+            loadData();
+        });
+
+        function initGraph() {
+            cy = cytoscape({
+                container: document.getElementById('cy'),
+                style: [
+                    {
+                        selector: 'node',
+                        style: {
+                            'label': 'data(displayLabel)',
+                            'background-color': 'data(color)',
+                            'color': '#334155',
+                            'font-family': 'Inter',
+                            'font-size': '11px',
+                            'font-weight': '500',
+                            'text-valign': 'center',
+                            'text-halign': 'center',
+                            'border-width': 1.5,
+                            'border-color': '#e2e8f0',
+                            'text-wrap': 'wrap',
+                            'text-max-width': '120px',
+                            'padding': '8px',
+                            'shape': 'round-rectangle',
+                            'width': '140px',
+                            'height': '40px',
+                            'transition-property': 'background-color, border-color, width, height',
+                            'transition-duration': '0.3s'
+                        }
+                    },
+                    {
+                        selector: 'node[type="ROOT"]',
+                        style: {
+                            'background-color': '#0f172a',
+                            'color': '#ffffff',
+                            'width': '80px',
+                            'height': '80px',
+                            'shape': 'ellipse',
+                            'font-weight': '700',
+                            'font-size': '12px'
+                        }
+                    },
+                    {
+                        selector: 'node[type="CATEGORY"]',
+                        style: {
+                            'width': '120px',
+                            'height': '44px',
+                            'font-size': '13px',
+                            'font-weight': '600',
+                            'border-width': 2,
+                            'border-color': '#f1f5f9'
+                        }
+                    },
+                    {
+                        selector: 'node[type="KNOWLEDGE"]',
+                        style: {
+                            'background-color': '#ffffff',
+                            'border-color': '#e2e8f0',
+                            'border-width': 1,
+                            'text-max-width': '120px'
+                        }
+                    },
+                    {
+                        selector: 'edge',
+                        style: {
+                            'width': 1.5,
+                            'line-color': '#cbd5e1',
+                            'curve-style': 'bezier',
+                            'target-arrow-shape': 'triangle',
+                            'target-arrow-color': '#cbd5e1',
+                            'arrow-scale': 0.8,
+                            'target-distance-from-node': '4px',
+                            'opacity': 0.6
+                        }
+                    },
+                    {
+                        selector: 'edge[type="脉络"]',
+                        style: {
+                            'line-color': '#3b82f6',
+                            'target-arrow-color': '#3b82f6',
+                            'width': 2,
+                            'line-style': 'solid',
+                            'label': 'data(label)',
+                            'font-size': '9px',
+                            'color': '#3b82f6',
+                            'text-background-color': '#ffffff',
+                            'text-background-opacity': 1,
+                            'text-background-padding': '3px',
+                            'curve-style': 'unbundled-bezier',
+                            'control-point-distances': [40, -40],
+                            'control-point-weights': [0.25, 0.75],
+                            'opacity': 1
+                        }
+                    },
+                    {
+                        selector: 'node:selected',
+                        style: {
+                            'border-width': 4,
+                            'border-color': '#3b82f6',
+                            'background-color': '#eff6ff'
+                        }
+                    },
+                    {
+                        selector: '.potential-source',
+                        style: {
+                            'border-width': 4,
+                            'border-color': '#d946ef',
+                            'border-style': 'double'
+                        }
+                    }
+                ],
+                layout: { 
+                    name: 'klay',
+                    klay: {
+                        direction: 'RIGHT',
+                        spacing: 60,
+                        edgeSpacingFactor: 0.5,
+                        inLayerSpacingFactor: 1.5,
+                        layoutHierarchy: true
+                    }
+                },
+                userZoomingEnabled: true,
+                userPanningEnabled: true,
+                boxSelectionEnabled: false,
+                wheelSensitivity: 0.1,
+            });
+
+            cy.on('dblclick', 'node', function(evt){
+                const node = evt.target;
+                if (node.data('type') === 'KNOWLEDGE' || node.data('type') === 'CATEGORY') {
+                    linkMode.active = true;
+                    linkMode.source = node;
+                    node.addClass('potential-source');
+                    showToast('连线模式：已选定起点 ' + node.data('label') + '，请点击终点');
+                }
+            });
+
+            cy.on('tap', 'node', function(evt){
+                const node = evt.target;
+                if (linkMode.active) {
+                    if (linkMode.source.id() !== node.id()) {
+                        createManualConnection(linkMode.source, node);
+                    } else {
+                        resetLinkMode();
+                    }
+                    return;
+                }
+                if (node.data('type') === 'KNOWLEDGE') {
+                    showNote(node.data('label'));
+                }
+            });
+
+            cy.on('cxttap', function(evt){
+                if (linkMode.active) {
+                    resetLinkMode();
+                    showToast('已取消连线');
+                }
+            });
+
+            cy.on('tap', function(evt){
+                if(evt.target === cy){
+                    hideInspector();
+                }
+            });
+        }
+
+        function resetLinkMode() {
+            linkMode = { active: false, source: null };
+            cy.nodes().removeClass('potential-source');
+        }
+
+        async function loadData(shouldLayout = false) {
+            try {
+                const res = await fetch('/api/knowledge/graph');
+                const data = await res.json();
+                if (data.success) {
+                    renderGraph(data.graph, shouldLayout);
+                }
+            } catch (e) { console.error(e); }
+        }
+
+        function renderGraph(graph, shouldLayout = true) {
+            const elements = [];
+            
+            // 辅助函数：截断图表中的超长标题
+            const truncateTitle = (str) => str.length > 20 ? str.substring(0, 18) + '...' : str;
+
+            // 核心节点
+            elements.push({ 
+                data: { 
+                    id: 'root', 
+                    label: '知识空间', 
+                    displayLabel: '知识空间',
+                    type: 'ROOT', 
+                    color: '#0f172a' 
+                } 
+            });
+
+            // 分类节点
+            Object.keys(graph.categories).forEach(catName => {
+                const cat = graph.categories[catName];
+                elements.push({ 
+                    data: { 
+                        id: `cat_${catName}`, 
+                        label: catName, 
+                        displayLabel: catName,
+                        type: 'CATEGORY', 
+                        color: cat.color || '#3b82f6' 
+                    } 
+                });
+                elements.push({ data: { source: 'root', target: `cat_${catName}` } });
+
+                // 知识节点
+                cat.knowledge_ids.forEach(title => {
+                    elements.push({
+                        data: { 
+                            id: `k_${title}`, 
+                            label: title, 
+                            displayLabel: truncateTitle(title),
+                            type: 'KNOWLEDGE', 
+                            color: '#ffffff'
+                        }
+                    });
+                    elements.push({ data: { source: `cat_${catName}`, target: `k_${title}` } });
+                });
+            });
+
+            // 脉络连接
+            if (graph.connections) {
+                graph.connections.forEach(conn => {
+                    elements.push({
+                        data: {
+                            id: conn.id,
+                            source: `k_${conn.from}`,
+                            target: `k_${conn.to}`,
+                            label: conn.type,
+                            type: conn.type
+                        }
+                    });
+                });
+            }
+
+            cy.elements().remove();
+            cy.add(elements);
+
+            cy.layout({ 
+                name: 'klay',
+                animate: true,
+                animationDuration: 600,
+                padding: 100,
+                klay: {
+                    direction: 'RIGHT', // 从左向右布局，最适合展示长标签文字
+                    spacing: 80,
+                    edgeSpacingFactor: 0.2,
+                    inLayerSpacingFactor: 1.5,
+                    nodePlacement: 'LINEAR_SEGMENTS',
+                    layoutHierarchy: true,
+                    thoroughness: 7
+                }
+            }).run();
+        }
+
+        async function createManualConnection(source, target) {
+            const from = source.data('label');
+            const to = target.data('label');
+            try {
+                const res = await fetch('/api/knowledge/connections', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ from, to, type: '脉络', description: '手动建立连接' })
+                });
+                const data = await res.json();
+                if (data.success) {
+                    showToast('连接已建立');
+                    loadData(true);
+                } else {
+                    showToast('连接失败: ' + data.error);
+                }
+            } catch (e) { showToast('API 连接错误'); }
+            resetLinkMode();
+        }
+
+        async function showNote(title) {
+            currentNoteTitle = title;
+            document.getElementById('nodeTitle').innerText = title;
+            document.getElementById('nodeTags').innerHTML = '<span class="tag">基础知识</span>';
+            try {
+                const res = await fetch(`/api/knowledge/basis/${encodeURIComponent(title)}`);
+                const data = await res.json();
+                document.getElementById('nodeContent').value = data.content;
+                document.getElementById('inspector').classList.add('open');
+            } catch (e) { showToast('加载详情失败'); }
+        }
+
+        function hideInspector() {
+            document.getElementById('inspector').classList.remove('open');
+            cy.$(':selected').unselect();
+        }
+
+        function setupEvents() {
+            document.getElementById('closeInspector').onclick = hideInspector;
+
+            document.getElementById('saveNode').onclick = async () => {
+                const content = document.getElementById('nodeContent').value;
+                const res = await fetch(`/api/knowledge/basis/${encodeURIComponent(currentNoteTitle)}`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ content })
+                });
+                const data = await res.json();
+                if(data.success) showToast('笔记已保存');
+            };
+
+            document.getElementById('deleteNode').onclick = async () => {
+                if(!confirm('确定删除此笔记及所有关联脉络吗？')) return;
+                const res = await fetch(`/api/knowledge/basis/${encodeURIComponent(currentNoteTitle)}`, { method: 'DELETE' });
+                const data = await res.json();
+                if(data.success) {
+                    showToast('笔记已删除');
+                    hideInspector();
+                    const nodeToRemove = cy.getElementById(`k_${currentNoteTitle}`);
+                    if (nodeToRemove.length > 0) {
+                        cy.remove(nodeToRemove);
+                    } else {
+                        loadData(false);
+                    }
+                }
+            };
+
+            document.getElementById('searchNodes').oninput = (e) => {
+                const q = e.target.value.toLowerCase();
+                if(!q) {
+                    cy.elements().style('opacity', 1);
+                    return;
+                }
+                const matches = cy.nodes().filter(n => n.data('label').toLowerCase().includes(q));
+                cy.elements().style('opacity', 0.1);
+                matches.style('opacity', 1);
+                matches.neighborhood().style('opacity', 0.6);
+                if(matches.length > 0) cy.animate({ center: { eles: matches }, zoom: 1.2 });
+            };
+
+            document.getElementById('zoomIn').onclick = () => cy.zoom(cy.zoom() * 1.2);
+            document.getElementById('zoomOut').onclick = () => cy.zoom(cy.zoom() * 0.8);
+            document.getElementById('fitView').onclick = () => cy.fit(null, 50);
+
+            document.getElementById('aiScan').onclick = async () => {
+                showToast('正在重构语义脉络...');
+                toggleLoading(true);
+                try {
+                    await fetch('/api/knowledge/ai/scan', { method: 'POST' });
+                    await loadData(true);
+                } finally { toggleLoading(false); }
+            };
+
+            document.getElementById('aiOrganize').onclick = async () => {
+                if(!confirm('AI 将重新识别全量知识的深层脉络并自动分类，是否继续？')) return;
+                showToast('AI 正在思考全域逻辑...');
+                toggleLoading(true);
+                try {
+                    await fetch('/api/knowledge/ai/organize', { method: 'POST' });
+                    await loadData(true);
+                } finally { toggleLoading(false); }
+            };
+        }
+
+        function toggleLoading(show) {
+            document.getElementById('loadingOverlay').style.display = show ? 'flex' : 'none';
+        }
+
+        function showToast(msg) {
+            const toast = document.createElement('div');
+            toast.className = 'toast';
+            toast.innerText = msg;
+            document.body.appendChild(toast);
+            setTimeout(() => toast.remove(), 3000);
+        }
+    </script>
+</body>
+</html>

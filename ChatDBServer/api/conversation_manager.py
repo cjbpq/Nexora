@@ -1,0 +1,497 @@
+"""
+对话管理器 - 管理用户的对话记录
+"""
+import os
+import json
+from datetime import datetime
+
+
+class ConversationManager:
+    """对话记录管理类"""
+    
+    def __init__(self, username):
+        """
+        初始化对话管理器
+        
+        Args:
+            username: 用户名
+        """
+        self.username = username
+        self.base_path = f"./data/users/{username}/conversations"
+        
+        # 确保对话目录存在
+        os.makedirs(self.base_path, exist_ok=True)
+    
+    def create_conversation(self, conversation_id=None, title="新对话"):
+        """
+        创建新对话
+        
+        Args:
+            conversation_id: 对话ID，如果为None则自动生成数字ID
+            title: 对话标题
+            
+        Returns:
+            str: 对话ID
+        """
+        if conversation_id is None:
+            # 使用数字生成对话ID
+            existing_ids = []
+            if os.path.exists(self.base_path):
+                for filename in os.listdir(self.base_path):
+                    if filename.endswith('.json'):
+                        try:
+                            existing_ids.append(int(filename[:-5]))
+                        except ValueError:
+                            pass
+            
+            # 生成新ID（最大ID + 1）
+            conversation_id = str(max(existing_ids) + 1) if existing_ids else "1"
+        
+        conversation_path = os.path.join(self.base_path, f"{conversation_id}.json")
+        
+        # 创建对话记录
+        conversation_data = {
+            "conversation_id": conversation_id,
+            "title": title,
+            "created_at": datetime.now().isoformat(),
+            "updated_at": datetime.now().isoformat(),
+            "messages": []
+        }
+        
+        with open(conversation_path, 'w', encoding='utf-8') as f:
+            json.dump(conversation_data, f, ensure_ascii=False, indent=2)
+        
+        return conversation_id
+    
+    def update_title(self, conversation_id, title):
+        """
+        更新对话标题
+        
+        Args:
+            conversation_id: 对话ID
+            title: 新标题
+        """
+        conversation_path = os.path.join(self.base_path, f"{conversation_id}.json")
+        
+        if not os.path.exists(conversation_path):
+            raise ValueError(f"对话不存在: {conversation_id}")
+        
+        with open(conversation_path, 'r', encoding='utf-8') as f:
+            conversation_data = json.load(f)
+        
+        conversation_data["title"] = title
+        conversation_data["updated_at"] = datetime.now().isoformat()
+        
+        with open(conversation_path, 'w', encoding='utf-8') as f:
+            json.dump(conversation_data, f, ensure_ascii=False, indent=2)
+    
+    def update_conversation_title(self, conversation_id, title):
+        """
+        更新对话标题
+        
+        Args:
+            conversation_id: 对话ID
+            title: 新标题
+        """
+        conversation_path = os.path.join(self.base_path, f"{conversation_id}.json")
+        
+        if not os.path.exists(conversation_path):
+            raise ValueError(f"对话不存在: {conversation_id}")
+        
+        # 读取对话
+        with open(conversation_path, 'r', encoding='utf-8') as f:
+            conversation_data = json.load(f)
+        
+        # 更新标题
+        conversation_data["title"] = title
+        conversation_data["updated_at"] = datetime.now().isoformat()
+        
+        # 保存对话
+        with open(conversation_path, 'w', encoding='utf-8') as f:
+            json.dump(conversation_data, f, ensure_ascii=False, indent=2)
+
+    def update_volc_response_id(self, conversation_id, response_id, model_name=None):
+        """
+        更新VolcEngine的Response ID，用于上下文续接
+        """
+        conversation_path = os.path.join(self.base_path, f"{conversation_id}.json")
+        if not os.path.exists(conversation_path):
+            return
+        
+        with open(conversation_path, 'r', encoding='utf-8') as f:
+            conversation_data = json.load(f)
+        
+        conversation_data["last_volc_response_id"] = response_id
+        if model_name:
+             conversation_data["last_model_used"] = model_name
+        
+        with open(conversation_path, 'w', encoding='utf-8') as f:
+            json.dump(conversation_data, f, ensure_ascii=False, indent=2)
+            
+    def get_last_volc_response_id(self, conversation_id, current_model_name=None):
+        """
+        获取VolcEngine的Last Response ID
+        """
+        conversation_path = os.path.join(self.base_path, f"{conversation_id}.json")
+        if not os.path.exists(conversation_path):
+            return None
+            
+        with open(conversation_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            last_id = data.get("last_volc_response_id")
+            last_model = data.get("last_model_used")
+
+            # Check for model compatibility
+            # logic: if current model is known, and (last_model is different OR missing), reset it.
+            # (Assuming missing last_model implies it was the default/old model, 
+            # so if we are using a specific new model, it's a mismatch).
+            if current_model_name and last_model != current_model_name:
+                print(f"[CACHE] Model mismatch. Last: {last_model}, Current: {current_model_name}. Resetting context ID.")
+                return None
+            
+            return last_id
+
+    def add_message(self, conversation_id, role, content, metadata=None):
+        """
+        添加消息到对话
+        
+        Args:
+            conversation_id: 对话ID
+            role: 角色 (user/assistant/function)
+            content: 消息内容
+            metadata: 额外元数据（如函数调用信息、交流总结等）
+        """
+        conversation_path = os.path.join(self.base_path, f"{conversation_id}.json")
+        
+        if not os.path.exists(conversation_path):
+            raise ValueError(f"对话不存在: {conversation_id}")
+        
+        # 读取对话
+        with open(conversation_path, 'r', encoding='utf-8') as f:
+            conversation_data = json.load(f)
+        
+        # 添加消息
+        message = {
+            "role": role,
+            "content": content,
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        if metadata:
+            message["metadata"] = metadata
+        
+        # 如果是assistant消息，且有exchange_summary，记录这次交流的总结
+        if role == "assistant" and metadata and "exchange_summary" in metadata:
+            message["exchange_summary"] = metadata["exchange_summary"]
+        
+        conversation_data["messages"].append(message)
+        conversation_data["updated_at"] = datetime.now().isoformat()
+        
+        # 保存对话
+        with open(conversation_path, 'w', encoding='utf-8') as f:
+            json.dump(conversation_data, f, ensure_ascii=False, indent=2)
+    
+    def get_conversation(self, conversation_id):
+        """
+        获取对话记录
+        
+        Args:
+            conversation_id: 对话ID
+            
+        Returns:
+            dict: 对话数据
+        """
+        conversation_path = os.path.join(self.base_path, f"{conversation_id}.json")
+        
+        if not os.path.exists(conversation_path):
+            raise ValueError(f"对话不存在: {conversation_id}")
+        
+        with open(conversation_path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    
+    def list_conversations(self):
+        """
+        列出所有对话
+        
+        Returns:
+            list: 对话ID列表，按创建时间倒序排列
+        """
+        if not os.path.exists(self.base_path):
+            return []
+        
+        conversations = []
+        for filename in os.listdir(self.base_path):
+            if filename.endswith('.json'):
+                conversation_id = filename[:-5]  # 去掉.json后缀
+                conversation_path = os.path.join(self.base_path, filename)
+                
+                with open(conversation_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    conversations.append({
+                        'conversation_id': conversation_id,
+                        'title': data.get('title', '未命名对话'),
+                        'created_at': data.get('created_at'),
+                        'updated_at': data.get('updated_at'),
+                        'message_count': len(data.get('messages', []))
+                    })
+        
+        # 按更新时间倒序排列
+        conversations.sort(key=lambda x: x['updated_at'], reverse=True)
+        return conversations
+    
+    def delete_conversation(self, conversation_id):
+        """
+        删除对话
+        
+        Args:
+            conversation_id: 对话ID
+            
+        Returns:
+            bool: 是否成功删除
+        """
+        conversation_path = os.path.join(self.base_path, f"{conversation_id}.json")
+        
+        if not os.path.exists(conversation_path):
+            return False
+        
+        os.remove(conversation_path)
+        return True
+    
+    def get_messages(self, conversation_id, limit=None):
+        """
+        获取对话中的消息
+        
+        Args:
+            conversation_id: 对话ID
+            limit: 限制返回的消息数量（从最新开始）
+            
+        Returns:
+            list: 消息列表
+        """
+        conversation = self.get_conversation(conversation_id)
+        messages = conversation.get('messages', [])
+        
+        if limit:
+            messages = messages[-limit:]
+        
+        return messages
+    
+    def set_main_title(self, conversation_id, main_title):
+        """
+        设置当前这次交流的总结（针对最后一条assistant消息）
+        
+        Args:
+            conversation_id: 对话ID
+            main_title: 这次交流的总结
+        """
+        conversation_path = os.path.join(self.base_path, f"{conversation_id}.json")
+        
+        if not os.path.exists(conversation_path):
+            raise ValueError(f"对话不存在: {conversation_id}")
+        
+        with open(conversation_path, 'r', encoding='utf-8') as f:
+            conversation_data = json.load(f)
+        
+        # 找到最后一条assistant消息，添加exchange_summary
+        for msg in reversed(conversation_data["messages"]):
+            if msg["role"] == "assistant":
+                msg["exchange_summary"] = main_title
+                break
+        
+        conversation_data["updated_at"] = datetime.now().isoformat()
+        
+        with open(conversation_path, 'w', encoding='utf-8') as f:
+            json.dump(conversation_data, f, ensure_ascii=False, indent=2)
+    
+    def get_recent_exchange_summaries(self, conversation_id, limit=5):
+        """
+        获取最近几次交流的总结
+        
+        Args:
+            conversation_id: 对话ID
+            limit: 返回最近N次交流的总结
+            
+        Returns:
+            list: 交流总结列表 [{"user": "...", "summary": "..."}, ...]
+        """
+        messages = self.get_messages(conversation_id)
+        
+        summaries = []
+        current_pair = {}
+        
+        for msg in messages:
+            if msg["role"] == "user":
+                current_pair = {"user": msg["content"][:100]}  # 截取前100字
+            elif msg["role"] == "assistant":
+                if "exchange_summary" in msg:
+                    current_pair["summary"] = msg["exchange_summary"]
+                    summaries.append(current_pair)
+                    current_pair = {}
+        
+        return summaries[-limit:] if len(summaries) > limit else summaries
+    
+    def get_context_length(self, offset=0, conversation_id=None):
+        """
+        获取前offset个对话的总字符长度
+        
+        Args:
+            offset: 从最新往前数第offset个对话（0=当前，1=上一个）
+            conversation_id: 指定对话ID（如果指定则忽略offset，直接获取该对话长度）
+            
+        Returns:
+            int: 字符总长度
+        """
+        if conversation_id:
+            target_conv_id = conversation_id
+        else:
+            conversations = self.list_conversations()
+            if offset >= len(conversations):
+                return 0
+            target_conv_id = conversations[offset]['conversation_id']
+            
+        messages = self.get_messages(target_conv_id)
+        
+        total_length = 0
+        for msg in messages:
+            total_length += len(msg.get('content', ''))
+        
+        return total_length
+    
+    def get_context(self, offset=0, from_pos=0, to_pos=None, conversation_id=None):
+        """
+        获取前offset个对话从from_pos到to_pos字符的内容
+        
+        Args:
+            offset: 从最新往前数第offset个对话
+            from_pos: 起始字符位置
+            to_pos: 结束字符位置（None表示到结尾）
+            conversation_id: 指定对话ID（如果指定则忽略offset，直接获取该对话内容）
+            
+        Returns:
+            str: 截取的内容
+        """
+        if conversation_id:
+            target_conv_id = conversation_id
+        else:
+            conversations = self.list_conversations()
+            if offset >= len(conversations):
+                return ""
+            target_conv_id = conversations[offset]['conversation_id']
+
+        messages = self.get_messages(target_conv_id)
+        
+        # 拼接所有消息
+        full_text = ""
+        for msg in messages:
+            role = msg.get('role', 'unknown')
+            content = msg.get('content', '')
+            full_text += f"[{role}]: {content}\n\n"
+        
+        # 截取指定范围
+        if to_pos is None:
+            return full_text[from_pos:]
+        else:
+            return full_text[from_pos:to_pos]
+    
+    def get_context_find_keyword(self, offset=0, keyword="", range_size=10, conversation_id=None):
+        """
+        在前offset个对话中搜索关键词，返回关键词前后range_size个字符的上下文
+        
+        Args:
+            offset: 从最新往前数第offset个对话
+            keyword: 搜索关键词
+            range_size: 关键词前后返回的字符数
+            conversation_id: 指定对话ID（如果指定则忽略offset，直接在该对话中搜索）
+            
+        Returns:
+            str: 格式化的搜索结果
+        """
+        if conversation_id:
+            target_conv_id = conversation_id
+        else:
+            conversations = self.list_conversations()
+            if offset >= len(conversations):
+                return "对话不存在"
+            target_conv_id = conversations[offset]['conversation_id']
+
+        messages = self.get_messages(target_conv_id)
+        
+        results = []
+        for msg in messages:
+            role = msg.get('role', 'unknown')
+            content = msg.get('content', '')
+            
+            # 查找关键词的所有出现位置
+            start = 0
+            while True:
+                pos = content.find(keyword, start)
+                if pos == -1:
+                    break
+                
+                # 提取关键词前后的文本
+                context_start = max(0, pos - range_size)
+                context_end = min(len(content), pos + len(keyword) + range_size)
+                
+                before = content[context_start:pos]
+                match = content[pos:pos+len(keyword)]
+                after = content[pos+len(keyword):context_end]
+                
+                results.append(f"[{role}]: ...{before}【{match}】{after}...")
+                start = pos + 1
+        
+        if not results:
+            return f"未找到关键词: {keyword}"
+        
+        return "\n".join(results)
+    
+    def get_main_title(self, conversation_id, offset=0):
+        """
+        获取指定对话中前offset次交流的总结（从最近往前数）
+        
+        Args:
+            conversation_id: 对话ID
+            offset: 从最新往前数第offset次交流（0=当前未完成的交流，1=上一次交流）
+            
+        Returns:
+            str: 交流总结
+        """
+        messages = self.get_messages(conversation_id)
+        
+        # 找到所有有exchange_summary的assistant消息
+        summaries = []
+        for msg in messages:
+            if msg["role"] == "assistant" and "exchange_summary" in msg:
+                summaries.append(msg["exchange_summary"])
+        
+        if not summaries:
+            return "无交流总结"
+        
+        # offset=0返回最后一次，offset=1返回倒数第二次
+        index = -(offset + 1)
+        if abs(index) > len(summaries):
+            return "交流不存在"
+        
+        return summaries[index]
+
+
+if __name__ == "__main__":
+    # 测试代码
+    os.chdir("../")
+    
+    manager = ConversationManager("test_user")
+    
+    # 创建对话
+    conv_id = manager.create_conversation()
+    print(f"创建对话: {conv_id}")
+    
+    # 添加消息
+    manager.add_message(conv_id, "user", "你好")
+    manager.add_message(conv_id, "assistant", "你好！有什么我可以帮助你的吗？")
+    
+    # 获取对话
+    conversation = manager.get_conversation(conv_id)
+    print(f"对话内容: {conversation}")
+    
+    # 列出所有对话
+    conversations = manager.list_conversations()
+    print(f"所有对话: {conversations}")
