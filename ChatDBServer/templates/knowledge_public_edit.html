@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ title }} - 协作编辑</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/easymde/dist/easymde.min.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/11.1.1/marked.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/easymde/dist/easymde.min.js"></script>
+    <style>
+        :root {
+            --bg: #fdfdfd; --surface: #ffffff; --text: #1e293b; 
+            --text-muted: #64748b; --border: #e2e8f0; --primary: #3b82f6;
+        }
+        body { 
+            font-family: 'Inter', sans-serif; background: var(--bg); color: var(--text);
+            margin: 0; padding: 20px; display: flex; flex-direction: column; height: 100vh;
+        }
+        .header { margin-bottom: 15px; display: flex; justify-content: space-between; align-items: center; }
+        .header h1 { margin: 0; font-size: 24px; font-weight: 600; }
+        .meta { font-size: 13px; color: var(--text-muted); }
+        .editor-wrapper { flex: 1; display: flex; flex-direction: column; overflow: hidden; background: #fff; border:1px solid var(--border); border-radius: 8px; }
+        .EasyMDEContainer { flex: 1; display: flex; flex-direction: column; }
+        .CodeMirror { flex: 1; height: auto !important; border:none !important; }
+        .badge { padding: 4px 10px; border-radius: 20px; background: #dcfce7; color: #166534; font-weight: 500; font-size: 12px; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div>
+            <h1>{{ title }}</h1>
+            <div class="meta">由 @{{ username }} 开启协作</div>
+        </div>
+        <div id="saveStatus"><span class="badge">已同步</span></div>
+    </div>
+    <div class="editor-wrapper">
+        <textarea id="editor">{{ content }}</textarea>
+    </div>
+
+    <script>
+        const easyMDE = new EasyMDE({
+            element: document.getElementById('editor'),
+            spellChecker: false,
+            autosave: { enabled: false },
+            status: false,
+            toolbar: ["bold", "italic", "heading", "|", "quote", "unordered-list", "ordered-list", "|", "link", "image", "table", "|", "preview", "side-by-side", "fullscreen"]
+        });
+
+        const saveStatus = document.getElementById('saveStatus');
+        let timer = null;
+        let lastValue = easyMDE.value();
+
+        async function saveData() {
+            const val = easyMDE.value();
+            if (val === lastValue) return;
+            
+            saveStatus.innerHTML = '<span class="badge" style="background:#fef9c3;color:#854d0e">同步中...</span>';
+            try {
+                const res = await fetch(`/api/public/knowledge/{{ username }}/{{ share_id }}`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ content: val })
+                });
+                const data = await res.json();
+                if (data.success) {
+                    saveStatus.innerHTML = '<span class="badge">已同步</span>';
+                    lastValue = val;
+                } else {
+                    saveStatus.innerHTML = '<span class="badge" style="background:#fee2e2;color:#991b1b">同步失败</span>';
+                }
+            } catch (e) {
+                saveStatus.innerHTML = '<span class="badge" style="background:#fee2e2;color:#991b1b">离线</span>';
+            }
+        }
+
+        easyMDE.codemirror.on('change', () => {
+            if (timer) clearTimeout(timer);
+            timer = setTimeout(saveData, 1500); 
+        });
+
+        // 定时拉取
+        setInterval(async () => {
+            if (easyMDE.codemirror.hasFocus()) return; 
+            try {
+                const res = await fetch(`/api/public/knowledge/{{ username }}/{{ share_id }}`);
+                const data = await res.json();
+                if (data.success && data.content !== easyMDE.value()) {
+                    const cursor = easyMDE.codemirror.getCursor();
+                    easyMDE.value(data.content);
+                    easyMDE.codemirror.setCursor(cursor);
+                    lastValue = data.content;
+                }
+            } catch (e) {}
+        }, 5000);
+    </script>
+</body>
+</html>

@@ -79,11 +79,45 @@ class Model:
         global CONFIG
         CONFIG = load_config()
         
-        # 确定模型名称
-        if model_name:
-            self.model_name = model_name
+        # 确定模型名称（增加黑名单过滤逻辑）
+        requested_model = model_name
+        
+        # 加载权限配置
+        blacklist = []
+        try:
+            perm_path = os.path.join(os.path.dirname(CONFIG_PATH), 'data', 'model_permissions.json')
+            if os.path.exists(perm_path):
+                with open(perm_path, 'r', encoding='utf-8') as f:
+                    perm_data = json.load(f)
+                    user_blacklists = perm_data.get('user_blacklists', {})
+                    blacklist = user_blacklists.get(username, perm_data.get('default_blacklist', []))
+        except Exception as e:
+            print(f"Error loading blacklist in Model: {e}")
+
+        if requested_model:
+            # 如果请求的模型在黑名单中，或者根本不是有效的模型ID，进行处理
+            if requested_model in blacklist or requested_model not in CONFIG.get('models', {}):
+                # 寻找第一个真正可用的模型
+                available = [m for m in CONFIG.get('models', {}).keys() if m not in blacklist]
+                if not available:
+                    # 如果一个可用的都没有，且请求的又非法/被禁，强制设为一个非法值以触发后续报错，或抛出异常
+                    self.model_name = "NO_AVAILABLE_MODEL"
+                else:
+                    # 如果请求的是非法ID（如 "Select Model"），则使用第一个可用的合法模型
+                    self.model_name = available[0]
+            else:
+                self.model_name = requested_model
         else:
-            self.model_name = CONFIG.get('default_model', 'doubao-seed-1-6-251015')
+            # 使用默认模型，如果默认模型被禁，寻找第一个可用的
+            default_model = CONFIG.get('default_model', 'doubao-seed-1-6-251015')
+            if default_model in blacklist:
+                available = [m for m in CONFIG.get('models', {}).keys() if m not in blacklist]
+                if available:
+                    self.model_name = available[0]
+                else:
+                    self.model_name = "NO_AVAILABLE_MODEL"
+            else:
+                self.model_name = default_model
             
         self.conversation_manager = ConversationManager(username)
         
@@ -135,6 +169,27 @@ class Model:
         # 工具定义
         self.tools = self._parse_tools(TOOLS)
     
+    def get_embedding(self, text: str) -> List[float]:
+        """获取文本向量 (OpenAI/Alibaba 兼容接口)"""
+        embedding_model = CONFIG.get('embedding_model', "text-embedding-v3")
+        provider_name = 'aliyun_embedding' if 'aliyun_embedding' in CONFIG.get('providers', {}) else self.provider
+        provider_info = CONFIG.get('providers', {}).get(provider_name, {})
+        
+        api_key = provider_info.get('api_key')
+        base_url = provider_info.get('base_url')
+
+        # 使用 OpenAI 客户端进行调用（大部分厂商均兼容此模式）
+        temp_client = OpenAI(
+            api_key=api_key,
+            base_url=base_url
+        )
+        
+        response = temp_client.embeddings.create(
+            model=embedding_model,
+            input=text
+        )
+        return response.data[0].embedding
+
     def _get_default_system_prompt(self) -> str:
         """获取极简高效的系统提示词"""
         return """你是智能知识库管家。
@@ -507,6 +562,13 @@ class Model:
         """
         发送消息（支持多轮对话、流式输出、文件和Context Caching）
         """
+        if self.model_name == "NO_AVAILABLE_MODEL":
+            yield {
+                "type": "error",
+                "content": "当前账号无可用模型权限，请联系管理员分配。"
+            }
+            return
+
         try:
             # 确保对话已创建
             if not self.conversation_id:
@@ -908,7 +970,7 @@ class Model:
                             # 使用 system 角色提供指令引导，使用中文以符合主要交互语言
                             current_function_outputs.append({
                                 "role": "system",
-                                "content": f"[系统指令] 你已完成工具调用: {', '.join(tool_names)}。请根据返回的工具结果，继续完成对用户的回答或做出最终总结。"
+                                "content": f"[系统指令] 你（AI助手）已完成工具调用: {', '.join(tool_names)}。请根据返回的工具结果，继续完成对用户的回答或做出最终总结。"
                             })
                         
                         # 继续下一轮（保持messages累积，但current_function_outputs已重置）

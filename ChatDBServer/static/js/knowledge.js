@@ -36,6 +36,9 @@ function setupEventListeners() {
     addBasisBtn.addEventListener('click', () => openAddBasisModal());
     addShortBtn.addEventListener('click', () => openAddShortModal());
     
+    // 分享按钮
+    document.getElementById('toggleShareBtn').addEventListener('click', toggleShare);
+
     // 关闭Modal
     closeBtns.forEach(btn => {
         btn.addEventListener('click', closeAllModals);
@@ -54,6 +57,32 @@ function setupEventListeners() {
     // 表单提交
     document.getElementById('basisForm').addEventListener('submit', handleBasisSubmit);
     document.getElementById('shortForm').addEventListener('submit', handleShortSubmit);
+}
+
+// 分享处理
+async function toggleShare() {
+    if (!editingKnowledge) {
+        alert('请先保存后再开启分享');
+        return;
+    }
+    const title = editingKnowledge;
+    try {
+        const response = await fetch(`/api/knowledge/basis/${encodeURIComponent(title)}/share`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ public: true })
+        });
+        const data = await response.json();
+        if (data.success) {
+            document.getElementById('shareInfo').style.display = 'block';
+            const shareLink = document.getElementById('shareLink');
+            shareLink.href = data.share_url;
+            shareLink.textContent = data.share_url;
+            alert('公开协作已开启');
+        }
+    } catch (e) {
+        alert('操作失败');
+    }
 }
 
 // 切换Tab

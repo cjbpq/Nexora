@@ -26,6 +26,40 @@ CORS(app)
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
 
+# ==================== 配置与全局变量 ====================
+
+CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.json')
+
+def get_config_all():
+    """获取所有配置"""
+    if os.path.exists(CONFIG_PATH):
+        try:
+            with open(CONFIG_PATH, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"Error loading config: {e}")
+    return {}
+
+def require_papi_key(f):
+    """公有 API 密钥验证装饰器"""
+    from functools import wraps
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        config = get_config_all()
+        api_config = config.get('api', {})
+        
+        if not api_config.get('public_api_enabled', False):
+            return jsonify({'success': False, 'message': 'Public API is disabled'}), 403
+            
+        auth_key = request.headers.get('X-API-Key') or request.args.get('api_key')
+        expected_key = api_config.get('public_api_key')
+        
+        if not auth_key or auth_key != expected_key:
+            return jsonify({'success': False, 'message': 'Invalid or missing API Key'}), 401
+            
+        return f(*args, **kwargs)
+    return decorated_function
+
 # ==================== 认证相关 ====================
 
 @app.route('/')
@@ -195,14 +229,25 @@ def admin_add_user():
         # 初始化用户目录
         user_path = f"./data/users/{username}/"
         os.makedirs(user_path, exist_ok=True)
-        os.makedirs(user_path + "database/", exist_ok=True)
-        os.makedirs(user_path + "conversations/", exist_ok=True)
+        os.makedirs(os.path.join(user_path, "database"), exist_ok=True)
+        os.makedirs(os.path.join(user_path, "conversations"), exist_ok=True)
         
         # 初始化 database.json
-        db_file = user_path + "database.json"
+        db_file = os.path.join(user_path, "database.json")
         if not os.path.exists(db_file):
             with open(db_file, 'w', encoding='utf-8') as f:
                 json.dump({"data_short": {}, "data_basis": {}}, f, indent=4, ensure_ascii=False)
+        
+        # 初始化知识图谱和Token统计文件（防止前端报错）
+        kg_file = os.path.join(user_path, "knowledge_graph.json")
+        if not os.path.exists(kg_file):
+            with open(kg_file, 'w', encoding='utf-8') as f:
+                json.dump({"nodes": [], "links": []}, f, indent=4, ensure_ascii=False)
+        
+        token_file = os.path.join(user_path, "token_usage.json")
+        if not os.path.exists(token_file):
+            with open(token_file, 'w', encoding='utf-8') as f:
+                json.dump([], f, indent=4, ensure_ascii=False)
         
         users[username] = {
             "username": username,
@@ -324,6 +369,89 @@ def admin_token_stats():
                 except:
                     pass
         return jsonify({'success': True, 'total': total_tokens})
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)})
+
+
+# ==================== 通用开放接口 (Public API - papi) ====================
+
+@app.route('/api/papi/knowledge/list/<username>', methods=['GET'])
+@require_papi_key
+def papi_list_knowledge(username):
+    """获取指定用户的知识库列表"""
+    try:
+        user = User(username)
+        basis = user.getKnowledgeList(1)
+        return jsonify({
+            'success': True,
+            'username': username,
+            'knowledge': list(basis.keys())
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)})
+
+@app.route('/api/papi/knowledge/basis/<username>/<title>', methods=['GET'])
+@require_papi_key
+def papi_get_knowledge(username, title):
+    """获取指定用户的某个知识内容"""
+    try:
+        user = User(username)
+        content = user.getBasisContent(title)
+        meta = user.getBasisMetadata(title)
+        return jsonify({
+            'success': True,
+            'username': username,
+            'title': title,
+            'content': content,
+            'metadata': meta
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)})
+
+@app.route('/api/papi/tokens/stats/<username>', methods=['GET'])
+@require_papi_key
+def papi_token_stats(username):
+    """获取指定用户的 Token 消耗记录"""
+    try:
+        user = User(username)
+        logs = user.get_token_logs()
+        total_tokens = sum(log.get('total_tokens', 0) for log in logs)
+        return jsonify({
+            'success': True,
+            'username': username,
+            'total': total_tokens,
+            'logs': logs
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)})
+
+@app.route('/api/papi/conversations/<username>', methods=['GET'])
+@require_papi_key
+def papi_list_conversations(username):
+    """获取指定用户的对话列表"""
+    try:
+        manager = ConversationManager(username)
+        conversations = manager.list_conversations()
+        return jsonify({
+            'success': True,
+            'username': username,
+            'conversations': conversations
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)})
+
+@app.route('/api/papi/conversations/<username>/<conv_id>', methods=['GET'])
+@require_papi_key
+def papi_get_conversation(username, conv_id):
+    """获取指定用户的详细对话记录"""
+    try:
+        manager = ConversationManager(username)
+        conversation = manager.get_conversation(conv_id)
+        return jsonify({
+            'success': True,
+            'username': username,
+            'conversation': conversation
+        })
     except Exception as e:
         return jsonify({'success': False, 'message': str(e)})
 
@@ -518,11 +646,19 @@ def get_config():
                     'provider': info.get('provider', 'volcengine'),
                     'status': info.get('status', 'normal')
                 })
+            
+            # 确保返回的默认模型不在黑名单中
+            default_model = config.get('default_model')
+            if default_model in blacklist:
+                if models_info:
+                    default_model = models_info[0]['id']
+                else:
+                    default_model = None
                 
             return jsonify({
                 'success': True,
                 'models': models_info,
-                'default_model': config.get('default_model')
+                'default_model': default_model
             })
     except Exception as e:
         return jsonify({'success': False, 'message': str(e)})
@@ -626,6 +762,44 @@ def chat_stream():
         return jsonify({'success': False, 'message': '消息不能为空'})
     
     username = session['username']
+    
+    # --- 模型权限校验 ---
+    try:
+        blacklist_path = './data/model_permissions.json'
+        blacklist = []
+        if os.path.exists(blacklist_path):
+            with open(blacklist_path, 'r', encoding='utf-8') as f:
+                perm_config = json.load(f)
+                user_blacklists = perm_config.get('user_blacklists', {})
+                blacklist = user_blacklists.get(username, perm_config.get('default_blacklist', []))
+        
+        # 获取系统配置中的默认模型和全部模型
+        CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.json')
+        with open(CONFIG_PATH, 'r', encoding='utf-8') as f:
+            sys_config = json.load(f)
+            all_models = list(sys_config.get('models', {}).keys())
+            default_sys_model = sys_config.get('default_model')
+
+        # 校验请求的模型是否合法（存在且未被禁）
+        if model_name and (model_name not in all_models or model_name in blacklist):
+            # 如果请求非法或被禁，清空它，进入下方的自动分配逻辑
+            model_name = None
+        
+        # 如果 model_name 为空（用户没选或者是上面的校验失败了），则自动分配第一个可用的
+        if not model_name:
+            # 尝试使用系统默认模型
+            if default_sys_model and default_sys_model not in blacklist:
+                model_name = default_sys_model
+            else:
+                # 寻找第一个不在黑名单的模型
+                available_models = [m for m in all_models if m not in blacklist]
+                if not available_models:
+                    return jsonify({'success': False, 'message': '当前账号无可用模型，请联系管理员'})
+                model_name = available_models[0]
+                
+    except Exception as e:
+        print(f"Permission check error: {e}")
+    # ------------------
     
     # 如果是重新生成，处理版本保存逻辑
     if is_regenerate and conversation_id and regenerate_index is not None:
@@ -862,6 +1036,106 @@ def delete_basis(title):
     except Exception as e:
         return jsonify({'success': False, 'message': str(e)})
 
+@app.route('/api/knowledge/settings', methods=['POST'])
+@require_login
+def update_knowledge_settings():
+    """更新知识点设置（标题、公开、协作）"""
+    username = session['username']
+    data = request.get_json()
+    title = data.get('title')
+    new_title = data.get('new_title')
+    is_public = data.get('public')
+    is_collaborative = data.get('collaborative')
+    
+    user = User(username)
+    success, msg = user.updateBasisSettings(title, new_title, is_public, is_collaborative)
+    
+    if success:
+        # 如果获取了新标题或状态，返回新的 share_url
+        meta = user.getBasisMetadata(new_title or title)
+        share_id = meta.get('share_id', '')
+        base_url = request.host_url.rstrip('/')
+        share_url = f"{base_url}/public/knowledge/{username}/{share_id}"
+        return jsonify({'success': True, 'message': msg, 'share_url': share_url})
+    return jsonify({'success': False, 'message': msg})
+
+@app.route('/api/knowledge/basis/<title>/share', methods=['POST'])
+@require_login
+def share_basis(title):
+    """切换知识点公开状态"""
+    username = session['username']
+    user = User(username)
+    data = request.get_json()
+    is_public = data.get('public', False)
+    
+    success, msg = user.setBasisPublic(title, is_public)
+    if success:
+        meta = user.getBasisMetadata(title)
+        share_id = meta.get('share_id', '')
+        # 生成公开访问地址
+        base_url = request.host_url.rstrip('/')
+        share_url = f"{base_url}/public/knowledge/{username}/{share_id}"
+        return jsonify({'success': True, 'message': msg, 'share_url': share_url})
+    return jsonify({'success': False, 'message': msg})
+
+# ==================== 公开访问页面 (无需登录) ====================
+
+@app.route('/public/knowledge/<username>/<share_id>', methods=['GET'])
+def public_view_knowledge(username, share_id):
+    """公开查看知识点"""
+    user = User(username)
+    title, meta = user.getBasisByShareId(share_id)
+    if not meta or not meta.get("public"):
+        return "该知识点未公开或不存在", 403
+        
+    content = user.getBasisContent(title)
+    # 如果允许协作，则进入协作编辑器，否则只读渲染
+    if meta.get("collaborative"):
+        return render_template('knowledge_public_edit.html', 
+                               username=username, 
+                               title=title, 
+                               share_id=share_id,
+                               content=content)
+    else:
+        return render_template('knowledge_public_view.html', 
+                               username=username, 
+                               title=title, 
+                               content=content)
+
+@app.route('/api/public/knowledge/<username>/<share_id>', methods=['GET'])
+def public_api_get_knowledge(username, share_id):
+    """公开 API 获取知识点内容"""
+    user = User(username)
+    title, meta = user.getBasisByShareId(share_id)
+    if not meta or not meta.get("public"):
+        return jsonify({'success': False, 'message': 'Forbidden'}), 403
+        
+    content = user.getBasisContent(title)
+    return jsonify({
+        'success': True,
+        'title': title,
+        'content': content,
+        'username': username,
+        'collaborative': meta.get("collaborative", False)
+    })
+
+@app.route('/api/public/knowledge/<username>/<share_id>', methods=['PUT', 'POST'])
+def public_api_edit_knowledge(username, share_id):
+    """公开编辑知识点（如果已公开且允许协作则允许）"""
+    user = User(username)
+    title, meta = user.getBasisByShareId(share_id)
+    if not meta or not meta.get("public") or not meta.get("collaborative"):
+        return jsonify({'success': False, 'message': 'Forbidden'}), 403
+        
+    data = request.get_json()
+    content = data.get('content')
+    
+    if not content:
+        return jsonify({'success': False, 'message': '内容不能为空'})
+        
+    success, msg = user.updateBasisContent(title, content)
+    return jsonify({'success': success, 'message': msg})
+
 
 @app.route('/api/knowledge/short', methods=['GET'])
 @require_login
@@ -1044,9 +1318,33 @@ def get_knowledge_graph():
                     'knowledge_ids': [],
                     'position': {'x': 100, 'y': 100}
                 }
-            graph['categories']['未分类']['knowledge_ids'].extend(uncategorized)
+            # 过滤重复
+            current_ids = set(graph['categories']['未分类']['knowledge_ids'])
+            for uk in uncategorized:
+                if uk not in current_ids:
+                    graph['categories']['未分类']['knowledge_ids'].append(uk)
         
-        return jsonify({'success': True, 'graph': graph})
+        return jsonify({'success': True, 'categories': graph['categories'], 'connections': graph['connections']})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
+@app.route('/api/knowledge/graph/positions', methods=['POST'])
+@require_login
+def save_knowledge_graph_positions():
+    """保存知识图谱节点/分类位置"""
+    username = session['username']
+    user = User(username)
+    data = request.get_json()
+    
+    try:
+        graph = user.get_knowledge_graph()
+        # 更新全部分类位置
+        for cat_name, pos in data.items():
+            if cat_name in graph['categories']:
+                graph['categories'][cat_name]['position'] = pos
+        
+        user.save_knowledge_graph(graph)
+        return jsonify({'success': True})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
 
@@ -1492,6 +1790,38 @@ def ai_generate_index():
         import traceback
         traceback.print_exc()
         return jsonify({'success': False, 'error': str(e)})
+
+@app.route('/api/knowledge/vectorize', methods=['POST'])
+@require_login
+def vectorize_knowledge():
+    """将知识点向量化"""
+    username = session['username']
+    user = User(username)
+    data = request.get_json()
+    
+    title = data.get('title')
+    text = data.get('text')
+    
+    if not text:
+        # 如果没传 text，尝试从知识库读取
+        if title:
+            text = user.getBasisContent(title)
+        else:
+            return jsonify({'success': False, 'message': '未提供内容或标题'})
+            
+    try:
+        model = Model(username, auto_create=False)
+        vector = model.get_embedding(text)
+        
+        # 目前仅返回向量结果。后续可以存入 ChromaDB 等
+        return jsonify({
+            'success': True, 
+            'vector_length': len(vector),
+            'vector_preview': vector[:5], # 仅返回前5位作为预览
+            'message': '向量化成功'
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'message': f'向量化失败: {str(e)}'})
 
 
 @app.route('/api/token_logs', methods=['GET'])

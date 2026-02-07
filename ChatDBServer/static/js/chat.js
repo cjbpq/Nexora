@@ -282,9 +282,12 @@ function initUI() {
         });
     });
 
-    const submitAddUserBtn = document.getElementById('submitAddUser');
+    const submitAddUserBtn = document.getElementById('addUserBtn');
     if (submitAddUserBtn) {
-        submitAddUserBtn.addEventListener('click', submitAddUser);
+        submitAddUserBtn.addEventListener('click', (e) => {
+            e.preventDefault();
+            submitAddUser();
+        });
     }
 }
 
@@ -857,7 +860,14 @@ function appendMessage(msg, index) {
         // Wrap user content in bubble for alignment
         const bubble = document.createElement('div');
         bubble.className = 'message-bubble';
-        bubble.textContent = msg.content;
+        bubble.innerHTML = marked.parse(msg.content);
+        renderMathInElement(bubble, {
+            delimiters: [
+                {left: "$$", right: "$$", display: true},
+                {left: "$", right: "$", display: false}
+            ],
+            throwOnError: false
+        });
         content.appendChild(bubble);
         
         // User Message Actions (only delete)
@@ -1332,11 +1342,13 @@ function renderKnowledgeList(container, items, type) {
 // --- Knowledge View Logic ---
 let easyMDE = null;
 let originalHeaderState = null;
+let currentViewingKnowledge = null;
 
 async function viewKnowledge(title) {
+    currentViewingKnowledge = title;
     const viewer = document.getElementById('knowledgeViewer');
     const msgs = document.getElementById('messagesContainer');
-    const inputWrapper = document.getElementById('inputWrapper'); // Updated ID in HTML
+    const inputWrapper = document.getElementById('inputWrapper');
     const headerTitle = document.getElementById('conversationTitle');
     const headerLeft = document.querySelector('.header-left');
     const headerRight = document.querySelector('.header-right');
@@ -1373,16 +1385,21 @@ async function viewKnowledge(title) {
         </button>
     `;
 
-    // Save Button (Right)
+    // Right Buttons: Settings, Save, Delete
     headerRight.innerHTML = `
-        <button class="btn-primary-outline" onclick="confirmDeleteKnowledge('${title}')" style="border:1px solid #ff4d4f; color:#ff4d4f; margin-right: 10px; background: #fff0f0;">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
-            Delete
-        </button>
-        <button class="btn-primary-outline" onclick="saveKnowledge('${title}')" style="border:1px solid #ddd; color:#333;">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path><polyline points="17 21 17 13 7 13 7 21"></polyline><polyline points="7 3 7 8 15 8"></polyline></svg>
-            Save
-        </button>
+        <div class="header-actions">
+            <button class="btn-header-save" id="btnSaveKnowledge" onclick="saveKnowledge('${title.replace(/'/g, "\\'")}')">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path><polyline points="17 21 17 13 7 13 7 21"></polyline><polyline points="7 3 7 8 15 8"></polyline></svg>
+                保存
+            </button>
+            <div class="header-divider"></div>
+            <button class="btn-header-icon" onclick="openKnowledgeSettingsModal()" title="设置">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+            </button>
+            <button class="btn-header-icon danger" onclick="confirmDeleteKnowledge('${title.replace(/'/g, "\\'")}')" title="删除">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
+            </button>
+        </div>
     `;
 
     // 5. Initialize Editor
@@ -1393,31 +1410,36 @@ async function viewKnowledge(title) {
             spellChecker: false,
             sideBySideFullscreen: false,
             previewRender: function(plainText) {
-                return marked.parse(plainText);
+                const html = marked.parse(plainText);
+                const tempDiv = document.createElement('div');
+                tempDiv.innerHTML = html;
+                renderMathInElement(tempDiv, {
+                    delimiters: [
+                        {left: '$$', right: '$$', display: true},
+                        {left: '$', right: '$', display: false}
+                    ],
+                    throwOnError: false
+                });
+                return tempDiv.innerHTML;
             },
             toolbar: ["bold", "italic", "heading", "|", "quote", "unordered-list", "ordered-list", "|", 
-                      "link", "image", "table", "|", "preview", "side-by-side", "fullscreen", "|", "guide"]
+                      "link", "image", "table", "|", "preview", "side-by-side", "fullscreen"]
         });
         
-        // Toggle to preview mode by default
-        setTimeout(() => {
-            const previewButton = document.querySelector('.editor-toolbar .fa-eye');
-            if (previewButton && !easyMDE.isPreviewActive()) {
-                EasyMDE.togglePreview(easyMDE);
-            }
-        }, 150);
+        // 提示用户如何切换模式
+        showToast('小贴士：点击编辑器工具栏中的“眼睛”图标可切换预览与编辑模式');
     }
     
-    // Adjust Editor Height dynamically - use fixed viewport calculation
-    const viewportHeight = window.innerHeight;
-    const headerHeight = 60; // chat-header height
-    const editorHeight = viewportHeight - headerHeight;
+    // Default to Preview Mode
+    if (!easyMDE.isPreviewActive()) {
+        EasyMDE.togglePreview(easyMDE);
+    }
     
-    // Set explicit height on CodeMirror
-    easyMDE.codemirror.setSize(null, `${editorHeight}px`);
+    const viewportHeight = window.innerHeight;
+    const headerHeight = 60; 
+    easyMDE.codemirror.setSize(null, `${viewportHeight - headerHeight}px`);
 
     easyMDE.value(content || '');
-    // Refresh to fix layout issues if hidden previously
     setTimeout(() => easyMDE.codemirror.refresh(), 100);
 }
 
@@ -1429,38 +1451,25 @@ function closeKnowledgeView() {
     const headerLeft = document.querySelector('.header-left');
     const headerRight = document.querySelector('.header-right');
 
-    // UI Switch
     viewer.style.display = 'none';
-    msgs.style.display = 'flex'; // flex for messages center alignment
+    msgs.style.display = 'flex';
     if(inputWrapper) inputWrapper.style.display = 'block';
 
-    // Restore Header
     if (originalHeaderState) {
         headerTitle.textContent = originalHeaderState.title;
         headerLeft.innerHTML = originalHeaderState.leftHTML;
         headerRight.innerHTML = originalHeaderState.rightHTML;
-        
-        // Re-attach event listeners (innerHTML destroys them)
-        // Sidebar Toggle
-        const toggleSidebar = document.getElementById('toggleSidebar');
-        if(toggleSidebar) {
-             toggleSidebar.addEventListener('click', () => {
-                if (window.innerWidth <= 768) els.sidebar.classList.toggle('mobile-open');
-                else els.sidebar.classList.toggle('collapsed');
-            });
-        }
-        // Model Selector Logic (Need to re-bind because elements were destroyed)
-        els.currentModelDisplay = document.getElementById('currentModelDisplay');
-        els.modelOptions = document.getElementById('modelOptions');
-        // Re-init model selector events if needed or just re-render
-        // Ideally we shouldn't destroy the whole headerLeft, but just hide stuff. 
-        // For now, let's call loadModels() again or manually re-bind to be safe.
         loadModels(); 
-
-        // Knowledge Panel Toggle
+        
+        const toggleSidebar = document.getElementById('toggleSidebar');
+        if(toggleSidebar) toggleSidebar.onclick = () => {
+            if (window.innerWidth <= 768) els.sidebar.classList.toggle('mobile-open');
+            else els.sidebar.classList.toggle('collapsed');
+        };
         const toggleKP = document.getElementById('toggleKnowledgePanel');
         if(toggleKP) toggleKP.onclick = () => els.knowledgePanel.classList.toggle('visible');
     }
+    currentViewingKnowledge = null;
 }
 
 async function saveKnowledge(title) {
@@ -1475,35 +1484,17 @@ async function saveKnowledge(title) {
         });
         const data = await res.json();
         if(data.success) {
-            showToast('Saved successfully');
+            showToast('保存成功');
         } else {
-            showToast('Error saving: ' + data.message);
+            showToast('保存失败: ' + data.message);
         }
-    } catch(e) {
-        showToast('Error saving: ' + e.message);
+    } catch (e) {
+        showToast('请求异常: ' + e.message);
     }
 }
 
 function confirmDeleteKnowledge(title) {
-    const backdrop = document.getElementById('confirmBackdrop');
-    const msg = document.getElementById('confirmMessage');
-    const okBtn = document.getElementById('confirmOkBtn');
-    
-    msg.textContent = `Are you sure you want to delete "${title}"? This cannot be undone.`;
-    okBtn.onclick = () => deleteKnowledge(title);
-    
-    if(backdrop) {
-        backdrop.style.display = 'flex'; // Or add class 'active' if you used the CSS from style.css
-        backdrop.classList.add('active');
-    }
-}
-
-function closeConfirmModal() {
-    const backdrop = document.getElementById('confirmBackdrop');
-    if(backdrop) {
-        backdrop.style.display = 'none';
-        backdrop.classList.remove('active');
-    }
+    showConfirm("删除知识", `确定要彻底删除 "${title}" 吗？此操作无法撤销。`, "danger", () => deleteKnowledge(title));
 }
 
 async function deleteKnowledge(title) {
@@ -1516,16 +1507,114 @@ async function deleteKnowledge(title) {
         closeConfirmModal();
         
         if(data.success) {
-            showToast('Deleted successfully');
+            showToast('删除成功');
             closeKnowledgeView();
-            loadKnowledge(); // Refresh the list
+            loadKnowledge(); 
         } else {
-            showToast('Error deleting: ' + (data.message || data.error));
+            showToast('删除失败: ' + (data.message || data.error));
         }
     } catch(e) {
         closeConfirmModal();
-        showToast('Error deleting: ' + e.message);
+        showToast('请求异常: ' + e.message);
     }
+}
+
+// --- Knowledge Settings ---
+async function openKnowledgeSettingsModal() {
+    if (!currentViewingKnowledge) return;
+    const title = currentViewingKnowledge;
+    
+    try {
+        // Ensure we have username
+        if(!currentUsername) await checkUserRole();
+
+        const resMeta = await fetch('/api/knowledge/list');
+        const metaData = await resMeta.json();
+        
+        const metadata = metaData.basis_knowledge[title];
+        if (!metadata) return;
+
+        document.getElementById('settingTargetTitle').value = title;
+        document.getElementById('settingPublic').checked = metadata.public || false;
+        document.getElementById('settingCollaborative').checked = metadata.collaborative || false;
+        
+        const shareSection = document.getElementById('shareLinkSection');
+        if (metadata.public) {
+            shareSection.style.display = 'block';
+            const base = window.location.origin;
+            // Ensure share_id is present (api returns it now)
+            const shareId = metadata.share_id || 'unknown';
+            document.getElementById('shareUrlDisplay').value = `${base}/public/knowledge/${currentUsername}/${shareId}`;
+        } else {
+            shareSection.style.display = 'none';
+        }
+        
+        if (metadata.updated_at) {
+            document.getElementById('lastModifyTime').textContent = new Date(metadata.updated_at * 1000).toLocaleString();
+        }
+
+        document.getElementById('knowledgeSettingsModal').classList.add('active');
+    } catch(e) { console.error(e); }
+}
+
+function closeKnowledgeSettingsModal() {
+    document.getElementById('knowledgeSettingsModal').classList.remove('active');
+}
+
+async function applyKnowledgeSettings() {
+    const oldTitle = currentViewingKnowledge;
+    const newTitle = document.getElementById('settingTargetTitle').value.trim();
+    const isPublic = document.getElementById('settingPublic').checked;
+    const isCollaborative = document.getElementById('settingCollaborative').checked;
+    
+    if (!newTitle) return showToast('标题不能为空');
+
+    try {
+        const res = await fetch('/api/knowledge/settings', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                title: oldTitle,
+                new_title: newTitle,
+                public: isPublic,
+                collaborative: isCollaborative
+            })
+        });
+        const data = await res.json();
+        if (data.success) {
+            showToast('设置已更新');
+            // update local current share_id if provided
+            if (data.share_url) {
+                // Update the share URL immediately
+                const shareSection = document.getElementById('shareLinkSection');
+                const urlInput = document.getElementById('shareUrlDisplay');
+                shareSection.style.display = 'block';
+                urlInput.value = data.share_url;
+            } else if (!isPublic) {
+                document.getElementById('shareLinkSection').style.display = 'none';
+            }
+
+            if (newTitle !== oldTitle) {
+                closeKnowledgeSettingsModal(); // Must close if title changed as view logic depends on title
+                closeKnowledgeView();
+                viewKnowledge(newTitle);
+            } else {
+                // Do not close modal, user might want to copy link
+                // Update title just in case
+                if(currentViewingKnowledge) currentViewingKnowledge = newTitle;
+            }
+            loadKnowledge(); 
+        } else {
+            showToast('更新失败: ' + data.message);
+        }
+    } catch(e) { showToast('网络错误: ' + e.message); }
+}
+
+function copyShareUrl() {
+    const input = document.getElementById('shareUrlDisplay');
+    input.select();
+    document.execCommand('copy');
+    showToast('链接已复制');
 }
 
 function showToast(msg) {
@@ -1540,8 +1629,27 @@ function showToast(msg) {
     setTimeout(() => toast.classList.remove('show'), 3000);
 }
 
-// --- Models ---
-let selectedModelId = null;
+async function loadKnowledge(cid) {
+    try {
+        const [resBasis, resShort] = await Promise.all([
+            fetch('/api/knowledge/basis'),
+            fetch('/api/knowledge/short')
+        ]);
+        
+        const basisData = await resBasis.json();
+        const shortData = await resShort.json();
+
+        if (basisData.success) {
+            renderKnowledgeList(els.panelBasisList, basisData.knowledge || [], 'basis');
+            if(els.panelBasisCount) els.panelBasisCount.textContent = (basisData.knowledge || []).length;
+        }
+        if (shortData.success) {
+            renderKnowledgeList(els.panelShortList, shortData.memories || shortData.knowledge || [], 'short');
+            if(els.panelShortCount) els.panelShortCount.textContent = (shortData.memories || shortData.knowledge || []).length;
+        }
+
+    } catch(e) { console.error("Error loading knowledge", e); }
+}
 
 async function loadModels() {
     try {
@@ -1559,9 +1667,18 @@ function renderCustomModelSelect(models, defaultModel) {
     // Clear
     els.modelOptions.innerHTML = '';
     
+    if (models.length === 0) {
+        selectedModelId = null;
+        if(els.currentModelName) els.currentModelName.textContent = '无可用的模型';
+        return;
+    }
+    
     // Setup initial
     const stored = localStorage.getItem('selectedModel');
-    selectedModelId = (models.find(m => m.id === stored) ? stored : defaultModel) || models[0].id;
+    const isValidStored = models.find(m => m.id === stored);
+    const isValidDefault = models.find(m => m.id === defaultModel);
+    
+    selectedModelId = (isValidStored ? stored : (isValidDefault ? defaultModel : models[0].id));
     
     // Render Options
     models.forEach(m => {

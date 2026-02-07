@@ -1,6 +1,20 @@
 import os
 import json
 import time
+import threading
+
+# 全局文件锁，防止多用户并发写入 user.json 导致数据“串”或丢失
+_global_file_lock = threading.Lock()
+# 用户目录锁，防止同一用户的 database.json 并发写入冲突
+_user_locks = {}
+_user_locks_lock = threading.Lock()
+
+def get_user_lock(username):
+    with _user_locks_lock:
+        if username not in _user_locks:
+            _user_locks[username] = threading.Lock()
+        return _user_locks[username]
+
 # 知识库
 
 SHORT_TIME = 0
@@ -38,68 +52,184 @@ class User:
         return users[self.user]["password"]
     
     def getKnowledgeList(self, _type=SHORT_TIME):
-        with open(self.path + "database.json", "r", encoding="utf-8") as f:
-            db = json.load(f)
+        lock = get_user_lock(self.user)
+        with lock:
+            if not os.path.exists(self.path + "database.json"):
+                return {}
+            with open(self.path + "database.json", "r", encoding="utf-8") as f:
+                db = json.load(f)
+            
+            # 自动迁移：为旧数据添加 share_id 和 collaborative
+            migrated = False
+            if "data_basis" in db:
+                import hashlib
+                for title, meta in db["data_basis"].items():
+                    if "share_id" not in meta:
+                        meta["share_id"] = hashlib.md5(f"{title}{meta.get('created_at', 0)}".encode()).hexdigest()[:8]
+                        migrated = True
+                    if "collaborative" not in meta:
+                        meta["collaborative"] = False
+                        migrated = True
+            if migrated:
+                with open(self.path + "database.json", "w", encoding="utf-8") as f:
+                    json.dump(db, f, indent=4, ensure_ascii=False)
+
         if _type == SHORT_TIME:
             return db["data_short"]
         elif _type == BASIS:
             return db["data_basis"]
         else:
             return {}
-        
-    def addShort(self, title):
+
+    def getBasisByShareId(self, share_id):
+        """通过 share_id 查找知识点"""
         with open(self.path + "database.json", "r", encoding="utf-8") as f:
             db = json.load(f)
+        for title, meta in db["data_basis"].items():
+            if meta.get("share_id") == share_id:
+                return title, meta
+        return None, None
+
+    def updateBasisSettings(self, old_title, new_title=None, is_public=None, is_collaborative=None):
+        """更新基础知识设置"""
+        lock = get_user_lock(self.user)
+        with lock:
+            with open(self.path + "database.json", "r", encoding="utf-8") as f:
+                db = json.load(f)
+            
+            if old_title not in db["data_basis"]:
+                return False, "知识点不存在"
+            
+            meta = db["data_basis"][old_title]
+            
+            if is_public is not None:
+                meta["public"] = is_public
+            if is_collaborative is not None:
+                meta["collaborative"] = is_collaborative
+            
+            if new_title and new_title != old_title:
+                if new_title in db["data_basis"]:
+                    return False, "新标题已存在"
+                # 迁移数据
+                db["data_basis"][new_title] = db["data_basis"].pop(old_title)
+                # 更新知识图谱
+                graph = self.get_knowledge_graph()
+                for cat in graph["categories"].values():
+                    if old_title in cat["knowledge_ids"]:
+                        cat["knowledge_ids"] = [new_title if tid == old_title else tid for tid in cat["knowledge_ids"]]
+                for conn in graph["connections"]:
+                    if conn["from"] == old_title: conn["from"] = new_title
+                    if conn["to"] == old_title: conn["to"] = new_title
+                if "knowledge_nodes" in graph and old_title in graph["knowledge_nodes"]:
+                    graph["knowledge_nodes"][new_title] = graph["knowledge_nodes"].pop(old_title)
+                self.save_knowledge_graph(graph)
+                
+            meta["updated_at"] = time.time()
+            with open(self.path + "database.json", "w", encoding="utf-8") as f:
+                json.dump(db, f, indent=4, ensure_ascii=False)
+            return True, "更新成功"
         
-        # 找到已存在的最大ID
-        max_id = -1
-        for k in db["data_short"].keys():
-            try:
-                curr_id = int(k)
-                if curr_id > max_id:
-                    max_id = curr_id
-            except ValueError:
-                pass
-        
-        ID = max_id + 1
-        
-        db["data_short"][str(ID)] = title
-        with open(self.path + "database.json", "w", encoding="utf-8") as f:
-            json.dump(db, f, indent=4, ensure_ascii=False)
+    def addShort(self, title):
+        lock = get_user_lock(self.user)
+        with lock:
+            with open(self.path + "database.json", "r", encoding="utf-8") as f:
+                db = json.load(f)
+            
+            # 找到已存在的最大ID
+            max_id = -1
+            for k in db["data_short"].keys():
+                try:
+                    curr_id = int(k)
+                    if curr_id > max_id:
+                        max_id = curr_id
+                except ValueError:
+                    pass
+            
+            ID = max_id + 1
+            
+            db["data_short"][str(ID)] = title
+            with open(self.path + "database.json", "w", encoding="utf-8") as f:
+                json.dump(db, f, indent=4, ensure_ascii=False)
         return True
     
     def addBasis(self, title, context, url):
-        with open(self.path + "database.json", "r", encoding="utf-8") as f:
-            db = json.load(f)
+        lock = get_user_lock(self.user)
+        with lock:
+            with open(self.path + "database.json", "r", encoding="utf-8") as f:
+                db = json.load(f)
 
-        # 找到已存在的最大ID（根据文件名 xxx.txt）
-        max_id = 0
-        if db["data_basis"]:
-            for item in db["data_basis"].values():
-                src = item["src"]
-                try:
-                    basename = os.path.basename(src)
-                    if basename.endswith('.txt'):
-                        curr_id = int(basename[:-4])
-                        if curr_id > max_id:
-                            max_id = curr_id
-                except (ValueError, IndexError):
-                    pass
+            # 找到已存在的最大ID（根据文件名 xxx.txt）
+            max_id = 0
+            if db["data_basis"]:
+                for item in db["data_basis"].values():
+                    src = item["src"]
+                    try:
+                        basename = os.path.basename(src)
+                        if basename.endswith('.txt'):
+                            curr_id = int(basename[:-4])
+                            if curr_id > max_id:
+                                max_id = curr_id
+                    except (ValueError, IndexError):
+                        pass
 
-        ID = max_id + 1
-        db["data_basis"][title] = {
-            "src": f"./data/users/{self.user}/database/{ID}.txt",
-            "url": url
-        }
-        with open(f"./data/users/{self.user}/database/{ID}.txt", "w", encoding="utf-8") as f:
-            f.write(context)
+            ID = max_id + 1
+            import hashlib
+            share_id = hashlib.md5(f"{title}{time.time()}".encode()).hexdigest()[:8]
+            db["data_basis"][title] = {
+                "src": f"./data/users/{self.user}/database/{ID}.txt",
+                "url": url,
+                "public": False,  # 默认不公开
+                "collaborative": False, # 默认不开启协同编辑
+                "share_id": share_id,
+                "created_at": time.time(),
+                "updated_at": time.time()
+            }
+            with open(f"./data/users/{self.user}/database/{ID}.txt", "w", encoding="utf-8") as f:
+                f.write(context)
 
-        with open(self.path + "database.json", "w", encoding="utf-8") as f:
-            json.dump(db, f, indent=4, ensure_ascii=False)
-        
+            with open(self.path + "database.json", "w", encoding="utf-8") as f:
+                json.dump(db, f, indent=4, ensure_ascii=False)
         # 自动扫描连接
         self.auto_link_knowledge(title)
         return True
+
+    def setBasisPublic(self, title, is_public=True):
+        """设置知识点是否公开"""
+        lock = get_user_lock(self.user)
+        try:
+            with lock:
+                with open(self.path + "database.json", "r", encoding="utf-8") as f:
+                    db = json.load(f)
+                
+                if title in db["data_basis"]:
+                    db["data_basis"][title]["public"] = is_public
+                    db["data_basis"][title]["updated_at"] = time.time()
+                    with open(self.path + "database.json", "w", encoding="utf-8") as f:
+                        json.dump(db, f, indent=4, ensure_ascii=False)
+                    return True, "更新成功"
+                return False, "知识点不存在"
+        except Exception as e:
+            return False, str(e)
+
+    def isBasisPublic(self, title):
+        """检查知识点是否公开"""
+        try:
+            with open(self.path + "database.json", "r", encoding="utf-8") as f:
+                db = json.load(f)
+            if title in db["data_basis"]:
+                return db["data_basis"][title].get("public", False)
+            return False
+        except:
+            return False
+
+    def getBasisMetadata(self, title):
+        """获取元数据"""
+        try:
+            with open(self.path + "database.json", "r", encoding="utf-8") as f:
+                db = json.load(f)
+            return db["data_basis"].get(title)
+        except:
+            return None
 
     def auto_link_knowledge(self, title):
         """
@@ -336,15 +466,16 @@ class User:
         try:
             users_meta_path = "./data/user.json"
             if os.path.exists(users_meta_path):
-                with open(users_meta_path, "r", encoding="utf-8") as f:
-                    users_data = json.load(f)
-                
-                if self.user in users_data:
-                    current_usage = users_data[self.user].get("token_usage", 0)
-                    users_data[self.user]["token_usage"] = current_usage + (input_tokens + output_tokens)
+                with _global_file_lock:  # 使用锁保护全局文件的读写操作
+                    with open(users_meta_path, "r", encoding="utf-8") as f:
+                        users_data = json.load(f)
                     
-                    with open(users_meta_path, "w", encoding="utf-8") as f:
-                        json.dump(users_data, f, indent=4, ensure_ascii=False)
+                    if self.user in users_data:
+                        current_usage = users_data[self.user].get("token_usage", 0)
+                        users_data[self.user]["token_usage"] = current_usage + (input_tokens + output_tokens)
+                        
+                        with open(users_meta_path, "w", encoding="utf-8") as f:
+                            json.dump(users_data, f, indent=4, ensure_ascii=False)
         except Exception as e:
             print(f"Error updating global token usage: {e}")
             

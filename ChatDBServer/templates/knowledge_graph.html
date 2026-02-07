@@ -1,1109 +1,186 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Knowledge Hub - ChatDB</title>
+    <title>Knowledge Hub - Knowa</title>
     <!-- Fonts -->
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    
-    <!-- CSS 重构：现代 AI 仪表盘风格 -->
     <link rel="stylesheet" href="/static/css/knowledge_graph_div.css">
     <style>
         :root {
-            --primary: #3b82f6;
-            --primary-light: #eff6ff;
-            --secondary: #d946ef;
-            --bg: #fdfdfd;
-            --surface: #ffffff;
-            --text: #1e293b;
-            --text-muted: #64748b;
-            --border: #e2e8f0;
-            --sidebar-width: 380px;
-            --radius: 12px;
-            --shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -2px rgba(0, 0, 0, 0.05);
-            --shadow-lg: 0 20px 25px -5px rgba(0, 0, 0, 0.05), 0 8px 10px -6px rgba(0, 0, 0, 0.05);
+            --primary: #3b82f6; --bg: #fdfdfd; --surface: #ffffff;
+            --text: #1e293b; --text-muted: #64748b; --border: #e2e8f0;
+            --sidebar-width: 400px; --radius: 12px;
+            --shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05);
         }
-
         * { box-sizing: border-box; }
         body, html { 
             margin: 0; padding: 0; width: 100%; height: 100%; 
-            font-family: 'Inter', -apple-system, system-ui, sans-serif; 
-            background: var(--bg); color: var(--text);
-            overflow: hidden;
-            -webkit-font-smoothing: antialiased;
+            font-family: 'Inter', sans-serif; 
+            background: var(--bg); color: var(--text); overflow: hidden;
         }
-
         .layout { display: flex; height: 100vh; width: 100vw; position: relative; }
-
-        /* 可视化图谱区域 */
-        .canvas-area { 
-            flex: 1; 
-            position: relative; 
-            background-color: var(--bg);
-            background-image: 
-                radial-gradient(circle at 1px 1px, #e2e8f0 1px, transparent 0);
-            background-size: 32px 32px;
-        }
-
-        /* 顶部控制栏 - 悬浮设计 */
+        .canvas-area { flex: 1; position: relative; background-color: var(--bg); }
         .top-bar {
-            position: absolute; top: 24px; left: 24px; right: 24px;
-            display: flex; gap: 16px; align-items: center;
-            z-index: 10; pointer-events: none;
+            position: absolute; top: 20px; left: 20px; right: 20px;
+            display: flex; gap: 16px; align-items: center; z-index: 100; pointer-events: none;
         }
         .top-bar > * { pointer-events: auto; }
-        
         .search-container {
-            background: var(--surface); 
-            border: 1px solid var(--border);
-            border-radius: 16px; 
-            padding: 0 18px; 
-            display: flex; 
-            align-items: center;
-            box-shadow: var(--shadow-lg); 
-            width: 320px;
-            height: 48px;
-            transition: width 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            background: var(--surface); border: 1px solid var(--border);
+            border-radius: 12px; padding: 0 15px; display: flex; align-items: center;
+            box-shadow: var(--shadow); width: 300px; height: 44px;
         }
-        .search-container:focus-within {
-            width: 400px;
-            border-color: var(--primary);
-        }
-        .search-container input { 
-            border: none; outline: none; margin-left: 12px; width: 100%; 
-            font-size: 14px; background: transparent; color: var(--text);
-        }
-
-        .btn-group { display: flex; gap: 12px; }
+        .search-container input { border: none; outline: none; margin-left: 10px; width: 100%; font-size: 14px; background: transparent; }
+        .btn-group { display: flex; gap: 8px; }
         .btn {
-            background: var(--surface); 
-            border: 1px solid var(--border);
-            height: 48px;
-            padding: 0 20px; 
-            border-radius: 16px; 
-            cursor: pointer;
-            font-size: 14px; 
-            font-weight: 600; 
-            display: flex; 
-            align-items: center; 
-            gap: 10px;
-            box-shadow: var(--shadow); 
-            transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
-            color: var(--text-muted);
+            background: var(--surface); border: 1px solid var(--border); height: 44px;
+            padding: 0 16px; border-radius: 12px; cursor: pointer; font-size: 13px; 
+            font-weight: 500; display: flex; align-items: center; gap: 8px;
+            box-shadow: var(--shadow); color: var(--text-muted);
         }
-        .btn i { font-size: 16px; }
-        .btn:hover { 
-            background: #fff; 
-            transform: translateY(-2px); 
-            box-shadow: var(--shadow-lg); 
-            color: var(--text);
-            border-color: #cbd5e1;
-        }
-        .btn:active { transform: translateY(0); }
-        .btn-primary { 
-            background: var(--primary); 
-            color: white; 
-            border: none; 
-        }
-        .btn-primary:hover { background: #2563eb; color: white; }
-
-        /* 右侧详情面板 - 玻璃拟态 */
+        .btn:hover { background: #f8fafc; color: var(--text); }
+        .btn-primary { background: var(--primary); color: white; border: none; }
         .inspector {
-            width: var(--sidebar-width); 
-            background: rgba(255, 255, 255, 0.95);
-            backdrop-filter: blur(16px);
-            border-left: 1px solid var(--border); 
-            display: flex; 
-            flex-direction: column;
-            transform: translateX(100%); 
-            transition: transform 0.4s cubic-bezier(0.4, 0, 0.2, 1);
-            position: absolute; right: 0; top: 0; bottom: 0; z-index: 100;
-            box-shadow: -20px 0 40px -10px rgba(0, 0, 0, 0.05);
+            width: var(--sidebar-width); background: #fff; border-left: 1px solid var(--border); 
+            display: flex; flex-direction: column; transform: translateX(100%); 
+            transition: transform 0.3s ease; position: absolute; right: 0; top: 0; bottom: 0; z-index: 500;
+            box-shadow: -10px 0 30px rgba(0,0,0,0.05);
         }
         .inspector.open { transform: translateX(0); }
-
-        .inspector-header {
-            padding: 32px; 
-            border-bottom: 1px solid var(--border);
-            display: flex; 
-            justify-content: space-between; 
-            align-items: center;
-        }
-        .inspector-header h2 { margin: 0; font-size: 22px; font-weight: 800; color: #0f172a; letter-spacing: -0.02em; }
-        
-        .inspector-body { 
-            flex: 1; 
-            padding: 32px; 
-            overflow-y: auto; 
-            display: flex;
-            flex-direction: column;
-            gap: 24px;
-        }
-        
-        .editor-container { flex: 1; display: flex; flex-direction: column; gap: 12px; }
-        .editor-container label { font-size: 13px; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; }
-        .editor-container textarea { 
-            flex: 1; width: 100%; border: 1px solid var(--border); border-radius: var(--radius);
-            padding: 16px; font-family: inherit; font-size: 15px; line-height: 1.6;
-            resize: none; outline: none; transition: all 0.2s;
-            background: #f8fafc;
-        }
-        .editor-container textarea:focus { 
-            border-color: var(--primary); 
-            background: #fff; 
-            box-shadow: 0 0 0 4px rgba(59, 130, 246, 0.1);
-        }
-
-        /* 底部操作 */
-        .inspector-footer {
-            padding: 24px 32px;
-            border-top: 1px solid var(--border);
-            display: flex;
-            gap: 12px;
-        }
-        .inspector-footer .btn { flex: 1; justify-content: center; height: 44px; }
-
-        /* 浮动缩放控制 */
-        .zoom-controls {
-            position: absolute; bottom: 24px; left: 24px; display: flex; flex-direction: column; gap: 8px;
-        }
-        .btn-icon { 
-            width: 40px; height: 40px; border-radius: 12px; padding: 0; 
-            justify-content: center; align-items: center;
-        }
-
-        /* 提示框 */
-        .toast {
-            position: fixed; bottom: 32px; left: 50%; transform: translateX(-50%);
-            background: #0f172a; color: #fff; padding: 14px 28px; border-radius: 16px;
-            font-size: 14px; font-weight: 500; z-index: 2000; box-shadow: var(--shadow-lg);
-            animation: slideUp 0.4s cubic-bezier(0.16, 1, 0.3, 1);
-        }
-        @keyframes slideUp { from { transform: translate(-50%, 100%); opacity: 0; } to { transform: translate(-50%, 0); opacity: 1; } }
-
-        /* 加载遮罩 */
-        .loading-overlay {
-            position: fixed; top: 0; left: 0; right: 0; bottom: 0;
-            background: rgba(255,255,255,0.7); display: none;
-            justify-content: center; align-items: center; z-index: 1000;
-            backdrop-filter: blur(4px);
-        }
-        .loading-spinner {
-            width: 50px; height: 50px; border: 5px solid #e2e8f0;
-            border-top: 5px solid var(--primary); border-radius: 50%;
-            animation: spin 1s linear infinite;
-        }
+        .inspector-header { padding: 24px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; }
+        .inspector-body { flex: 1; padding: 24px; overflow-y: auto; display: flex; flex-direction: column; gap: 20px; }
+        .editor-container textarea { width: 100%; height: 350px; border: 1px solid var(--border); border-radius: 8px; padding: 12px; font-size: 14px; resize: none; margin-bottom: 16px; }
+        .zoom-controls { position: absolute; bottom: 20px; left: 20px; display: flex; flex-direction: column; gap: 8px; z-index: 100; }
+        .btn-icon { width: 40px; height: 40px; justify-content: center; padding: 0; }
+        .loading-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(255,255,255,0.7); display: none; justify-content: center; align-items: center; z-index: 2000; }
+        .loading-spinner { width: 40px; height: 40px; border: 4px solid #f3f3f3; border-top: 4px solid var(--primary); border-radius: 50%; animation: spin 1s linear infinite; }
         @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
-
-        /* 标签 */
-        .tag { font-size: 12px; padding: 4px 12px; border-radius: 6px; background: #eff6ff; color: #1d4ed8; font-weight: 600; }
+        .toast { position: fixed; bottom: 30px; left: 50%; transform: translateX(-50%); background: #1e293b; color: #fff; padding: 10px 20px; border-radius: 20px; font-size: 13px; z-index: 3000; }
     </style>
-
-    <!-- D3.js & Div Graph Logic -->
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.8.5/d3.min.js"></script>
-    <script src="/static/js/knowledge_graph_div.js"></script>
+    <script src="/static/js/knowledge_node_graph.js"></script>
 </head>
 <body>
-    <div class="loading-overlay" id="loadingOverlay">
-        <div class="loading-spinner"></div>
-    </div>
+    <div class="loading-overlay" id="loadingOverlay"><div class="loading-spinner"></div></div>
     <div class="layout">
         <div class="canvas-area">
             <div id="graph-container" class="graph-container"></div>
-            
             <div class="top-bar">
-                <div class="search-container">
-                    <i class="fa-solid fa-search" style="color:var(--text-muted)"></i>
-                    <input type="text" id="searchNodes" placeholder="搜索知识点并定位...">
-                </div>
+                <div class="search-container"><i class="fa-solid fa-search"></i><input type="text" id="searchNodes" placeholder="搜索并定位知识点..."></div>
                 <div class="btn-group">
-                    <button class="btn" id="aiOrganize"><i class="fa-solid fa-wand-magic-sparkles" style="color:#d946ef"></i> AI 整理</button>
-                    <button class="btn" id="aiScan"><i class="fa-solid fa-link" style="color:#3b82f6"></i> 脉络重构</button>
+                    <button class="btn" id="aiOrganize"><i class="fa-solid fa-wand-magic-sparkles"></i> AI 整理</button>
+                    <button class="btn" id="aiScan"><i class="fa-solid fa-link"></i> 脉络重构</button>
                     <button class="btn" onclick="window.location.href='/'"><i class="fa-solid fa-house"></i></button>
                 </div>
             </div>
-
             <div class="zoom-controls">
-                <button class="btn btn-icon" id="zoomIn" title="放大"><i class="fa-solid fa-plus"></i></button>
-                <button class="btn btn-icon" id="zoomOut" title="缩小"><i class="fa-solid fa-minus"></i></button>
-                <button class="btn btn-icon" id="fitView" title="适应窗口"><i class="fa-solid fa-expand"></i></button>
+                <button class="btn btn-icon" id="zoomIn"><i class="fa-solid fa-plus"></i></button>
+                <button class="btn btn-icon" id="zoomOut"><i class="fa-solid fa-minus"></i></button>
+                <button class="btn btn-icon" id="fitView"><i class="fa-solid fa-expand"></i></button>
             </div>
         </div>
-
         <aside class="inspector" id="inspector">
-            <div class="inspector-header">
-                <h2 id="nodeTitle">笔记详情</h2>
-                <button class="btn btn-icon" id="closeInspector" style="border:none;box-shadow:none;background:transparent;"><i class="fa-solid fa-xmark"></i></button>
-            </div>
+            <div class="inspector-header"><h2 id="nodeTitle">详情</h2><button class="btn btn-icon" id="closeInspector" style="border:none;background:transparent;"><i class="fa-solid fa-xmark"></i></button></div>
             <div class="inspector-body">
-                <div class="editor-container">
-                    <div id="nodeTags" style="display:flex; gap:8px;"></div>
-                    <textarea id="nodeContent" placeholder="在此编辑知识内容..."></textarea>
-                    <div style="display:flex; gap:12px;">
-                        <button class="btn btn-primary" id="saveNode" style="flex:1">更新保存</button>
-                        <button class="btn" id="deleteNode" style="color:#ef4444; border-color:#fee2e2">删除笔记</button>
+                <div class="editor-container"><textarea id="nodeContent" placeholder="编辑内容..."></textarea>
+                    <div style="display:flex; flex-direction:column; gap:8px;">
+                        <button class="btn btn-primary" id="saveNode" style="width:100%">保存修改</button>
+                        <div style="display:flex; gap:8px;">
+                            <button class="btn" id="shareNode" style="flex:1"><i class="fa-solid fa-share-nodes"></i> 分享</button>
+                            <button class="btn" id="deleteNode" style="flex:1; color:#ef4444">删除</button>
+                        </div>
+                        <div id="shareLinkContainer" style="display:none; margin-top:10px; font-size:12px; border:1px dashed var(--border); padding:8px; border-radius:8px; background:#f8fafc;">
+                            <label style="color:var(--text-muted)">公开访问地址:</label>
+                            <div style="display:flex; gap:5px; margin-top:5px;">
+                                <input type="text" id="shareUrlInput" readonly style="flex:1; border:1px solid var(--border); border-radius:4px; padding:2px 5px; font-size:11px;">
+                                <button class="btn" onclick="copyShareUrl()" style="height:auto; padding:2px 8px; font-size:11px;">复制</button>
+                            </div>
+                        </div>
                     </div>
                 </div>
             </div>
         </aside>
     </div>
-
     <script>
         let graph;
         let currentNoteTitle = null;
-
-        document.addEventListener('DOMContentLoaded', () => {
-            initGraph();
-            setupEvents();
-            loadData();
-        });
-
-        function initGraph() {
-            graph = new KnowledgeGraph('graph-container');
-            
-            // Handle Custom Event from the class
-            document.getElementById('graph-container').addEventListener('nodeclick', (e) => {
-                const node = e.detail;
-                if (node.type === 'KNOWLEDGE') {
-                    showNote(node.label);
-                } else {
-                    hideInspector();
-                }
-            });
-            
-            // Click outside to hide inspector
-            document.getElementById('graph-container').addEventListener('click', (e) => {
-                if (e.target.id === 'graph-container' || e.target.classList.contains('graph-content')) {
-                    hideInspector();
-                }
-            });
-        }
-
-        async function loadData() {
-            try {
-                toggleLoading(true);
+        document.addEventListener('DOMContentLoaded', () => { initGraph(); setupEvents(); loadData(); });
+        function initGraph() { graph = new NodeGraph('graph-container'); }
+        async function loadData(silent = false) {
+            try { if (!silent) toggleLoading(true);
                 const res = await fetch('/api/knowledge/graph');
                 const data = await res.json();
-                if (data.success) {
-                    processAndRender(data.graph);
-                }
-            } catch (e) { 
-                console.error(e); 
-            } finally {
-                toggleLoading(false);
-            }
+                if (data.success) graph.setData(data.categories, data.connections);
+            } finally { if (!silent) toggleLoading(false); }
         }
-
-        function processAndRender(data) {
-            const nodes = [];
-            const links = [];
-            
-            // Root
-            nodes.push({ id: 'root', label: '知识空间', type: 'ROOT' });
-
-            // Categories
-            Object.keys(data.categories).forEach(catName => {
-                const cat = data.categories[catName];
-                const catId = `cat_${catName}`;
-                nodes.push({ id: catId, label: catName, type: 'CATEGORY' });
-                links.push({ source: 'root', target: catId });
-
-                // Knowledge nodes
-                cat.knowledge_ids.forEach(title => {
-                    const kId = `k_${title}`;
-                    nodes.push({ id: kId, label: title, type: 'KNOWLEDGE' });
-                    links.push({ source: catId, target: kId });
-                });
-            });
-
-            // Extra connections
-            if (data.connections) {
-                data.connections.forEach(conn => {
-                    links.push({
-                        id: conn.id,
-                        source: `k_${conn.from}`,
-                        target: `k_${conn.to}`,
-                        label: conn.type,
-                        type: 'CONNECTION'
-                    });
-                });
-            }
-
-            graph.setData(nodes, links);
-        }
-
         async function showNote(title) {
             currentNoteTitle = title;
             document.getElementById('nodeTitle').innerText = title;
-            document.getElementById('nodeTags').innerHTML = '<span class="tag">基础知识</span>';
+            document.getElementById('shareLinkContainer').style.display = 'none';
             try {
-                const res = await fetch(`/api/knowledge/basis/${encodeURIComponent(title)}`);
+                const res = await fetch(`/api/knowledge/basis/` + encodeURIComponent(title));
                 const data = await res.json();
-                document.getElementById('nodeContent').value = data.content;
+                document.getElementById('nodeContent').value = data.knowledge.content;
                 document.getElementById('inspector').classList.add('open');
-            } catch (e) { 
-                showToast('加载详情失败'); 
-            }
+            } catch (e) { showToast('加载失败'); }
         }
-
-        function hideInspector() {
-            document.getElementById('inspector').classList.remove('open');
-            d3.selectAll('.node').classed('selected', false);
+        function hideInspector() { document.getElementById('inspector').classList.remove('open'); }
+        function copyShareUrl() {
+            const input = document.getElementById('shareUrlInput');
+            input.select();
+            document.execCommand('copy');
+            showToast('链接已复制到剪贴板');
         }
-
         function setupEvents() {
             document.getElementById('closeInspector').onclick = hideInspector;
-
-            document.getElementById('saveNode').onclick = async () => {
-                const content = document.getElementById('nodeContent').value;
-                const res = await fetch(`/api/knowledge/basis/${encodeURIComponent(currentNoteTitle)}`, {
-                    method: 'PUT',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ content })
+            document.getElementById('shareNode').onclick = async () => {
+                const res = await fetch(`/api/knowledge/basis/` + encodeURIComponent(currentNoteTitle) + `/share`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ public: true })
                 });
-                const data = await res.json();
-                if(data.success) showToast('笔记已保存');
-            };
-
-            document.getElementById('deleteNode').onclick = async () => {
-                if(!confirm('确定删除此笔记及所有关联脉络吗？')) return;
-                const res = await fetch(`/api/knowledge/basis/${encodeURIComponent(currentNoteTitle)}`, { method: 'DELETE' });
                 const data = await res.json();
                 if(data.success) {
-                    showToast('笔记已删除');
-                    hideInspector();
-                    loadData();
+                    document.getElementById('shareLinkContainer').style.display = 'block';
+                    document.getElementById('shareUrlInput').value = data.share_url;
+                    showToast('已开启公开分享');
                 }
             };
-
-            document.getElementById('searchNodes').oninput = (e) => {
-                const q = e.target.value.toLowerCase();
-                const nodes = d3.selectAll('.node');
-                if(!q) {
-                    nodes.style('opacity', 1);
-                    return;
-                }
-                nodes.style('opacity', function(d) {
-                    return d.label.toLowerCase().includes(q) ? 1 : 0.1;
-                });
-            };
-
-            document.getElementById('zoomIn').onclick = () => {
-                d3.select('#graph-container').transition().call(graph.zoom.scaleBy, 1.3);
-            };
-            document.getElementById('zoomOut').onclick = () => {
-                d3.select('#graph-container').transition().call(graph.zoom.scaleBy, 0.7);
-            };
-            document.getElementById('fitView').onclick = () => {
-                graph.fit();
-            };
-
-            // Sidebar tools (delegated back to existing APIs)
-            document.getElementById('aiScan').onclick = async () => {
-                showToast('正在重构语义脉络...');
-                toggleLoading(true);
-                try {
-                    await fetch('/api/knowledge/ai/scan', { method: 'POST' });
-                    await loadData();
-                } finally { toggleLoading(false); }
-            };
-
-            document.getElementById('aiOrganize').onclick = async () => {
-                if(!confirm('AI 将重新识别全量知识的深层脉络并自动分类，是否继续？')) return;
-                showToast('AI 正在思考全域逻辑...');
-                toggleLoading(true);
-                try {
-                    await fetch('/api/knowledge/ai/organize', { method: 'POST' });
-                    await loadData();
-                } finally { toggleLoading(false); }
-            };
-        }
-
-        function toggleLoading(show) {
-            document.getElementById('loadingOverlay').style.display = show ? 'flex' : 'none';
-        }
-
-        function showToast(msg) {
-            const toast = document.createElement('div');
-            toast.className = 'toast';
-            toast.innerText = msg;
-            toast.style.cssText = "position:fixed; bottom:20px; left:50%; transform:translateX(-50%); background:#1e293b; color:white; padding:8px 16px; border-radius:8px; z-index:2000; font-size:14px; box-shadow:0 4px 12px rgba(0,0,0,0.2);";
-            document.body.appendChild(toast);
-            setTimeout(() => toast.remove(), 3000);
-        }
-    </script>
-</body>
-</html>
-    <link rel="stylesheet" href="/static/css/knowledge_graph_div.css">
-    <style>
-        :root {
-            --primary: #3b82f6;
-            --primary-light: #eff6ff;
-            --secondary: #d946ef;
-            --bg: #fdfdfd;
-            --surface: #ffffff;
-            --text: #1e293b;
-            --text-muted: #64748b;
-            --border: #e2e8f0;
-            --sidebar-width: 380px;
-            --radius: 12px;
-            --shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -2px rgba(0, 0, 0, 0.05);
-            --shadow-lg: 0 20px 25px -5px rgba(0, 0, 0, 0.05), 0 8px 10px -6px rgba(0, 0, 0, 0.05);
-        }
-
-        * { box-sizing: border-box; }
-        body, html { 
-            margin: 0; padding: 0; width: 100%; height: 100%; 
-            font-family: 'Inter', -apple-system, system-ui, sans-serif; 
-            background: var(--bg); color: var(--text);
-            overflow: hidden;
-            -webkit-font-smoothing: antialiased;
-        }
-
-        .layout { display: flex; height: 100vh; width: 100vw; position: relative; }
-
-        /* 可视化图谱区域 */
-        .canvas-area { 
-            flex: 1; 
-            position: relative; 
-            background-color: var(--bg);
-            background-image: 
-                radial-gradient(circle at 1px 1px, #e2e8f0 1px, transparent 0);
-            background-size: 32px 32px;
-        }
-        #cy { width: 100%; height: 100%; }
-
-        /* 顶部控制栏 - 悬浮设计 */
-        .top-bar {
-            position: absolute; top: 24px; left: 24px; right: 24px;
-            display: flex; gap: 16px; align-items: center;
-            z-index: 10; pointer-events: none;
-        }
-        .top-bar > * { pointer-events: auto; }
-        
-        .search-container {
-            background: var(--surface); 
-            border: 1px solid var(--border);
-            border-radius: 16px; 
-            padding: 0 18px; 
-            display: flex; 
-            align-items: center;
-            box-shadow: var(--shadow-lg); 
-            width: 320px;
-            height: 48px;
-            transition: width 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-        }
-        .search-container:focus-within {
-            width: 400px;
-            border-color: var(--primary);
-        }
-        .search-container input { 
-            border: none; outline: none; margin-left: 12px; width: 100%; 
-            font-size: 14px; background: transparent; color: var(--text);
-        }
-
-        .btn-group { display: flex; gap: 12px; }
-        .btn {
-            background: var(--surface); 
-            border: 1px solid var(--border);
-            height: 48px;
-            padding: 0 20px; 
-            border-radius: 16px; 
-            cursor: pointer;
-            font-size: 14px; 
-            font-weight: 600; 
-            display: flex; 
-            align-items: center; 
-            gap: 10px;
-            box-shadow: var(--shadow); 
-            transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
-            color: var(--text-muted);
-        }
-        .btn i { font-size: 16px; }
-        .btn:hover { 
-            background: #fff; 
-            transform: translateY(-2px); 
-            box-shadow: var(--shadow-lg); 
-            color: var(--text);
-            border-color: #cbd5e1;
-        }
-        .btn:active { transform: translateY(0); }
-        .btn-primary { 
-            background: var(--primary); 
-            color: white; 
-            border: none; 
-        }
-        .btn-primary:hover { background: #2563eb; color: white; }
-
-        /* 右侧详情面板 - 玻璃拟态 */
-        .inspector {
-            width: var(--sidebar-width); 
-            background: rgba(255, 255, 255, 0.95);
-            backdrop-filter: blur(16px);
-            border-left: 1px solid var(--border); 
-            display: flex; 
-            flex-direction: column;
-            transform: translateX(100%); 
-            transition: transform 0.4s cubic-bezier(0.4, 0, 0.2, 1);
-            position: absolute; right: 0; top: 0; bottom: 0; z-index: 100;
-            box-shadow: -20px 0 40px -10px rgba(0, 0, 0, 0.05);
-        }
-        .inspector.open { transform: translateX(0); }
-
-        .inspector-header {
-            padding: 32px; 
-            border-bottom: 1px solid var(--border);
-            display: flex; 
-            justify-content: space-between; 
-            align-items: center;
-        }
-        .inspector-header h2 { margin: 0; font-size: 22px; font-weight: 800; color: #0f172a; letter-spacing: -0.02em; }
-        
-        .inspector-body { 
-            flex: 1; 
-            padding: 32px; 
-            overflow-y: auto; 
-            display: flex;
-            flex-direction: column;
-            gap: 24px;
-        }
-        
-        .editor-container { flex: 1; display: flex; flex-direction: column; gap: 12px; }
-        .editor-container label { font-size: 13px; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; }
-        .editor-container textarea { 
-            flex: 1; width: 100%; border: 1px solid var(--border); border-radius: var(--radius);
-            padding: 16px; font-family: inherit; font-size: 15px; line-height: 1.6;
-            resize: none; outline: none; transition: all 0.2s;
-            background: #f8fafc;
-        }
-        .editor-container textarea:focus { 
-            border-color: var(--primary); 
-            background: #fff; 
-            box-shadow: 0 0 0 4px rgba(59, 130, 246, 0.1);
-        }
-
-        /* 底部操作 */
-        .inspector-footer {
-            padding: 24px 32px;
-            border-top: 1px solid var(--border);
-            display: flex;
-            gap: 12px;
-        }
-        .inspector-footer .btn { flex: 1; justify-content: center; height: 44px; }
-
-        /* 浮动缩放控制 */
-        .zoom-controls {
-            position: absolute; bottom: 24px; left: 24px; display: flex; flex-direction: column; gap: 8px;
-        }
-        .btn-icon { 
-            width: 40px; height: 40px; border-radius: 12px; padding: 0; 
-            justify-content: center; align-items: center;
-        }
-
-        /* 标签 */
-        .tag-pill { 
-            font-size: 11px; 
-            padding: 4px 10px; 
-            border-radius: 20px; 
-            background: var(--primary-light); 
-            color: var(--primary); 
-            font-weight: 700;
-            display: inline-block;
-            margin-bottom: 8px;
-        }
-
-        /* 节点入场动画 */
-        @keyframes nodeAppear {
-            from { opacity: 0; transform: scale(0.8); }
-            to { opacity: 1; transform: scale(1); }
-        }
-        .canvas-area #cy canvas { 
-            animation: fadeIn 0.8s ease-out;
-        }
-        @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
-        
-        /* 提示框 */
-        .toast {
-            position: fixed; bottom: 32px; left: 50%; transform: translateX(-50%);
-            background: #0f172a; color: #fff; padding: 14px 28px; border-radius: 16px;
-            font-size: 14px; font-weight: 500; z-index: 2000; box-shadow: var(--shadow-lg);
-            animation: slideUp 0.4s cubic-bezier(0.16, 1, 0.3, 1);
-        }
-        @keyframes slideUp { from { transform: translate(-50%, 100%); opacity: 0; } to { transform: translate(-50%, 0); opacity: 1; } }
-
-        /* 浮动缩放控制 */
-        .zoom-controls {
-            position: absolute; bottom: 20px; left: 20px; display: flex; flex-direction: column; gap: 10px;
-        }
-        .btn-icon { width: 44px; height: 44px; border-radius: 14px; padding: 0; justify-content: center; }
-
-        /* 标签 */
-        .tag { font-size: 12px; padding: 4px 12px; border-radius: 6px; background: #eff6ff; color: #1d4ed8; font-weight: 600; }
-        
-        /* 操作反馈 */
-        .toast {
-            position: fixed; bottom: 30px; left: 50%; transform: translateX(-50%);
-            background: #1e293b; color: #fff; padding: 12px 24px; border-radius: 12px;
-            font-size: 14px; z-index: 2000; box-shadow: 0 20px 25px -5px rgb(0 0 0 / 0.1);
-            animation: slideUp 0.3s ease-out;
-        }
-        @keyframes slideUp { from { transform: translate(-50%, 100%); opacity: 0; } to { transform: translate(-50%, 0); opacity: 1; } }
-
-        /* 加载遮罩 */
-        .loading-overlay {
-            position: fixed; top: 0; left: 0; right: 0; bottom: 0;
-            background: rgba(255,255,255,0.7); display: none;
-            justify-content: center; align-items: center; z-index: 1000;
-            backdrop-filter: blur(4px);
-        }
-        .loading-spinner {
-            width: 50px; height: 50px; border: 5px solid #e2e8f0;
-            border-top: 5px solid var(--primary); border-radius: 50%;
-            animation: spin 1s linear infinite;
-        }
-        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
-    </style>
-
-    <!-- D3.js & Div Graph Logic -->
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.8.5/d3.min.js"></script>
-    <script src="/static/js/knowledge_graph_div.js"></script>
-</head>
-<body>
-    <div class="loading-overlay" id="loadingOverlay">
-        <div class="loading-spinner"></div>
-    </div>
-    <div class="layout">
-        <div class="canvas-area">
-            <div id="graph-container" class="graph-container"></div>
-            
-            <div class="top-bar">
-                <div class="search-container">
-                    <i class="fa-solid fa-search" style="color:var(--text-muted)"></i>
-                    <input type="text" id="searchNodes" placeholder="搜索知识点并定位...">
-                </div>
-                <div class="btn-group">
-                    <button class="btn" id="aiOrganize"><i class="fa-solid fa-wand-magic-sparkles" style="color:#d946ef"></i> AI 整理</button>
-                    <button class="btn" id="aiScan"><i class="fa-solid fa-link" style="color:#3b82f6"></i> 脉络重构</button>
-                    <button class="btn" onclick="window.location.href='/'"><i class="fa-solid fa-house"></i></button>
-                </div>
-            </div>
-
-            <div class="zoom-controls">
-                <button class="btn btn-icon" id="zoomIn" title="放大"><i class="fa-solid fa-plus"></i></button>
-                <button class="btn btn-icon" id="zoomOut" title="缩小"><i class="fa-solid fa-minus"></i></button>
-                <button class="btn btn-icon" id="fitView" title="适应窗口"><i class="fa-solid fa-expand"></i></button>
-            </div>
-        </div>
-
-        <aside class="inspector" id="inspector">
-            <div class="inspector-header">
-                <h2 id="nodeTitle">笔记详情</h2>
-                <button class="btn btn-icon" id="closeInspector" style="border:none;box-shadow:none;background:transparent;"><i class="fa-solid fa-xmark"></i></button>
-            </div>
-            <div class="inspector-body">
-                <div class="editor-container">
-                    <div id="nodeTags" style="display:flex; gap:8px;"></div>
-                    <textarea id="nodeContent" placeholder="在此编辑知识内容..."></textarea>
-                    <div style="display:flex; gap:12px;">
-                        <button class="btn btn-primary" id="saveNode" style="flex:1">更新保存</button>
-                        <button class="btn" id="deleteNode" style="color:#ef4444; border-color:#fee2e2">删除笔记</button>
-                    </div>
-                </div>
-            </div>
-        </aside>
-    </div>
-
-    <script>
-        let cy;
-        let currentNoteTitle = null;
-        let linkMode = { active: false, source: null };
-
-        document.addEventListener('DOMContentLoaded', () => {
-            initGraph();
-            setupEvents();
-            loadData();
-        });
-
-        function initGraph() {
-            cy = cytoscape({
-                container: document.getElementById('cy'),
-                style: [
-                    {
-                        selector: 'node',
-                        style: {
-                            'label': 'data(displayLabel)',
-                            'background-color': '#ffffff',
-                            'color': '#1e293b',
-                            'font-family': '"Inter", system-ui, sans-serif',
-                            'font-size': '12px',
-                            'font-weight': '600',
-                            'text-valign': 'center',
-                            'text-halign': 'center',
-                            'border-width': '2px',
-                            'border-color': 'data(color)',
-                            'text-wrap': 'wrap',
-                            'text-max-width': '100px',
-                            'padding': '10px',
-                            'shape': 'round-rectangle',
-                            'width': '150px',
-                            'height': '45px',
-                            'corner-radius': 10,
-                            'transition-property': 'all',
-                            'transition-duration': '0.3s'
-                        }
-                    },
-                    {
-                        selector: 'node[type="ROOT"]',
-                        style: {
-                            'background-color': '#1e293b',
-                            'color': '#ffffff',
-                            'width': '180px',
-                            'height': '56px',
-                            'font-size': '14px',
-                            'font-weight': '800',
-                            'border-width': 0,
-                            'shape': 'round-rectangle'
-                        }
-                    },
-                    {
-                        selector: 'node[type="CATEGORY"]',
-                        style: {
-                            'width': '120px',
-                            'height': '44px',
-                            'font-size': '13px',
-                            'font-weight': '600',
-                            'border-width': 2,
-                            'border-color': '#f1f5f9'
-                        }
-                    },
-                    {
-                        selector: 'node[type="KNOWLEDGE"]',
-                        style: {
-                            'background-color': '#ffffff',
-                            'border-color': '#e2e8f0',
-                            'border-width': 1,
-                            'text-max-width': '120px'
-                        }
-                    },
-                    {
-                        selector: 'edge',
-                        style: {
-                            'width': 2,
-                            'line-color': '#cbd5e1',
-                            'curve-style': 'taxi',
-                            'taxi-direction': 'auto',
-                            'taxi-turn': '25px',
-                            'target-arrow-shape': 'triangle',
-                            'target-arrow-color': '#cbd5e1',
-                            'arrow-scale': 1.0,
-                            'opacity': 0.6,
-                            'transition-property': 'all',
-                            'transition-duration': '0.3s'
-                        }
-                    },
-                    {
-                        selector: 'edge[type="脉络"]',
-                        style: {
-                            'line-color': '#3b82f6',
-                            'target-arrow-color': '#3b82f6',
-                            'width': 2,
-                            'line-style': 'solid',
-                            'label': 'data(label)',
-                            'font-size': '9px',
-                            'color': '#3b82f6',
-                            'text-background-color': '#ffffff',
-                            'text-background-opacity': 1,
-                            'text-background-padding': '3px',
-                            'curve-style': 'unbundled-bezier',
-                            'control-point-distances': [40, -40],
-                            'control-point-weights': [0.25, 0.75],
-                            'opacity': 1
-                        }
-                    },
-                    {
-                        selector: 'node:selected',
-                        style: {
-                            'border-width': 4,
-                            'border-color': '#3b82f6',
-                            'background-color': '#eff6ff'
-                        }
-                    },
-                    {
-                        selector: '.potential-source',
-                        style: {
-                            'border-width': 4,
-                            'border-color': '#d946ef',
-                            'border-style': 'double'
-                        }
-                    }
-                ],
-                layout: { 
-                    name: 'klay',
-                    klay: {
-                        spacing: 80,
-                        direction: 'RIGHT',
-                        edgeSpacingFactor: 0.2,
-                        inLayerSpacingFactor: 2.0,
-                        layoutHierarchy: true
-                    }
-                },
-                userZoomingEnabled: true,
-                userPanningEnabled: true,
-                boxSelectionEnabled: false,
-                wheelSensitivity: 0.1,
-            });
-
-            cy.on('dblclick', 'node', function(evt){
-                const node = evt.target;
-                if (node.data('type') === 'KNOWLEDGE' || node.data('type') === 'CATEGORY') {
-                    linkMode.active = true;
-                    linkMode.source = node;
-                    node.addClass('potential-source');
-                    showToast('连线模式：已选定起点 ' + node.data('label') + '，请点击终点');
-                }
-            });
-
-            cy.on('tap', 'node', function(evt){
-                const node = evt.target;
-                if (linkMode.active) {
-                    if (linkMode.source.id() !== node.id()) {
-                        createManualConnection(linkMode.source, node);
-                    } else {
-                        resetLinkMode();
-                    }
-                    return;
-                }
-                if (node.data('type') === 'KNOWLEDGE') {
-                    showNote(node.data('label'));
-                }
-            });
-
-            cy.on('cxttap', function(evt){
-                if (linkMode.active) {
-                    resetLinkMode();
-                    showToast('已取消连线');
-                }
-            });
-
-            cy.on('tap', function(evt){
-                if(evt.target === cy){
-                    hideInspector();
-                }
-            });
-        }
-
-        function resetLinkMode() {
-            linkMode = { active: false, source: null };
-            cy.nodes().removeClass('potential-source');
-        }
-
-        async function loadData(shouldLayout = false) {
-            try {
-                const res = await fetch('/api/knowledge/graph');
-                const data = await res.json();
-                if (data.success) {
-                    renderGraph(data.graph, shouldLayout);
-                }
-            } catch (e) { console.error(e); }
-        }
-
-        function renderGraph(graph, shouldLayout = true) {
-            const elements = [];
-            
-            // 辅助函数：截断图表中的超长标题
-            const truncateTitle = (str) => str.length > 20 ? str.substring(0, 18) + '...' : str;
-
-            // 核心节点
-            elements.push({ 
-                data: { 
-                    id: 'root', 
-                    label: '知识空间', 
-                    displayLabel: '知识空间',
-                    type: 'ROOT', 
-                    color: '#0f172a' 
-                } 
-            });
-
-            // 分类节点
-            Object.keys(graph.categories).forEach(catName => {
-                const cat = graph.categories[catName];
-                elements.push({ 
-                    data: { 
-                        id: `cat_${catName}`, 
-                        label: catName, 
-                        displayLabel: catName,
-                        type: 'CATEGORY', 
-                        color: cat.color || '#3b82f6' 
-                    } 
-                });
-                elements.push({ data: { source: 'root', target: `cat_${catName}` } });
-
-                // 知识节点
-                cat.knowledge_ids.forEach(title => {
-                    elements.push({
-                        data: { 
-                            id: `k_${title}`, 
-                            label: title, 
-                            displayLabel: truncateTitle(title),
-                            type: 'KNOWLEDGE', 
-                            color: '#ffffff'
-                        }
-                    });
-                    elements.push({ data: { source: `cat_${catName}`, target: `k_${title}` } });
-                });
-            });
-
-            // 脉络连接
-            if (graph.connections) {
-                graph.connections.forEach(conn => {
-                    elements.push({
-                        data: {
-                            id: conn.id,
-                            source: `k_${conn.from}`,
-                            target: `k_${conn.to}`,
-                            label: conn.type,
-                            type: conn.type
-                        }
-                    });
-                });
-            }
-
-            cy.elements().remove();
-            cy.add(elements);
-
-            cy.layout({ 
-                name: 'klay',
-                animate: true,
-                animationDuration: 600,
-                padding: 100,
-                klay: {
-                    direction: 'RIGHT', // 从左向右布局，最适合展示长标签文字
-                    spacing: 80,
-                    edgeSpacingFactor: 0.2,
-                    inLayerSpacingFactor: 1.5,
-                    nodePlacement: 'LINEAR_SEGMENTS',
-                    layoutHierarchy: true,
-                    thoroughness: 7
-                }
-            }).run();
-        }
-
-        async function createManualConnection(source, target) {
-            const from = source.data('label');
-            const to = target.data('label');
-            try {
-                const res = await fetch('/api/knowledge/connections', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ from, to, type: '脉络', description: '手动建立连接' })
-                });
-                const data = await res.json();
-                if (data.success) {
-                    showToast('连接已建立');
-                    loadData(true);
-                } else {
-                    showToast('连接失败: ' + data.error);
-                }
-            } catch (e) { showToast('API 连接错误'); }
-            resetLinkMode();
-        }
-
-        async function showNote(title) {
-            currentNoteTitle = title;
-            document.getElementById('nodeTitle').innerText = title;
-            document.getElementById('nodeTags').innerHTML = '<span class="tag">基础知识</span>';
-            try {
-                const res = await fetch(`/api/knowledge/basis/${encodeURIComponent(title)}`);
-                const data = await res.json();
-                document.getElementById('nodeContent').value = data.content;
-                document.getElementById('inspector').classList.add('open');
-            } catch (e) { showToast('加载详情失败'); }
-        }
-
-        function hideInspector() {
-            document.getElementById('inspector').classList.remove('open');
-            cy.$(':selected').unselect();
-        }
-
-        function setupEvents() {
-            document.getElementById('closeInspector').onclick = hideInspector;
-
             document.getElementById('saveNode').onclick = async () => {
                 const content = document.getElementById('nodeContent').value;
-                const res = await fetch(`/api/knowledge/basis/${encodeURIComponent(currentNoteTitle)}`, {
-                    method: 'PUT',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ content })
+                const res = await fetch(`/api/knowledge/basis/` + encodeURIComponent(currentNoteTitle), {
+                    method: 'PUT', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ content, title: currentNoteTitle })
                 });
                 const data = await res.json();
-                if(data.success) showToast('笔记已保存');
+                if(data.success) { showToast('已保存'); loadData(true); }
             };
-
             document.getElementById('deleteNode').onclick = async () => {
-                if(!confirm('确定删除此笔记及所有关联脉络吗？')) return;
-                const res = await fetch(`/api/knowledge/basis/${encodeURIComponent(currentNoteTitle)}`, { method: 'DELETE' });
+                if(!confirm('确定删除吗？')) return;
+                const res = await fetch(`/api/knowledge/basis/` + encodeURIComponent(currentNoteTitle), { method: 'DELETE' });
                 const data = await res.json();
-                if(data.success) {
-                    showToast('笔记已删除');
-                    hideInspector();
-                    const nodeToRemove = cy.getElementById(`k_${currentNoteTitle}`);
-                    if (nodeToRemove.length > 0) {
-                        cy.remove(nodeToRemove);
-                    } else {
-                        loadData(false);
-                    }
-                }
+                if(data.success) { showToast('已删除'); hideInspector(); loadData(true); }
             };
-
             document.getElementById('searchNodes').oninput = (e) => {
                 const q = e.target.value.toLowerCase();
-                if(!q) {
-                    cy.elements().style('opacity', 1);
-                    return;
-                }
-                const matches = cy.nodes().filter(n => n.data('label').toLowerCase().includes(q));
-                cy.elements().style('opacity', 0.1);
-                matches.style('opacity', 1);
-                matches.neighborhood().style('opacity', 0.6);
-                if(matches.length > 0) cy.animate({ center: { eles: matches }, zoom: 1.2 });
+                const items = document.querySelectorAll('.knowledge-item');
+                items.forEach(item => {
+                    if (q && item.innerText.toLowerCase().includes(q)) {
+                        item.style.background = '#fbbf24'; item.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                    } else { item.style.background = ''; }
+                });
             };
-
-            document.getElementById('zoomIn').onclick = () => cy.zoom(cy.zoom() * 1.2);
-            document.getElementById('zoomOut').onclick = () => cy.zoom(cy.zoom() * 0.8);
-            document.getElementById('fitView').onclick = () => cy.fit(null, 50);
-
-            document.getElementById('aiScan').onclick = async () => {
-                showToast('正在重构语义脉络...');
-                toggleLoading(true);
-                try {
-                    await fetch('/api/knowledge/ai/scan', { method: 'POST' });
-                    await loadData(true);
-                } finally { toggleLoading(false); }
-            };
-
-            document.getElementById('aiOrganize').onclick = async () => {
-                if(!confirm('AI 将重新识别全量知识的深层脉络并自动分类，是否继续？')) return;
-                showToast('AI 正在思考全域逻辑...');
-                toggleLoading(true);
-                try {
-                    await fetch('/api/knowledge/ai/organize', { method: 'POST' });
-                    await loadData(true);
-                } finally { toggleLoading(false); }
-            };
+            document.getElementById('zoomIn').onclick = () => { graph.transform.k *= 1.2; graph.updateTransform(); };
+            document.getElementById('zoomOut').onclick = () => { graph.transform.k *= 0.8; graph.updateTransform(); };
+            document.getElementById('fitView').onclick = () => { graph.transform = {x:0,y:0,k:1}; graph.updateTransform(); };
+            document.getElementById('aiScan').onclick = async () => { showToast('扫描中...'); toggleLoading(true); await fetch(`/api/knowledge/ai/scan`, { method: 'POST' }); await loadData(true); toggleLoading(false); };
+            document.getElementById('aiOrganize').onclick = async () => { if(!confirm('AI 整理将重置分类，是否继续？')) return; showToast('AI 整理中...'); toggleLoading(true); await fetch(`/api/knowledge/ai/organize`, { method: 'POST' }); await loadData(true); toggleLoading(false); };
         }
-
-        function toggleLoading(show) {
-            document.getElementById('loadingOverlay').style.display = show ? 'flex' : 'none';
-        }
-
+        function toggleLoading(show) { document.getElementById('loadingOverlay').style.display = show ? 'flex' : 'none'; }
         function showToast(msg) {
-            const toast = document.createElement('div');
-            toast.className = 'toast';
-            toast.innerText = msg;
-            document.body.appendChild(toast);
-            setTimeout(() => toast.remove(), 3000);
+            const toast = document.createElement('div'); toast.className = 'toast'; toast.innerText = msg;
+            document.body.appendChild(toast); setTimeout(() => toast.remove(), 2000);
         }
     </script>
 </body>
