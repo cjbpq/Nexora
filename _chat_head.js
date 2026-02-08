@@ -402,6 +402,22 @@ async function createNewConversation(silent = false) {
 }
 
 async function loadConversation(id) {
+    // 清空导航栈和知识相关状态（直接跳转到新对话）
+    navigationStack = [];
+    currentSearchQuery = '';
+    currentViewingKnowledge = null;
+    originalHeaderState = null;
+    
+    // 如果正在查看知识，关闭知识视图
+    const viewer = document.getElementById('knowledgeViewer');
+    const msgs = document.getElementById('messagesContainer');
+    const inputWrapper = document.getElementById('inputWrapper');
+    if (viewer && msgs && viewer.style.display !== 'none') {
+        viewer.style.display = 'none';
+        msgs.style.display = 'flex';
+        if (inputWrapper) inputWrapper.style.display = 'block';
+    }
+    
     currentConversationId = id;
     els.messagesContainer.innerHTML = ''; // Loading state
     
@@ -1343,6 +1359,13 @@ function renderKnowledgeList(container, items, type) {
 let easyMDE = null;
 let originalHeaderState = null;
 let currentViewingKnowledge = null;
+let knowledgeMetaCache = {};
+let bulkVectorizeRunning = false;
+let pendingHighlightData = null;
+
+// 导航栈管理：追踪视图层级，支持多层返回
+let navigationStack = [];
+let currentSearchQuery = ''; // 保存搜索关键词，以便返回时重新显示
 
 async function viewKnowledge(title) {
     currentViewingKnowledge = title;
@@ -1963,21 +1986,27 @@ window.openUserModelPerm = async function(username) {
         
         if (data.success && listContainer) {
             listContainer.innerHTML = data.models.map(m => `
-                <div class="perm-item" style="display: flex; align-items: center; padding: 12px 20px; border-bottom: 1px solid #f1f5f9;">
-                    <label style="display: flex; align-items: center; cursor: pointer; width: 100%; margin: 0;">
-                        <input type="checkbox" class="model-perm-checkbox" data-id="${m.id}" ${!m.is_blocked ? 'checked' : ''} style="margin-right: 12px; width: 16px; height: 16px;">
-                        <div style="display: flex; flex-direction: column;">
-                            <span style="font-weight: 600; font-size: 14px; color: #1e293b;">${m.name}</span>
-                            <span style="font-size: 11px; color: #64748b; font-family: monospace;">${m.id}</span>
+                <div class="perm-item" style="display: flex; align-items: center; padding: 14px 16px; border-bottom: 1px solid #f1f5f9; transition: all 0.2s ease; background: white;">
+                    <label style="display: flex; align-items: center; cursor: pointer; width: 100%; margin: 0; user-select: none;">
+                        <input type="checkbox" class="model-perm-checkbox" data-id="${m.id}" ${!m.is_blocked ? 'checked' : ''} style="margin-right: 14px; width: 18px; height: 18px; cursor: pointer; accent-color: #0f172a; flex-shrink: 0;">
+                        <div style="display: flex; flex-direction: column; flex: 1; min-width: 0;">
+                            <div style="display: flex; align-items: center; gap: 8px;">
+                                <span style="font-weight: 600; font-size: 14px; color: #1e293b;">${m.name}</span>
+                                ${m.provider ? `<span style="font-size: 11px; color: #94a3b8; background: #f0f4f8; padding: 2px 8px; border-radius: 3px;">${m.provider}</span>` : ''}
+                            </div>
+                            <span style="font-size: 12px; color: #94a3b8; font-family: 'Monaco', 'Menlo', monospace; margin-top: 2px;">${m.id}</span>
                         </div>
+                        <span style="font-size: 11px; color: #cbd5e1; margin-left: 8px; flex-shrink: 0; padding: 4px 8px; background: ${!m.is_blocked ? '#dcfce7' : '#fee2e2'}; border-radius: 3px; font-weight: 500;">
+                            ${!m.is_blocked ? '✓ 可用' : '✗ 禁用'}
+                        </span>
                     </label>
                 </div>
             `).join('');
         } else if (listContainer) {
-            listContainer.innerHTML = `<div style="padding: 20px; color: #ef4444;">${data.message || '获取失败'}</div>`;
+            listContainer.innerHTML = `<div style="padding: 20px; color: #ef4444; text-align: center; font-size: 13px;">${data.message || '获取失败'}</div>`;
         }
     } catch (err) {
-        if (listContainer) listContainer.innerHTML = '<div style="padding: 20px; color: #ef4444;">网络请求失败</div>';
+        if (listContainer) listContainer.innerHTML = `<div style="padding: 20px; color: #ef4444; text-align: center; font-size: 13px;">加载错误: ${err.message}</div>`;
     }
 };
 

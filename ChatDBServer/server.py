@@ -760,7 +760,7 @@ def admin_get_user_models():
                 'name': info.get('name', model_id),
                 'provider': info.get('provider', 'volcengine'),
                 'status': info.get('status', 'normal'),
-                'disabled': model_id in blacklist
+                'is_blocked': model_id in blacklist
             })
 
         return jsonify({"success": True, "models": models})

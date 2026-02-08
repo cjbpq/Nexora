@@ -474,8 +474,59 @@ body {
 
 .btn-icon:hover {
     border-color: #cbd5e1;
-    color: #0f172a;
+    color: #0f172a !important;
     background-color: #e2e8f0;
+}
+
+#toggleKnowledgePanel:hover {
+    color: #0f172a !important;
+    background-color: #e5e7eb;
+}
+
+#toggleKnowledgePanel svg {
+    stroke: currentColor;
+}
+
+#toggleKnowledgePanel:hover svg {
+    stroke: #0f172a !important;
+    fill: none !important;
+}
+
+#toggleSidebar svg,
+#toggleKnowledgePanel svg,
+.btn-icon svg {
+    stroke: currentColor;
+    fill: none;
+}
+
+.btn-icon:hover svg,
+#toggleSidebar:hover svg,
+#toggleKnowledgePanel:hover svg {
+    stroke: #0f172a !important;
+    fill: none !important;
+}
+
+.knowledge-item.vector-pending .vector-spinner,
+.knowledge-item.vector-uploading .vector-spinner {
+    opacity: 1;
+}
+
+.knowledge-item .vector-spinner {
+    position: absolute;
+    right: 6px;
+    top: 50%;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    border: 2px solid rgba(15, 23, 42, 0.25);
+    border-top-color: #16a34a;
+    transform: translateY(-50%);
+    animation: spin 0.9s linear infinite;
+    opacity: 0;
+}
+
+@keyframes spin {
+    to { transform: translateY(-50%) rotate(360deg); }
 }
 
 .btn-toggle-sidebar {

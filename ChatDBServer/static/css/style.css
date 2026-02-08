@@ -74,8 +74,8 @@ body {
     78%  { content: "."; opacity: 1; }
     100% { content: "."; opacity: 1; }
 }
-.btn-icon { background: none; border: none; color: inherit; cursor: pointer; padding: 5px; border-radius: 4px; }
-.btn-icon:hover { background: rgba(255,255,255,0.1); color: #fff; }
+.btn-icon { background: none; border: none; color: inherit; cursor: pointer; padding: 5px; border-radius: 4px; transition: all 0.2s; }
+.btn-icon:hover { background: rgba(0,0,0,0.08); color: inherit; }
 
 .sidebar-action { padding: 0 15px 15px; }
 .btn-primary-outline {

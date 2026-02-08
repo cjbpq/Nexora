@@ -412,25 +412,25 @@
     </style>
     <!-- 模型权限管理模态框 -->
     <div id="modelPermModal" class="modal-backdrop" style="z-index: 2300;">
-        <div class="modal" style="width: 450px; padding: 0;">
-            <div class="modal-head">
+        <div class="modal" style="width: 600px; max-height: 80vh; padding: 0; display: flex; flex-direction: column;">
+            <div class="modal-head" style="flex-shrink: 0;">
                 <div class="head-title">
-                    <h3>模型可见性管理</h3>
-                    <span id="permTargetUser" style="margin-left: 10px; font-size: 14px; color: #666; font-weight: normal;"></span>
+                    <h3>模型可见性配置</h3>
+                    <span id="permTargetUser" style="margin-left: 12px; font-size: 13px; color: #666; background: #f1f5f9; padding: 4px 10px; border-radius: 4px; font-weight: 500;"></span>
                 </div>
                 <button onclick="closeModelPermModal()" class="btn-modal-close" type="button">×</button>
             </div>
-            <div class="modal-body" style="padding: 0;">
-                <div style="background: #f8fafc; padding: 12px 20px; font-size: 12px; color: #64748b; border-bottom: 1px solid #e2e8f0;">
-                    勾选允许用户在列表看到并使用的模型。
+            <div class="modal-body" style="padding: 0; flex: 1; overflow: hidden; display: flex; flex-direction: column;">
+                <div style="background: linear-gradient(135deg, #f8fafc 0%, #f0f4f8 100%); padding: 14px 20px; border-bottom: 2px solid #e2e8f0; font-size: 13px; color: #475569;">
+                    <p style="margin: 0; font-weight: 500;">✓ 勾选的模型用户可以使用 | × 未勾选的模型用户无法访问</p>
                 </div>
-                <div id="modelPermList" style="max-height: 400px; overflow-y: auto;">
-                    <!-- JS动态填充 -->
+                <div id="modelPermList" style="flex: 1; overflow-y: auto; padding: 12px 8px;">
+                    <!-- JS 动态填充 -->
                 </div>
             </div>
-            <div class="modal-footer" style="padding: 16px 20px; border-top: 1px solid #e2e8f0; display: flex; justify-content: flex-end; gap: 12px;">
-                <button class="btn-cancel" onclick="closeModelPermModal()">取消</button>
-                <button class="btn-confirm" onclick="saveUserModelPermissions()" style="background: #111; color: white; padding: 8px 20px; border-radius: 6px; border: none; cursor: pointer;">保存更改</button>
+            <div class="modal-footer" style="padding: 14px 20px; border-top: 1px solid #e2e8f0; display: flex; justify-content: flex-end; gap: 10px; flex-shrink: 0;">
+                <button class="btn-cancel" onclick="closeModelPermModal()" style="padding: 8px 16px; border-radius: 4px; border: 1px solid #cbd5e1; background: white; color: #334155; cursor: pointer; font-size: 13px; font-weight: 500;">取消</button>
+                <button class="btn-confirm" onclick="saveUserModelPermissions()" style="background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%); color: white; padding: 8px 20px; border-radius: 4px; border: none; cursor: pointer; font-size: 13px; font-weight: 600;">保存更改</button>
             </div>
         </div>
     </div>

@@ -25,6 +25,23 @@
         .EasyMDEContainer { flex: 1; display: flex; flex-direction: column; }
         .CodeMirror { flex: 1; height: auto !important; border:none !important; }
         .badge { padding: 4px 10px; border-radius: 20px; background: #dcfce7; color: #166534; font-weight: 500; font-size: 12px; }
+        .editor-preview table,
+        .editor-preview-side table {
+            border-collapse: collapse;
+            width: 100%;
+        }
+        .editor-preview th,
+        .editor-preview td,
+        .editor-preview-side th,
+        .editor-preview-side td {
+            border: 1px solid var(--border);
+            padding: 6px 8px;
+        }
+        .editor-preview th,
+        .editor-preview-side th {
+            background: #f8fafc;
+            text-align: left;
+        }
     </style>
 </head>
 <body>
