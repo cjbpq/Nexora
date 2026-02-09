@@ -1000,7 +1000,7 @@ function appendMessage(msg, index) {
                     appendErrorEvent(div, step.content || step.message || 'Unknown error', true);
                 }
                 else if (step.type === 'content') {
-                    // 对于历史记录丩插的文本内
+                    // 对于历史记录补插的文本内容
                     const body = document.createElement('div');
                     body.className = 'content-body';
                     body.innerHTML = marked.parse(step.content);
@@ -1048,11 +1048,11 @@ function appendMessage(msg, index) {
 
             actions.innerHTML += `
                 <div class="version-switcher">
-                    <button class="btn-ver" onclick="switchVersion(${index}, ${versions.length - 1})" title="鿴һ汾">
+                    <button class="btn-ver" onclick="switchVersion(${index}, ${versions.length - 1})" title="上一版本">
                         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="15 18 9 12 15 6"></polyline></svg>
                     </button>
                     <span>${currentVerNum} / ${totalVersions}</span>
-// 说明
+                    <button class="btn-ver" onclick="switchVersion(${index}, ${currentVerNum === totalVersions ? 'null' : versions.length})" title="下一版本">
                         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"></polyline></svg>
                     </button>
                 </div>
@@ -1443,7 +1443,7 @@ function renderKnowledgeList(container, items, type) {
                 icon.style.color = '#16a34a';
                 icon.style.zIndex = '2';
                 icon.style.cursor = 'pointer';
-                icon.title = '闇€要重新向量化';
+                icon.title = '需要重新向量化';
                 icon.onclick = (e) => {
                     e.stopPropagation();
                     vectorizeKnowledgeTitle(title);
@@ -2177,7 +2177,7 @@ async function deleteKnowledge(title) {
         }
     } catch(e) {
         closeConfirmModal();
-        showToast('쳣: ' + e.message);
+        showToast('错误: ' + e.message);
     }
 }
 
@@ -2345,28 +2345,93 @@ function renderCustomModelSelect(models, defaultModel) {
     const isValidDefault = models.find(m => m.id === defaultModel);
     
     selectedModelId = (isValidStored ? stored : (isValidDefault ? defaultModel : models[0].id));
-    
-    // Render Options
-    models.forEach(m => {
-        const div = document.createElement('div');
-        div.className = 'model-option';
-        const providerName = m.provider === 'volcengine' ? '火山' : 
-                             m.provider === 'stepfun' ? '阶跃' : 
-                             m.provider === 'suanli' ? '算力' : m.provider;
-        
-        const status = m.status || 'normal';
-        const statusText = status === 'good' ? '快速' : 
-                           status === 'slow' ? '缓慢' : 
-                           status === 'error' ? '错误' : '正常';
-        
-        div.innerHTML = `
-            <span class="name">${m.name}</span>
-            <span class="provider">${providerName}</span>
-            <span class="status-tag ${status}">${statusText}</span>
-        `;
-        div.onclick = () => selectModel(m.id, m.name);
-        if(m.id === selectedModelId) div.classList.add('same-as-selected');
-        els.modelOptions.appendChild(div);
+
+    const providerLabelMap = {
+        volcengine: '火山',
+        stepfun: '阶跃',
+        github: 'Github',
+        openai: 'OpenAI',
+        suanli: '算力',
+        aliyun: '阿里云'
+    };
+    const providerOrderMap = {
+        volcengine: 10,
+        stepfun: 20,
+        github: 30,
+        openai: 40,
+        suanli: 50,
+        aliyun: 60
+    };
+    const normalizeProvider = (provider) => String(provider || 'other').toLowerCase();
+    const providerLabel = (provider) => {
+        const key = normalizeProvider(provider);
+        return providerLabelMap[key] || (provider ? String(provider) : '其他');
+    };
+    const statusLabelMap = {
+        good: '良好',
+        normal: '正常',
+        fast: '快速',
+        slow: '缓慢',
+        error: '错误'
+    };
+    const normalizeStatus = (status) => String(status || 'normal').toLowerCase();
+
+    // Group by provider
+    const groups = new Map();
+    models.forEach((m) => {
+        const key = normalizeProvider(m.provider);
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(m);
+    });
+
+    // Render grouped chips
+    const sortedProviders = Array.from(groups.keys()).sort((a, b) => {
+        const ao = providerOrderMap[a] || 999;
+        const bo = providerOrderMap[b] || 999;
+        if (ao !== bo) return ao - bo;
+        return providerLabel(a).localeCompare(providerLabel(b), 'zh-CN');
+    });
+
+    sortedProviders.forEach((providerKey) => {
+        const section = document.createElement('div');
+        section.className = 'model-group';
+
+        const title = document.createElement('div');
+        title.className = 'model-group-title';
+        title.innerHTML = `<span class="label">${providerLabel(providerKey)}</span>`;
+        section.appendChild(title);
+
+        const chips = document.createElement('div');
+        chips.className = 'model-chip-wrap';
+
+        groups.get(providerKey).forEach((m) => {
+            const statusKey = normalizeStatus(m.status);
+            const chip = document.createElement('button');
+            chip.type = 'button';
+            chip.className = 'model-chip';
+            chip.dataset.modelId = m.id;
+
+            const nameSpan = document.createElement('span');
+            nameSpan.className = 'model-chip-name';
+            nameSpan.textContent = m.name;
+
+            const statusSpan = document.createElement('span');
+            statusSpan.className = `model-chip-status model-status-${statusKey}`;
+            statusSpan.textContent = statusLabelMap[statusKey] || statusKey.toUpperCase();
+
+            chip.appendChild(nameSpan);
+            chip.appendChild(statusSpan);
+
+            if (m.id === selectedModelId) chip.classList.add('same-as-selected');
+            chip.addEventListener('click', (e) => {
+                e.stopPropagation();
+                selectModel(m.id, m.name);
+            });
+            chips.appendChild(chip);
+        });
+
+        section.appendChild(chips);
+        els.modelOptions.appendChild(section);
     });
     
     // Set initial display
@@ -2394,9 +2459,9 @@ function selectModel(id, name) {
     els.currentModelDisplay.textContent = name;
     
     // Visual update
-    Array.from(els.modelOptions.children).forEach(c => {
-         if(c.textContent === name) c.classList.add('same-as-selected');
-         else c.classList.remove('same-as-selected');
+    els.modelOptions.querySelectorAll('.model-chip').forEach((chip) => {
+        if (chip.dataset.modelId === id) chip.classList.add('same-as-selected');
+        else chip.classList.remove('same-as-selected');
     });
     
     els.modelOptions.classList.add('select-hide');
@@ -2405,9 +2470,11 @@ function selectModel(id, name) {
 
 function closeAllSelects(e) {
     if(els.modelOptions && !els.modelOptions.classList.contains('select-hide')) {
-        // If click was outside container
-         els.modelOptions.classList.add('select-hide');
-         els.currentModelDisplay.classList.remove('select-arrow-active');
+        const clickedInside = els.modelSelectContainer && e && els.modelSelectContainer.contains(e.target);
+        if (!clickedInside) {
+            els.modelOptions.classList.add('select-hide');
+            els.currentModelDisplay.classList.remove('select-arrow-active');
+        }
     }
 }
 
@@ -2547,7 +2614,7 @@ async function checkUserRole() {
 async function openAdminDashboard() {
     const adminModal = document.getElementById('adminModal');
     const userMenu = document.getElementById('userMenu');
-    if (userMenu) userMenu.classList.remove('active'); // 臊۵菜单
+    if (userMenu) userMenu.classList.remove('active'); // 关闭菜单
     
     if (!adminModal) return;
     adminModal.classList.add('active');
@@ -2678,7 +2745,7 @@ window.saveUserModelPermissions = async function() {
         if (data.success) {
 // 说明
             closeModelPermModal();
-            // 如果俔的是当前登录用户，则刷新页面
+            // 如果修改的是当前登录用户，则刷新页面
             if (currentTargetPermUser === currentUsername) {
                 setTimeout(() => location.reload(), 800);
             }
@@ -2828,7 +2895,7 @@ async function submitAddUser() {
             alert('用户添加成功');
             document.getElementById('formUsername').value = '';
             document.getElementById('formPassword').value = '';
-            closeAddUserModal(); // رյ
+            closeAddUserModal(); // 关闭
             await loadAdminUsersList();
             await loadAdminStats();
         } else {

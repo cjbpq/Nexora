@@ -769,6 +769,35 @@ class Model:
                     
                     try:
                         for chunk in chunks:
+                            # [CHUNK_DEBUG] 每一个 chunk 的详细信息
+                            if CONFIG.get('log_status', 'silent') == 'all':
+                                if self.provider == 'volcengine':
+                                    c_type = getattr(chunk, 'type', 'unknown')
+                                    # 提取内容摘要
+                                    c_content = ""
+                                    if hasattr(chunk, 'delta'): 
+                                        c_content = chunk.delta
+                                    elif hasattr(chunk, 'item') and chunk.item:
+                                        if hasattr(chunk.item, 'content'): c_content = chunk.item.content
+                                        elif hasattr(chunk.item, 'type'): c_content = f"Item({chunk.item.type})"
+                                    
+                                    # 统一输出格式 (Type/Content)
+                                    print(f"[CHUNK_DEBUG] type={c_type} content={json.dumps(c_content, ensure_ascii=False) if not isinstance(c_content, str) else c_content}")
+                                else:
+                                    # OpenAI / Stepfun 结构
+                                    c_type = "openai_chunk"
+                                    delta = chunk.choices[0].delta if chunk.choices else None
+                                    c_content = ""
+                                    if delta:
+                                        if hasattr(delta, 'content') and delta.content: 
+                                            c_content = delta.content
+                                        elif hasattr(delta, 'reasoning_content') and delta.reasoning_content: 
+                                            c_content = "[Reasoning] " + delta.reasoning_content
+                                        elif hasattr(delta, 'tool_calls'): 
+                                            c_content = "[ToolCalls]"
+                                    
+                                    print(f"[CHUNK_DEBUG] type={c_type} content={c_content}")
+
                             # --- 处理：火山引擎 (Ark Responses API 专用结构) ---
                             if self.provider == 'volcengine':
                                 chunk_type = getattr(chunk, 'type', None)

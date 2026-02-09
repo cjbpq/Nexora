@@ -1,4 +1,4 @@
-"""
+﻿"""
 ChatDB Web Server - Flask应用
 提供Web界面的聊天和知识库管理功能
 """
@@ -69,6 +69,36 @@ def jsonify_safe(payload, status=200):
         status=status,
         mimetype='application/json'
     )
+
+
+def _get_chunk_debug_content(chunk):
+    """Extract display content for stream debug logs."""
+    if not isinstance(chunk, dict):
+        return chunk
+
+    if "content" in chunk and chunk.get("content") is not None:
+        return chunk.get("content")
+
+    # If there is no direct content field, print the rest of payload.
+    return {k: v for k, v in chunk.items() if k != "type"}
+
+
+def _log_stream_chunk(chunk, model_name=None):
+    """Print every stream chunk type + content when log_status=all."""
+    chunk_type = "unknown"
+    if isinstance(chunk, dict):
+        chunk_type = chunk.get("type", "unknown")
+    content = _get_chunk_debug_content(chunk)
+
+    try:
+        content_dump = json.dumps(content, ensure_ascii=False, default=str)
+    except Exception:
+        content_dump = str(content)
+
+    prefix = "[MODEL_STREAM]"
+    if model_name:
+        prefix = f"[MODEL_STREAM][{model_name}]"
+    print(f"{prefix} type={chunk_type} content={content_dump}")
 
 
 def require_papi_key(f):
@@ -809,6 +839,9 @@ def admin_update_user_models():
 def chat_stream():
     """流式聊天接口"""
     data = request.get_json()
+    sys_config = get_config_all()
+    log_status = str(sys_config.get('log_status', 'silent')).lower()
+    log_all_chunks = (log_status == 'all')
     message = data.get('message')
     conversation_id = data.get('conversation_id')
     model_name = data.get('model_name')
@@ -899,6 +932,8 @@ def chat_stream():
                 is_regenerate=is_regenerate,
                 regenerate_index=regenerate_index
             ):
+                if log_all_chunks:
+                    _log_stream_chunk(chunk, model_name=model_name or model.model_name)
                 chunk_data = json.dumps(chunk, ensure_ascii=False)
                 yield f"data: {chunk_data}\n\n"
                 time.sleep(0.01)  # 小延迟避免过快
@@ -2111,3 +2146,5 @@ if __name__ == '__main__':
     print("💡 使用 Ctrl+C 停止服务器")
     
     app.run(debug=True, host='0.0.0.0', port=5000, threaded=True)
+
+
