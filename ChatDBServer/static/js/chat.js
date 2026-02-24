@@ -6,6 +6,135 @@ let shouldAutoScroll = true; // Auto-scroll control
 let uploadedFileIds = []; // Uploaded files {id, name}
 let currentUsername = null;
 let currentUserRole = 'member';
+let currentUserAvatarUrl = '';
+let pendingAvatarDataUrl = '';
+let adminUsersCache = [];
+let adminSelectedUserId = null;
+let adminUserFilterKeyword = '';
+let adminMailUsersCache = [];
+let adminSelectedMailUser = null;
+let adminMailUserFilterKeyword = '';
+let adminMailGroup = 'default';
+let mailViewState = {
+    status: null,
+    mails: [],
+    selectedId: '',
+    query: '',
+    sidebarCollapsed: false,
+    restorePositionOnce: false,
+    mode: 'inbox',
+    currentMail: null,
+    folder: 'all',
+    isSending: false,
+    inboxRequestId: 0,
+    detailRequestId: 0
+};
+const MAIL_SIDEBAR_COLLAPSED_KEY = 'nexora_mail_sidebar_collapsed';
+const MAIL_SELECTED_ID_KEY = 'nexora_mail_selected_id';
+const MAIL_LIST_SCROLL_KEY = 'nexora_mail_list_scroll';
+
+function loadMailSidebarCollapsedState() {
+    try {
+        const v = localStorage.getItem(MAIL_SIDEBAR_COLLAPSED_KEY);
+        if (v === '1' || v === 'true') return true;
+        if (v === '0' || v === 'false') return false;
+    } catch (e) {
+        // ignore
+    }
+    return false;
+}
+
+function saveMailSidebarCollapsedState(collapsed) {
+    try {
+        localStorage.setItem(MAIL_SIDEBAR_COLLAPSED_KEY, collapsed ? '1' : '0');
+    } catch (e) {
+        // ignore
+    }
+}
+
+function getCurrentUrlParams() {
+    return new URLSearchParams(window.location.search || '');
+}
+
+function isMailViewUrl() {
+    const p = getCurrentUrlParams();
+    return p.get('view') === 'mail';
+}
+
+function getMailIdFromUrl() {
+    const p = getCurrentUrlParams();
+    return (p.get('mail_id') || '').trim();
+}
+
+function setMailViewUrl(mailId) {
+    try {
+        const p = getCurrentUrlParams();
+        p.set('view', 'mail');
+        if (mailId) p.set('mail_id', String(mailId));
+        else p.delete('mail_id');
+        const q = p.toString();
+        if (window.history && window.history.replaceState) {
+            window.history.replaceState({}, '', `/chat${q ? `?${q}` : ''}`);
+        }
+    } catch (e) {
+        // ignore
+    }
+}
+
+function clearMailViewUrl() {
+    try {
+        const p = getCurrentUrlParams();
+        p.delete('view');
+        p.delete('mail_id');
+        const q = p.toString();
+        if (window.history && window.history.replaceState) {
+            window.history.replaceState({}, '', `/chat${q ? `?${q}` : ''}`);
+        }
+    } catch (e) {
+        // ignore
+    }
+}
+
+function isMailViewActiveInDom() {
+    const viewer = document.getElementById('knowledgeViewer');
+    if (!viewer) return false;
+    const display = (viewer.style.display || '').toLowerCase();
+    if (display === 'none') return false;
+    return !!viewer.querySelector('.mail-workspace');
+}
+
+function loadMailSelectedId() {
+    try {
+        return (localStorage.getItem(MAIL_SELECTED_ID_KEY) || '').trim();
+    } catch (e) {
+        return '';
+    }
+}
+
+function saveMailSelectedId(id) {
+    try {
+        localStorage.setItem(MAIL_SELECTED_ID_KEY, String(id || ''));
+    } catch (e) {
+        // ignore
+    }
+}
+
+function loadMailListScroll() {
+    try {
+        const v = Number(localStorage.getItem(MAIL_LIST_SCROLL_KEY) || 0);
+        return Number.isFinite(v) && v >= 0 ? v : 0;
+    } catch (e) {
+        return 0;
+    }
+}
+
+function saveMailListScroll(scrollTop) {
+    try {
+        localStorage.setItem(MAIL_LIST_SCROLL_KEY, String(Math.max(0, Number(scrollTop || 0))));
+    } catch (e) {
+        // ignore
+    }
+}
 
 // DOM Elements
 const els = {
@@ -25,6 +154,7 @@ const els = {
     newChatBtn: document.getElementById('newChatBtn'),
     conversationTitle: document.getElementById('conversationTitle'),
     knowledgePanel: document.getElementById('knowledgePanel'),
+    toggleMailView: document.getElementById('toggleMailView'),
     toggleKnowledgePanel: document.getElementById('toggleKnowledgePanel'),
     btnTogglePanel: document.getElementById('btnTogglePanel'), // Close button inside panel
     refreshKnowledgeBtn: document.getElementById('refreshKnowledgeBtn'),
@@ -64,7 +194,10 @@ document.addEventListener('DOMContentLoaded', () => {
     // Check URL param for conversation ID
     const urlParams = new URLSearchParams(window.location.search);
     const cid = urlParams.get('cid');
-    if (cid) {
+    const shouldRestoreMailView = isMailViewUrl() && !!document.getElementById('toggleMailView');
+    if (shouldRestoreMailView) {
+        setTimeout(() => openMailPlaceholderView(), 0);
+    } else if (cid) {
         loadConversation(cid);
     } else {
         // Init load knowledge even without conversation
@@ -73,6 +206,8 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 function initUI() {
+    captureChatHeaderBaseState();
+    mailViewState.sidebarCollapsed = loadMailSidebarCollapsedState();
     // Event Listeners
     if(els.sendBtn) els.sendBtn.addEventListener('click', sendMessage);
     
@@ -220,46 +355,7 @@ function initUI() {
             e.preventDefault();
             e.stopPropagation();
             if (els.userMenu) els.userMenu.classList.remove('active');
-            // Currently settings is a placeholder
-            showToast('设置功能稍后上线');
-        });
-    }
-
-    // Admin button click
-    const adminBtn = document.getElementById('adminBackendBtn');
-    if (adminBtn) {
-        adminBtn.addEventListener('click', (e) => {
-            e.preventDefault();
-// 说明
-            if (els.userMenu) els.userMenu.classList.remove('active'); // 说明
-            openAdminDashboard();
-        });
-    }
-
-    // Admin Modal close button
-    const closeAdminBtn = document.getElementById('closeAdminModal');
-    if (closeAdminBtn) {
-        closeAdminBtn.addEventListener('click', (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            const adminModal = document.getElementById('adminModal');
-            if (adminModal) adminModal.classList.remove('active');
-        });
-    }
-
-    // Admin Modal backdrop click
-    const adminModal = document.getElementById('adminModal');
-    if (adminModal) {
-        adminModal.addEventListener('click', (e) => {
-            if (e.target === adminModal) {
-                const selection = window.getSelection ? window.getSelection().toString() : '';
-                if (selection) {
-                    return;
-                }
-                e.preventDefault();
-                e.stopPropagation();
-                adminModal.classList.remove('active');
-            }
+            openSettingsModal();
         });
     }
 
@@ -302,19 +398,120 @@ function initUI() {
         });
     }
 
-    // Admin tabs (admin modal only)
-    document.querySelectorAll('#adminModal .admin-tab').forEach(tab => {
-        tab.addEventListener('click', () => {
-            const tabName = tab.getAttribute('data-tab');
-            switchAdminTab(tabName);
-        });
-    });
+    // Admin modal removed; admin features are merged into settings tabs.
 
     const submitAddUserBtn = document.getElementById('addUserBtn');
     if (submitAddUserBtn) {
         submitAddUserBtn.addEventListener('click', (e) => {
             e.preventDefault();
             submitAddUser();
+        });
+    }
+
+    const adminUserFilterInput = document.getElementById('adminUserFilterInput');
+    if (adminUserFilterInput) {
+        adminUserFilterInput.addEventListener('input', (e) => {
+            adminUserFilterKeyword = (e.target.value || '').trim().toLowerCase();
+            renderAdminUsersList();
+        });
+    }
+    const openAddMailUserBtn = document.getElementById('openAddMailUserForm');
+    if (openAddMailUserBtn) {
+        openAddMailUserBtn.addEventListener('click', (e) => {
+            e.preventDefault();
+            renderAdminMailCreateForm();
+        });
+    }
+    const adminMailUserFilterInput = document.getElementById('adminMailUserFilterInput');
+    if (adminMailUserFilterInput) {
+        adminMailUserFilterInput.addEventListener('input', (e) => {
+            adminMailUserFilterKeyword = (e.target.value || '').trim().toLowerCase();
+            renderAdminMailUsersList();
+        });
+    }
+    const adminMailGroupSelect = document.getElementById('adminMailGroupSelect');
+    if (adminMailGroupSelect) {
+        adminMailGroupSelect.addEventListener('change', async (e) => {
+            adminMailGroup = (e.target.value || 'default').trim() || 'default';
+            await loadAdminMailUsersList();
+        });
+    }
+
+    const saveProfileBtn = document.getElementById('saveProfileBtn');
+    if (saveProfileBtn) {
+        saveProfileBtn.addEventListener('click', () => saveUserProfile());
+    }
+
+    const avatarUploadBtn = document.getElementById('settingsAvatarUploadBtn');
+    const avatarFileInput = document.getElementById('settingsAvatarFileInput');
+    if (avatarUploadBtn && avatarFileInput) {
+        avatarUploadBtn.addEventListener('click', () => avatarFileInput.click());
+        avatarFileInput.addEventListener('change', (e) => {
+            const file = e.target.files && e.target.files[0];
+            if (file) openAvatarCropModal(file);
+            e.target.value = '';
+        });
+    }
+
+    const closeAvatarCropBtn = document.getElementById('closeAvatarCropBtn');
+    if (closeAvatarCropBtn) {
+        closeAvatarCropBtn.addEventListener('click', closeAvatarCropModal);
+    }
+    const cancelAvatarCropBtn = document.getElementById('cancelAvatarCropBtn');
+    if (cancelAvatarCropBtn) {
+        cancelAvatarCropBtn.addEventListener('click', closeAvatarCropModal);
+    }
+    const applyAvatarCropBtn = document.getElementById('applyAvatarCropBtn');
+    if (applyAvatarCropBtn) {
+        applyAvatarCropBtn.addEventListener('click', applyAvatarCropAndPreview);
+    }
+    const avatarCropModal = document.getElementById('avatarCropModal');
+    if (avatarCropModal) {
+        avatarCropModal.addEventListener('click', (e) => {
+            if (e.target === avatarCropModal) closeAvatarCropModal();
+        });
+    }
+
+    const addProviderBtn = document.getElementById('btnAddProvider');
+    if (addProviderBtn) {
+        addProviderBtn.addEventListener('click', () => openProviderEditor());
+    }
+
+    const addModelBtn = document.getElementById('btnAddModel');
+    if (addModelBtn) {
+        addModelBtn.addEventListener('click', () => openModelEditor());
+    }
+
+    const adminModelSearchInput = document.getElementById('adminModelSearchInput');
+    if (adminModelSearchInput) {
+        adminModelSearchInput.addEventListener('input', (e) => {
+            adminModelSearchKeyword = (e.target.value || '').trim();
+            renderAdminModelConfig({ resetModelsScroll: true });
+        });
+    }
+
+    const textConfirmModal = document.getElementById('adminTextConfirmModal');
+    if (textConfirmModal) {
+        textConfirmModal.addEventListener('click', (e) => {
+            if (e.target === textConfirmModal) {
+                closeAdminTextConfirmModal();
+            }
+        });
+    }
+
+    const configModal = document.getElementById('adminConfigModal');
+    if (configModal) {
+        configModal.addEventListener('click', (e) => {
+            if (e.target === configModal) {
+                closeAdminConfigModal();
+            }
+        });
+    }
+    const configSaveBtn = document.getElementById('adminConfigSaveBtn');
+    if (configSaveBtn) {
+        configSaveBtn.addEventListener('click', async (e) => {
+            e.preventDefault();
+            await saveAdminConfigModal();
         });
     }
 }
@@ -416,6 +613,10 @@ function renderConversationList(conversations) {
 }
 
 async function createNewConversation(silent = false) {
+    const viewer = document.getElementById('knowledgeViewer');
+    if (viewer && viewer.style.display !== 'none') {
+        closeKnowledgeView();
+    }
     if(!silent) {
         // Clear UI
         currentConversationId = null;
@@ -436,21 +637,17 @@ async function createNewConversation(silent = false) {
 }
 
 async function loadConversation(id) {
+    const viewer = document.getElementById('knowledgeViewer');
+    // 如果当前在知识/邮件等 viewer 页面，先统一恢复聊天 Header 与布局
+    if (viewer && viewer.style.display !== 'none') {
+        closeKnowledgeView();
+    }
+
     // 清空导航栈和知识相关状态（直接跳转到新对话）
     navigationStack = [];
     currentSearchQuery = '';
     currentViewingKnowledge = null;
     originalHeaderState = null;
-    
-    // 如果正在查看知识，关闭知识视图
-    const viewer = document.getElementById('knowledgeViewer');
-    const msgs = document.getElementById('messagesContainer');
-    const inputWrapper = document.getElementById('inputWrapper');
-    if (viewer && msgs && viewer.style.display !== 'none') {
-        viewer.style.display = 'none';
-        msgs.style.display = 'flex';
-        if (inputWrapper) inputWrapper.style.display = 'block';
-    }
     
     currentConversationId = id;
     els.messagesContainer.innerHTML = ''; // Loading state
@@ -1384,8 +1581,8 @@ async function loadKnowledge(cid) {
             if(els.panelBasisCount) els.panelBasisCount.textContent = (basisData.knowledge || []).length;
         }
         if (shortData.success) {
-            renderKnowledgeList(els.panelShortList, shortData.knowledge || [], 'short');
-            if(els.panelShortCount) els.panelShortCount.textContent = (shortData.knowledge || []).length;
+            renderKnowledgeList(els.panelShortList, shortData.memories || [], 'short');
+            if(els.panelShortCount) els.panelShortCount.textContent = (shortData.memories || []).length;
         }
 
     } catch(e) { console.error("Error loading knowledge", e); }
@@ -1401,7 +1598,8 @@ function renderKnowledgeList(container, items, type) {
         div.dataset.title = title;
         div.style.position = 'relative';
         div.style.overflow = 'hidden';
-        div.style.paddingRight = '26px';
+        div.style.paddingRight = '56px'; // 调整以容纳两个icon：刷新和删除
+        div.style.transition = 'all 0.15s'; // 模仿聊天列表的transition
         const label = document.createElement('span');
         label.textContent = title;
         label.style.position = 'relative';
@@ -1428,6 +1626,7 @@ function renderKnowledgeList(container, items, type) {
             div.appendChild(spinner);
         }
         // Add refresh icon for basis when vector is stale
+        let refreshIconWidth = 0;
         if (type === 'basis') {
             const meta = knowledgeMetaCache[title] || {};
             const updatedAt = Number(meta.updated_at || 0);
@@ -1436,7 +1635,7 @@ function renderKnowledgeList(container, items, type) {
                 const icon = document.createElement('i');
                 icon.className = 'fa-solid fa-rotate';
                 icon.style.position = 'absolute';
-                icon.style.right = '6px';
+                icon.style.right = '26px'; // 向量化icon在左边，给删除icon留出空间
                 icon.style.top = '50%';
                 icon.style.transform = 'translateY(-50%)';
                 icon.style.fontSize = '12px';
@@ -1449,8 +1648,49 @@ function renderKnowledgeList(container, items, type) {
                     vectorizeKnowledgeTitle(title);
                 };
                 div.appendChild(icon);
+                refreshIconWidth = 1;
             }
         }
+        
+        // Add delete button (×) - rightmost position, hidden by default
+        const deleteBtn = document.createElement('i');
+        deleteBtn.className = 'fa-solid fa-xmark';
+        deleteBtn.style.position = 'absolute';
+        deleteBtn.style.right = '6px';
+        deleteBtn.style.top = '50%';
+        deleteBtn.style.transform = 'translateY(-50%)';
+        deleteBtn.style.fontSize = '12px';
+        deleteBtn.style.color = '#999';
+        deleteBtn.style.zIndex = '2';
+        deleteBtn.style.cursor = 'pointer';
+        deleteBtn.style.padding = '4px';
+        deleteBtn.style.opacity = '0'; // 默认隐藏
+        deleteBtn.style.transition = 'all 0.15s'; // 模仿聊天列表的transition
+        deleteBtn.title = '删除';
+        deleteBtn.onclick = (e) => {
+            e.stopPropagation();
+            confirmDeleteKnowledge(title, type);
+        };
+        div.appendChild(deleteBtn);
+        
+        // Hover handlers for delete button
+        div.addEventListener('mouseenter', () => {
+            deleteBtn.style.opacity = '1';
+            deleteBtn.style.color = '#999';
+        });
+        
+        div.addEventListener('mouseleave', () => {
+            deleteBtn.style.opacity = '0';
+        });
+        
+        deleteBtn.addEventListener('mouseenter', () => {
+            deleteBtn.style.color = '#ef4444';
+        });
+        
+        deleteBtn.addEventListener('mouseleave', () => {
+            deleteBtn.style.color = '#999';
+        });
+        
         // Add click handler to view details ONLY for basis for now
         if(type === 'basis') {
              div.onclick = () => viewKnowledge(title);
@@ -1462,6 +1702,57 @@ function renderKnowledgeList(container, items, type) {
     });
 }
 
+// Confirm delete knowledge
+function confirmDeleteKnowledge(title, type) {
+    const confirmBackdrop = document.getElementById('confirmBackdrop');
+    const confirmTitle = document.getElementById('confirmTitle');
+    const confirmMessage = document.getElementById('confirmMessage');
+    const confirmOkBtn = document.getElementById('confirmOkBtn');
+    
+    // 设置确认对话框的内容
+    confirmTitle.textContent = '删除知识点';
+    confirmMessage.textContent = `确定要删除"${title}"吗？此操作无法撤销。`;
+    
+    // 清除旧的事件监听器，添加新的
+    const newConfirmOkBtn = confirmOkBtn.cloneNode(true);
+    confirmOkBtn.parentNode.replaceChild(newConfirmOkBtn, confirmOkBtn);
+    
+    newConfirmOkBtn.onclick = async () => {
+        await deleteKnowledge(title, type);
+        closeConfirmModal();
+    };
+    
+    // 显示模态框
+    if(confirmBackdrop) {
+        confirmBackdrop.classList.add('active');
+    }
+}
+
+// Delete knowledge
+async function deleteKnowledge(title, type) {
+    try {
+        const endpoint = type === 'basis' ? `/api/knowledge/basis/${encodeURIComponent(title)}` : `/api/knowledge/short/${encodeURIComponent(title)}`;
+        const response = await fetch(endpoint, {
+            method: 'DELETE'
+        });
+        
+        const data = await response.json();
+        if(!data.success) {
+            console.error('删除失败:', data.message);
+            return;
+        }
+        
+        // 如果当前正在浏览该知识点，则自动退出
+        if(currentViewingKnowledge === title) {
+            closeKnowledgeView();
+        }
+        
+        // 刷新知识库列表
+        loadKnowledge(currentConversationId);
+    } catch(e) {
+        console.error('删除知识点失败:', e);
+    }
+}
 
 // --- Knowledge View Logic ---
 let easyMDE = null;
@@ -1474,6 +1765,49 @@ let pendingHighlightData = null;
 // 导航栈管理：追踪视图层级，支持多层返回
 let navigationStack = [];
 let currentSearchQuery = ''; // 保存搜索关键词，以便返回时重新显示
+let chatHeaderBaseState = null;
+
+function captureChatHeaderBaseState() {
+    const headerTitle = document.getElementById('conversationTitle');
+    const headerLeft = document.querySelector('.header-left');
+    const headerRight = document.querySelector('.header-right');
+    if (!headerTitle || !headerLeft || !headerRight) return;
+    if (!chatHeaderBaseState) {
+        chatHeaderBaseState = {
+            title: headerTitle.textContent || 'Untitled Conversation',
+            leftHTML: headerLeft.innerHTML,
+            rightHTML: headerRight.innerHTML
+        };
+    }
+}
+
+function restoreHeaderState(state) {
+    if (!state) return;
+    const headerTitle = document.getElementById('conversationTitle');
+    const headerLeft = document.querySelector('.header-left');
+    const headerRight = document.querySelector('.header-right');
+    if (!headerTitle || !headerLeft || !headerRight) return;
+    headerTitle.textContent = state.title || 'Untitled Conversation';
+    headerLeft.innerHTML = state.leftHTML || '';
+    headerRight.innerHTML = state.rightHTML || '';
+
+    els.modelSelectContainer = document.getElementById('modelSelectContainer');
+    els.currentModelDisplay = document.getElementById('currentModelDisplay');
+    els.modelOptions = document.getElementById('modelOptions');
+    loadModels();
+
+    const toggleSidebar = document.getElementById('toggleSidebar');
+    if (toggleSidebar) {
+        toggleSidebar.onclick = () => {
+            if (window.innerWidth <= 768) els.sidebar.classList.toggle('mobile-open');
+            else els.sidebar.classList.toggle('collapsed');
+        };
+    }
+    const toggleKP = document.getElementById('toggleKnowledgePanel');
+    if (toggleKP) toggleKP.onclick = () => els.knowledgePanel.classList.toggle('visible');
+    const toggleMail = document.getElementById('toggleMailView');
+    if (toggleMail) toggleMail.onclick = () => openMailPlaceholderView();
+}
 
 // 保存当前状态
 function saveCurrentViewerState(extra = {}) {
@@ -1593,7 +1927,7 @@ async function viewKnowledge(title, options = {}) {
         <button class="btn-icon knowledge-action" id="btnSaveKnowledge" onclick="saveKnowledge('${title.replace(/'/g, "\\'")}')" title="保存">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path><polyline points="17 21 17 13 7 13 7 21"></polyline><polyline points="7 3 7 8 15 8"></polyline></svg>
         </button>
-        <button class="btn-icon knowledge-action knowledge-action-danger" onclick="confirmDeleteKnowledge('${title.replace(/'/g, "\\'")}')" title="删除">
+        <button class="btn-icon knowledge-action knowledge-action-danger" onclick="confirmDeleteKnowledge('${title.replace(/'/g, "\\'")}', 'basis')" title="删除">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
         </button>
     `;
@@ -1816,6 +2150,7 @@ function closeKnowledgeView() {
     const headerTitle = document.getElementById('conversationTitle');
     const headerLeft = document.querySelector('.header-left');
     const headerRight = document.querySelector('.header-right');
+    const wasMailView = !!(viewer && viewer.querySelector('.mail-workspace'));
 
     currentViewingKnowledge = null;
     
@@ -1874,24 +2209,802 @@ function closeKnowledgeView() {
     navigationStack = []; // 清空栈
 
     if (originalHeaderState) {
-        headerTitle.textContent = originalHeaderState.title;
-        headerLeft.innerHTML = originalHeaderState.leftHTML;
-        headerRight.innerHTML = originalHeaderState.rightHTML;
-        els.modelSelectContainer = document.getElementById('modelSelectContainer');
-        els.currentModelDisplay = document.getElementById('currentModelDisplay');
-        els.modelOptions = document.getElementById('modelOptions');
-        loadModels(); 
-        
-        const toggleSidebar = document.getElementById('toggleSidebar');
-        if(toggleSidebar) toggleSidebar.onclick = () => {
-            if (window.innerWidth <= 768) els.sidebar.classList.toggle('mobile-open');
-            else els.sidebar.classList.toggle('collapsed');
-        };
-        const toggleKP = document.getElementById('toggleKnowledgePanel');
-        if(toggleKP) toggleKP.onclick = () => els.knowledgePanel.classList.toggle('visible');
+        restoreHeaderState(originalHeaderState);
+    } else if (chatHeaderBaseState) {
+        restoreHeaderState(chatHeaderBaseState);
     }
+    if (wasMailView) clearMailViewUrl();
     originalHeaderState = null;
 }
+
+window.openMailPlaceholderView = function() {
+    const viewer = document.getElementById('knowledgeViewer');
+    const msgs = document.getElementById('messagesContainer');
+    const inputWrapper = document.getElementById('inputWrapper');
+    const headerTitle = document.getElementById('conversationTitle');
+    const headerLeft = document.querySelector('.header-left');
+    const headerRight = document.querySelector('.header-right');
+
+    if (!viewer || !msgs || !headerTitle || !headerLeft || !headerRight) return;
+
+    if (!originalHeaderState) {
+        originalHeaderState = {
+            title: headerTitle.textContent,
+            leftHTML: headerLeft.innerHTML,
+            rightHTML: headerRight.innerHTML
+        };
+    }
+
+    currentViewingKnowledge = null;
+    pendingHighlightData = null;
+    navigationStack = [];
+    setMailViewUrl(mailViewState.selectedId || '');
+
+    msgs.style.display = 'none';
+    if (inputWrapper) inputWrapper.style.display = 'none';
+    viewer.style.display = 'flex';
+    viewer.style.flexDirection = 'column';
+
+    headerTitle.textContent = '邮件';
+    headerLeft.innerHTML = `
+        <button class="btn-icon" onclick="closeKnowledgeView()" title="Back">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="19" y1="12" x2="5" y2="12"></line><polyline points="12 19 5 12 12 5"></polyline></svg>
+        </button>
+    `;
+    headerRight.innerHTML = '';
+
+    viewer.innerHTML = `
+        <div class="mail-workspace ${mailViewState.sidebarCollapsed ? 'mail-sidebar-collapsed' : ''}" id="mailWorkspace">
+            <aside class="mail-sidebar">
+                <div class="mail-sidebar-head">
+                    <button class="mail-sidebar-toggle-btn" type="button" onclick="toggleMailSidebar()" title="${mailViewState.sidebarCollapsed ? '展开侧栏' : '折叠侧栏'}">
+                        <i class="fa-solid ${mailViewState.sidebarCollapsed ? 'fa-angles-right' : 'fa-angles-left'}"></i>
+                    </button>
+                </div>
+                <button class="btn-primary mail-compose-btn" type="button" title="写邮件" onclick="openMailComposeView()">
+                    <i class="fa-solid fa-pen-to-square"></i>
+                    <span>写邮件</span>
+                </button>
+                <div class="mail-folder-section">
+                    <div class="mail-folder-title">邮箱分组</div>
+                    <button class="mail-folder-item ${mailViewState.folder === 'all' ? 'active' : ''}" type="button" id="mailFolderInboxBtn" onclick="setMailFolder('all')">
+                        <i class="fa-solid fa-inbox"></i>
+                        <span>收件箱</span>
+                        <span class="mail-folder-badge" id="mailInboxCountBadge">0</span>
+                    </button>
+                    <button class="mail-folder-item ${mailViewState.folder === 'unread' ? 'active' : ''}" type="button" id="mailFolderUnreadBtn" onclick="setMailFolder('unread')">
+                        <i class="fa-regular fa-envelope"></i>
+                        <span>未读</span>
+                        <span class="mail-folder-badge alert" id="mailUnreadCountBadge">0</span>
+                    </button>
+                </div>
+            </aside>
+            <section class="mail-list-panel">
+                <div class="mail-list-toolbar">
+                    <div class="mail-toolbar-title" id="mailToolbarTitle">收件箱</div>
+                    <div class="mail-list-search">
+                        <i class="fa-solid fa-magnifying-glass"></i>
+                        <input id="mailSearchInput" type="text" placeholder="搜索邮件主题 / 发件人">
+                    </div>
+                </div>
+                <div class="mail-list-body" id="mailListBody"></div>
+            </section>
+            <section class="mail-detail-panel">
+                <div class="mail-detail-head">
+                    <div class="mail-detail-head-row">
+                        <h3 id="mailDetailTitle">邮件详情</h3>
+                        <div class="mail-icon-actions">
+                            <button class="mail-icon-btn" type="button" title="刷新" onclick="refreshMailInbox()"><i class="fa-solid fa-rotate-right"></i></button>
+                            <button class="mail-icon-btn" type="button" title="回复" onclick="openMailComposeReply()"><i class="fa-solid fa-reply"></i></button>
+                            <button class="mail-icon-btn" type="button" title="转发" onclick="openMailComposeForward()"><i class="fa-solid fa-share"></i></button>
+                            <button class="mail-icon-btn danger" type="button" title="删除" onclick="deleteCurrentMail()"><i class="fa-regular fa-trash-can"></i></button>
+                        </div>
+                    </div>
+                    <div class="mail-detail-meta" id="mailDetailMeta"></div>
+                </div>
+                <div class="mail-detail-content" id="mailDetailContent"></div>
+            </section>
+        </div>
+    `;
+    initMailWorkspace();
+};
+
+function formatMailTime(ts) {
+    const n = Number(ts || 0);
+    if (!n) return '-';
+    const d = new Date(n * 1000);
+    return d.toLocaleString();
+}
+
+function getMailDateGroupKey(ts) {
+    const n = Number(ts || 0);
+    if (!n) return 'unknown';
+    const d = new Date(n * 1000);
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${y}-${m}-${day}`;
+}
+
+function getMailDateGroupLabel(groupKey) {
+    if (!groupKey || groupKey === 'unknown') return '未知日期';
+    const today = new Date();
+    const ty = today.getFullYear();
+    const tm = String(today.getMonth() + 1).padStart(2, '0');
+    const td = String(today.getDate()).padStart(2, '0');
+    const todayKey = `${ty}-${tm}-${td}`;
+    if (groupKey === todayKey) return '今天';
+    const yest = new Date(today);
+    yest.setDate(today.getDate() - 1);
+    const yy = yest.getFullYear();
+    const ym = String(yest.getMonth() + 1).padStart(2, '0');
+    const yd = String(yest.getDate()).padStart(2, '0');
+    const yestKey = `${yy}-${ym}-${yd}`;
+    if (groupKey === yestKey) return '昨天';
+    return groupKey;
+}
+
+function parseRawMail(raw) {
+    const src = String(raw || '');
+    const splitMatch = src.match(/\r?\n\r?\n/);
+    let headText = '';
+    let body = src;
+    if (splitMatch) {
+        const idx = splitMatch.index || 0;
+        headText = src.slice(0, idx);
+        body = src.slice(idx + splitMatch[0].length);
+    }
+
+    const headers = {};
+    if (headText) {
+        const lines = headText.split(/\r?\n/);
+        let currentKey = '';
+        for (const line of lines) {
+            if (!line) continue;
+            if ((line.startsWith(' ') || line.startsWith('\t')) && currentKey) {
+                headers[currentKey] = `${headers[currentKey] || ''} ${line.trim()}`.trim();
+                continue;
+            }
+            const p = line.indexOf(':');
+            if (p <= 0) continue;
+            const k = line.slice(0, p).trim().toLowerCase();
+            const v = line.slice(p + 1).trim();
+            headers[k] = v;
+            currentKey = k;
+        }
+    }
+
+    const ct = String(headers['content-type'] || '').toLowerCase();
+    const isHtml = ct.includes('text/html') || /<html[\s>]|<body[\s>]|<div[\s>]|<table[\s>]/i.test(body);
+    body = decodeUnicodeEscapes(body);
+    return { headers, body, isHtml };
+}
+
+function decodeUnicodeEscapes(text) {
+    const src = String(text || '');
+    if (!src || (src.indexOf('\\u') < 0 && src.indexOf('\\x') < 0)) return src;
+    return src
+        .replace(/\\u([0-9a-fA-F]{4})/g, (_, h) => String.fromCharCode(parseInt(h, 16)))
+        .replace(/\\x([0-9a-fA-F]{2})/g, (_, h) => String.fromCharCode(parseInt(h, 16)));
+}
+
+function htmlToText(html) {
+    const div = document.createElement('div');
+    div.innerHTML = String(html || '');
+    return (div.textContent || div.innerText || '').replace(/\s+/g, ' ').trim();
+}
+
+function extractMailSnippet(rawLike) {
+    const parsed = parseRawMail(rawLike);
+    const plain = parsed.isHtml ? htmlToText(parsed.body) : String(parsed.body || '').replace(/\s+/g, ' ').trim();
+    if (!plain) return '';
+    return plain.length > 110 ? `${plain.slice(0, 110)}...` : plain;
+}
+
+function getMailPlainTextForQuote(mail) {
+    const m = mail || {};
+    const text = decodeUnicodeEscapes(String(m.content_text || '')).trim();
+    if (text) return text;
+
+    const html = decodeUnicodeEscapes(String(m.content_html || '')).trim();
+    if (html) return htmlToText(html);
+
+    const raw = decodeUnicodeEscapes(String(m.content || '')).trim();
+    if (raw) {
+        const parsed = parseRawMail(raw);
+        const body = String(parsed.body || '').trim();
+        if (!body) return '';
+        return parsed.isHtml ? htmlToText(body) : decodeUnicodeEscapes(body);
+    }
+
+    return decodeUnicodeEscapes(String(m.preview_text || '')).trim();
+}
+
+function parseMailReadState(value) {
+    if (typeof value === 'boolean') return value;
+    if (typeof value === 'number') return value !== 0;
+    if (typeof value === 'string') {
+        return ['1', 'true', 'yes', 'y', 'on'].includes(value.trim().toLowerCase());
+    }
+    return false;
+}
+
+function normalizeMailItem(item) {
+    const m = (item && typeof item === 'object') ? item : {};
+    return {
+        ...m,
+        id: String(m.id || ''),
+        is_read: parseMailReadState(m.is_read)
+    };
+}
+
+function getVisibleMailsByFolder() {
+    const all = Array.isArray(mailViewState.mails) ? mailViewState.mails : [];
+    if (mailViewState.folder === 'unread') {
+        return all.filter((m) => !parseMailReadState(m.is_read));
+    }
+    return all;
+}
+
+function getMailFolderTitle() {
+    return mailViewState.folder === 'unread' ? '未读邮件' : '收件箱';
+}
+
+function updateMailFolderUiState() {
+    const inboxBtn = document.getElementById('mailFolderInboxBtn');
+    const unreadBtn = document.getElementById('mailFolderUnreadBtn');
+    if (inboxBtn) inboxBtn.classList.toggle('active', mailViewState.folder === 'all');
+    if (unreadBtn) unreadBtn.classList.toggle('active', mailViewState.folder === 'unread');
+    const titleEl = document.getElementById('mailToolbarTitle');
+    if (titleEl) titleEl.textContent = getMailFolderTitle();
+}
+
+function updateMailItemInState(item) {
+    const normalized = normalizeMailItem(item);
+    const id = String(normalized.id || '');
+    if (!id) return;
+    const list = Array.isArray(mailViewState.mails) ? mailViewState.mails : [];
+    const idx = list.findIndex((m) => String(m.id || '') === id);
+    if (idx >= 0) {
+        list[idx] = { ...list[idx], ...normalized };
+    } else {
+        list.unshift(normalized);
+    }
+    mailViewState.mails = list;
+}
+
+function setMailReadStateLocal(mailId, isRead) {
+    const id = String(mailId || '');
+    if (!id) return;
+    const list = Array.isArray(mailViewState.mails) ? mailViewState.mails : [];
+    const idx = list.findIndex((m) => String(m.id || '') === id);
+    if (idx >= 0) {
+        list[idx] = { ...list[idx], is_read: !!isRead };
+        mailViewState.mails = list;
+    }
+    if (mailViewState.currentMail && String(mailViewState.currentMail.id || '') === id) {
+        mailViewState.currentMail = { ...mailViewState.currentMail, is_read: !!isRead };
+    }
+}
+
+async function markMailRead(mailId, isRead = true) {
+    const id = String(mailId || '');
+    if (!id) return false;
+    const list = Array.isArray(mailViewState.mails) ? mailViewState.mails : [];
+    const target = list.find((m) => String(m.id || '') === id);
+    const oldValue = target ? !!target.is_read : false;
+    if (oldValue === !!isRead) return true;
+
+    // optimistic update for immediate UX: unread item moves to read section on open
+    setMailReadStateLocal(id, !!isRead);
+    renderMailList();
+
+    try {
+        const res = await fetch(`/api/mail/me/inbox/${encodeURIComponent(id)}/read`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ is_read: !!isRead })
+        });
+        const data = await res.json();
+        if (!data.success) {
+            setMailReadStateLocal(id, oldValue);
+            renderMailList();
+            return false;
+        }
+        if (data.mail && typeof data.mail === 'object') {
+            updateMailItemInState(data.mail);
+        } else {
+            setMailReadStateLocal(id, !!data.is_read);
+        }
+        renderMailList();
+        return true;
+    } catch (err) {
+        setMailReadStateLocal(id, oldValue);
+        renderMailList();
+        return false;
+    }
+}
+
+function renderMailDetailEmpty(text) {
+    mailViewState.mode = 'inbox';
+    const titleEl = document.getElementById('mailDetailTitle');
+    const metaEl = document.getElementById('mailDetailMeta');
+    const contentEl = document.getElementById('mailDetailContent');
+    renderMailInboxActions();
+    if (titleEl) titleEl.textContent = '邮件详情';
+    if (metaEl) metaEl.innerHTML = '';
+    if (contentEl) {
+        contentEl.innerHTML = `<div class="mail-empty-state">${escapeHtml(text || '暂无邮件')}</div>`;
+    }
+}
+
+function renderMailInboxActions() {
+    const actionsEl = document.querySelector('.mail-icon-actions');
+    if (!actionsEl) return;
+    actionsEl.innerHTML = `
+        <button class="mail-icon-btn" type="button" title="刷新" onclick="refreshMailInbox()"><i class="fa-solid fa-rotate-right"></i></button>
+        <button class="mail-icon-btn" type="button" title="回复" onclick="openMailComposeReply()"><i class="fa-solid fa-reply"></i></button>
+        <button class="mail-icon-btn" type="button" title="转发" onclick="openMailComposeForward()"><i class="fa-solid fa-share"></i></button>
+        <button class="mail-icon-btn danger" type="button" title="删除" onclick="deleteCurrentMail()"><i class="fa-regular fa-trash-can"></i></button>
+    `;
+}
+
+function renderMailComposeForm(preset = {}) {
+    mailViewState.mode = 'compose';
+    const titleEl = document.getElementById('mailDetailTitle');
+    const metaEl = document.getElementById('mailDetailMeta');
+    const contentEl = document.getElementById('mailDetailContent');
+    const actionsEl = document.querySelector('.mail-icon-actions');
+    if (!contentEl) return;
+
+    const localMail = ((mailViewState.status || {}).local_mail || {});
+    const sender = (mailViewState.status || {}).sender_address || localMail.address || localMail.username || '-';
+    const toValue = String(preset.recipient || '').trim();
+    const subjectValue = String(preset.subject || '').trim();
+    const bodyValue = String(preset.content || '');
+    const isHtml = !!preset.is_html;
+
+    if (titleEl) titleEl.textContent = '写邮件';
+    if (metaEl) {
+        metaEl.innerHTML = `<span><i class="fa-regular fa-user"></i> 发件人: ${escapeHtml(sender)}</span>`;
+    }
+    if (actionsEl) {
+        actionsEl.innerHTML = `
+            <button class="mail-icon-btn" type="button" title="返回收件箱" onclick="returnToInboxView()"><i class="fa-solid fa-inbox"></i></button>
+            <button class="mail-icon-btn" type="button" title="发送" onclick="submitMailCompose()"><i class="fa-solid fa-paper-plane"></i></button>
+        `;
+    }
+
+    contentEl.innerHTML = `
+        <div class="mail-compose-form">
+            <div class="form-group">
+                <label>收件人</label>
+                <input id="mailComposeTo" class="input-modern" type="text" placeholder="例如: user@example.com" value="${escapeHtml(toValue)}">
+            </div>
+            <div class="form-group">
+                <label>主题</label>
+                <input id="mailComposeSubject" class="input-modern" type="text" placeholder="邮件主题" value="${escapeHtml(subjectValue)}">
+            </div>
+            <div class="form-group">
+                <label>内容</label>
+                <textarea id="mailComposeContent" class="input-modern" style="min-height: 300px; resize: vertical;" placeholder="输入邮件内容...">${escapeHtml(bodyValue)}</textarea>
+            </div>
+            <div class="mail-compose-actions">
+                <label style="display:flex; align-items:center; gap:6px; font-size:12px; color:#64748b;">
+                    <input id="mailComposeIsHtml" type="checkbox" ${isHtml ? 'checked' : ''}>
+                    以 HTML 发送
+                </label>
+                <div class="mail-compose-btn-row">
+                    <button class="btn-primary-outline btn-compact mail-compose-cancel-btn" type="button" onclick="returnToInboxView()">取消</button>
+                    <button class="btn-primary btn-compact mail-compose-send-btn" type="button" onclick="submitMailCompose()">发送</button>
+                </div>
+            </div>
+        </div>
+    `;
+}
+
+function renderMailList() {
+    const listEl = document.getElementById('mailListBody');
+    const inboxBadgeEl = document.getElementById('mailInboxCountBadge');
+    const unreadBadgeEl = document.getElementById('mailUnreadCountBadge');
+    if (!listEl) return;
+    const prevScrollTop = listEl.scrollTop;
+    const mails = (Array.isArray(mailViewState.mails) ? mailViewState.mails : []).map(normalizeMailItem);
+    const unreadCount = mails.filter((m) => !m.is_read).length;
+    if (inboxBadgeEl) inboxBadgeEl.textContent = mails.length > 99 ? '99+' : String(mails.length);
+    if (unreadBadgeEl) {
+        unreadBadgeEl.textContent = unreadCount > 99 ? '99+' : String(unreadCount);
+        unreadBadgeEl.classList.toggle('muted', unreadCount === 0);
+    }
+
+    updateMailFolderUiState();
+
+    const visibleMails = getVisibleMailsByFolder().map(normalizeMailItem);
+    if (visibleMails.length === 0) {
+        listEl.innerHTML = `<div class="mail-empty-state">${mailViewState.folder === 'unread' ? '暂无未读邮件' : '暂无邮件'}</div>`;
+        saveMailListScroll(0);
+        return;
+    }
+
+    const grouped = {};
+    const groupOrder = [];
+    for (const m of visibleMails) {
+        const key = getMailDateGroupKey(m.timestamp);
+        if (!grouped[key]) {
+            grouped[key] = [];
+            groupOrder.push(key);
+        }
+        grouped[key].push(m);
+    }
+
+    const renderSection = (groupKey, sectionMails) => {
+        const title = getMailDateGroupLabel(groupKey);
+        const sectionItems = sectionMails.map((m) => {
+            const id = String(m.id || '');
+            const eid = encodeURIComponent(id);
+            const active = id === mailViewState.selectedId ? 'active' : '';
+            const sender = m.sender || '-';
+            const subject = m.subject || '(No Subject)';
+            const snippet = extractMailSnippet(m.preview_text || m.preview || '');
+            const unreadDot = m.is_read ? '' : '<span class="mail-unread-dot" title="未读"></span>';
+            return `
+                <div class="mail-list-item ${active}" data-mail-eid="${eid}" onclick="selectMailItemById('${eid}')">
+                    <div class="mail-list-top">
+                        <span class="mail-subject-row">${unreadDot}<span class="mail-subject">${escapeHtml(subject)}</span></span>
+                        <span class="mail-time">${escapeHtml(formatMailTime(m.timestamp))}</span>
+                    </div>
+                    <div class="mail-sender">来自: ${escapeHtml(sender)}</div>
+                    <div class="mail-snippet">${escapeHtml(snippet)}</div>
+                </div>
+            `;
+        }).join('');
+        return `
+            <div class="mail-list-section">
+                <div class="mail-list-section-title">${escapeHtml(title)} <span class="mail-list-section-count">${sectionMails.length}</span></div>
+                ${sectionItems}
+            </div>
+        `;
+    };
+
+    listEl.innerHTML = groupOrder.map((k) => renderSection(k, grouped[k])).join('');
+
+    if (mailViewState.restorePositionOnce) {
+        const savedId = String(mailViewState.selectedId || '');
+        const savedEid = encodeURIComponent(savedId);
+        const activeEl = savedId ? listEl.querySelector(`.mail-list-item[data-mail-eid="${savedEid}"]`) : null;
+        if (activeEl) {
+            activeEl.scrollIntoView({ block: 'center' });
+        } else {
+            listEl.scrollTop = loadMailListScroll();
+        }
+        mailViewState.restorePositionOnce = false;
+    } else {
+        listEl.scrollTop = prevScrollTop;
+    }
+}
+
+async function loadMailInbox(query = '') {
+    const requestId = ++mailViewState.inboxRequestId;
+    const listEl = document.getElementById('mailListBody');
+    if (listEl) listEl.innerHTML = `<div class="mail-empty-state">正在加载收件箱...</div>`;
+    try {
+        const q = query ? `?q=${encodeURIComponent(query)}` : '';
+        const res = await fetch(`/api/mail/me/inbox${q}`);
+        const data = await res.json();
+        if (requestId !== mailViewState.inboxRequestId) return;
+        if (!data.success) {
+            mailViewState.mails = [];
+            mailViewState.selectedId = '';
+            renderMailList();
+            if (mailViewState.mode !== 'compose') {
+                renderMailDetailEmpty(data.message || '收件箱加载失败');
+            }
+            return;
+        }
+        mailViewState.mails = Array.isArray(data.mails) ? data.mails.map(normalizeMailItem) : [];
+        const visible = getVisibleMailsByFolder();
+        if (!mailViewState.selectedId || !visible.some((m) => String(m.id || '') === mailViewState.selectedId)) {
+            mailViewState.selectedId = visible[0] ? String(visible[0].id || '') : '';
+        }
+        saveMailSelectedId(mailViewState.selectedId);
+        if (isMailViewActiveInDom()) {
+            setMailViewUrl(mailViewState.selectedId || '');
+        }
+        renderMailList();
+        if (mailViewState.selectedId && mailViewState.mode !== 'compose') {
+            await loadMailDetail(mailViewState.selectedId, { markAsRead: false });
+        } else if (mailViewState.mode !== 'compose') {
+            renderMailDetailEmpty('收件箱为空');
+        }
+    } catch (err) {
+        if (requestId !== mailViewState.inboxRequestId) return;
+        mailViewState.mails = [];
+        mailViewState.selectedId = '';
+        renderMailList();
+        if (mailViewState.mode !== 'compose') {
+            renderMailDetailEmpty('邮件服务连接失败');
+        }
+    }
+}
+
+async function loadMailDetail(mailId, options = {}) {
+    if (!mailId) {
+        renderMailDetailEmpty('请选择一封邮件');
+        return;
+    }
+    const requestId = ++mailViewState.detailRequestId;
+    const markAsRead = !!options.markAsRead;
+    const titleEl = document.getElementById('mailDetailTitle');
+    const metaEl = document.getElementById('mailDetailMeta');
+    const contentEl = document.getElementById('mailDetailContent');
+    renderMailInboxActions();
+    if (titleEl) titleEl.textContent = '正在加载...';
+    if (metaEl) metaEl.innerHTML = '';
+    if (contentEl) contentEl.innerHTML = `<div class="mail-empty-state">正在加载邮件详情...</div>`;
+    try {
+        const res = await fetch(`/api/mail/me/inbox/${encodeURIComponent(mailId)}`);
+        const data = await res.json();
+        if (requestId !== mailViewState.detailRequestId) return;
+        if (mailViewState.mode === 'compose') return;
+        if (!data.success || !data.mail) {
+            renderMailDetailEmpty(data.message || '读取邮件失败');
+            return;
+        }
+        const mail = normalizeMailItem(data.mail);
+        updateMailItemInState(mail);
+        mailViewState.currentMail = mail;
+        mailViewState.mode = 'inbox';
+        const parsed = parseRawMail(mail.content || '');
+        const senderLine = mail.sender || parsed.headers['from'] || '-';
+        const recipientLine = mail.recipient || parsed.headers['to'] || '-';
+        const dateLine = mail.date || parsed.headers['date'] || formatMailTime(mail.timestamp);
+        if (titleEl) titleEl.textContent = mail.subject || parsed.headers['subject'] || '(No Subject)';
+        if (metaEl) {
+            metaEl.innerHTML = `
+                <span><i class="fa-regular fa-user"></i> ${escapeHtml(senderLine)}</span>
+                <span><i class="fa-regular fa-clock"></i> ${escapeHtml(dateLine)}</span>
+                <span><i class="fa-regular fa-envelope"></i> ${escapeHtml(recipientLine)}</span>
+            `;
+        }
+        if (contentEl) {
+            const htmlBody = decodeUnicodeEscapes(String(mail.content_html || '').trim());
+            const textBody = decodeUnicodeEscapes(String(mail.content_text || '').trim());
+            const rawBody = String(parsed.body || '').trim();
+            if (!htmlBody && !textBody && !rawBody) {
+                contentEl.innerHTML = `<div class="mail-empty-state">邮件内容为空</div>`;
+            } else if (htmlBody) {
+                contentEl.innerHTML = `<iframe class="mail-html-frame" title="mail-html" sandbox="allow-popups allow-popups-to-escape-sandbox"></iframe>`;
+                const frame = contentEl.querySelector('.mail-html-frame');
+                if (frame) {
+                    frame.srcdoc = htmlBody;
+                }
+            } else if (textBody) {
+                contentEl.innerHTML = `<pre class="mail-raw-content">${escapeHtml(textBody)}</pre>`;
+            } else if (parsed.isHtml) {
+                contentEl.innerHTML = `<iframe class="mail-html-frame" title="mail-html" sandbox="allow-popups allow-popups-to-escape-sandbox"></iframe>`;
+                const frame = contentEl.querySelector('.mail-html-frame');
+                if (frame) frame.srcdoc = rawBody;
+            } else {
+                contentEl.innerHTML = `<pre class="mail-raw-content">${escapeHtml(rawBody)}</pre>`;
+            }
+        }
+        if (markAsRead && !mail.is_read) {
+            await markMailRead(mailId, true);
+        }
+    } catch (err) {
+        if (requestId !== mailViewState.detailRequestId) return;
+        if (mailViewState.mode === 'compose') return;
+        renderMailDetailEmpty('读取邮件失败');
+    }
+}
+
+async function initMailWorkspace() {
+    mailViewState.selectedId = getMailIdFromUrl() || loadMailSelectedId() || mailViewState.selectedId || '';
+    mailViewState.restorePositionOnce = true;
+
+    const listEl = document.getElementById('mailListBody');
+    if (listEl && listEl.dataset.scrollBind !== '1') {
+        listEl.dataset.scrollBind = '1';
+        listEl.addEventListener('scroll', () => saveMailListScroll(listEl.scrollTop));
+    }
+
+    const searchEl = document.getElementById('mailSearchInput');
+    if (searchEl) {
+        searchEl.value = mailViewState.query || '';
+        searchEl.addEventListener('keydown', async (e) => {
+            if (e.key === 'Enter') {
+                mailViewState.query = (searchEl.value || '').trim();
+                await loadMailInbox(mailViewState.query);
+            }
+        });
+    }
+
+    try {
+        const statusRes = await fetch('/api/mail/me/status');
+        const statusData = await statusRes.json();
+        mailViewState.status = statusData;
+        if (!statusData.success || !statusData.enabled) {
+            renderMailList();
+            renderMailDetailEmpty(statusData.message || '邮件系统未启用');
+            return;
+        }
+        if (!statusData.linked) {
+            renderMailList();
+            renderMailDetailEmpty('当前用户未绑定邮箱账号，请联系管理员在设置中绑定');
+            return;
+        }
+    } catch (err) {
+        renderMailList();
+        renderMailDetailEmpty('无法获取邮件状态');
+        return;
+    }
+    await loadMailInbox(mailViewState.query || '');
+}
+
+window.selectMailItemById = async function(encodedMailId) {
+    const mailId = decodeURIComponent(encodedMailId || '');
+    if (!mailId) return;
+    mailViewState.mode = 'inbox';
+    mailViewState.selectedId = mailId;
+    saveMailSelectedId(mailId);
+    if (isMailViewActiveInDom()) {
+        setMailViewUrl(mailId);
+    }
+    renderMailList();
+    await loadMailDetail(mailId, { markAsRead: true });
+};
+
+window.refreshMailInbox = async function() {
+    mailViewState.mode = 'inbox';
+    await loadMailInbox(mailViewState.query || '');
+};
+
+window.setMailFolder = async function(folder) {
+    const f = String(folder || '').toLowerCase();
+    mailViewState.folder = (f === 'unread') ? 'unread' : 'all';
+    const visible = getVisibleMailsByFolder();
+    if (!mailViewState.selectedId || !visible.some((m) => String(m.id || '') === mailViewState.selectedId)) {
+        mailViewState.selectedId = visible[0] ? String(visible[0].id || '') : '';
+        saveMailSelectedId(mailViewState.selectedId);
+        if (isMailViewActiveInDom()) {
+            setMailViewUrl(mailViewState.selectedId || '');
+        }
+    }
+    renderMailList();
+    if (mailViewState.selectedId) {
+        await loadMailDetail(mailViewState.selectedId, { markAsRead: false });
+    } else {
+        renderMailDetailEmpty(mailViewState.folder === 'unread' ? '暂无未读邮件' : '暂无邮件');
+    }
+};
+
+window.deleteCurrentMail = async function() {
+    if (mailViewState.mode === 'compose') {
+        showToast('写邮件模式下无法删除');
+        return;
+    }
+    const id = String(mailViewState.selectedId || '');
+    if (!id) {
+        showToast('请选择要删除的邮件');
+        return;
+    }
+    try {
+        const res = await fetch(`/api/mail/me/inbox/${encodeURIComponent(id)}`, { method: 'DELETE' });
+        const data = await res.json();
+        if (!data.success) {
+            showToast(data.message || '删除失败');
+            return;
+        }
+        showToast('邮件已删除');
+        mailViewState.selectedId = '';
+        saveMailSelectedId('');
+        await loadMailInbox(mailViewState.query || '');
+    } catch (err) {
+        showToast('删除失败');
+    }
+};
+
+window.returnToInboxView = async function() {
+    mailViewState.mode = 'inbox';
+    renderMailDetailEmpty('请选择一封邮件');
+    if (mailViewState.selectedId) {
+        await loadMailDetail(mailViewState.selectedId);
+    }
+};
+
+window.openMailComposeView = function(preset = {}) {
+    setMailViewUrl('');
+    renderMailComposeForm(preset);
+};
+
+window.openMailComposeReply = function() {
+    const m = mailViewState.currentMail || null;
+    if (!m) {
+        showToast('请先选择一封邮件');
+        return;
+    }
+    const recipient = String(m.sender || '').replace(/[<>]/g, '').trim();
+    const subject = String(m.subject || '').startsWith('Re:') ? String(m.subject || '') : `Re: ${m.subject || ''}`;
+    const bodyText = getMailPlainTextForQuote(m);
+    const quote = bodyText ? `\n\n\n----- 原邮件 -----\n${bodyText}` : '';
+    openMailComposeView({ recipient, subject, content: quote, is_html: false });
+};
+
+window.openMailComposeForward = function() {
+    const m = mailViewState.currentMail || null;
+    if (!m) {
+        showToast('请先选择一封邮件');
+        return;
+    }
+    const subject = String(m.subject || '').startsWith('Fwd:') ? String(m.subject || '') : `Fwd: ${m.subject || ''}`;
+    const bodyText = getMailPlainTextForQuote(m);
+    const quote = bodyText ? `\n\n\n----- 转发内容 -----\n${bodyText}` : '';
+    openMailComposeView({ recipient: '', subject, content: quote, is_html: false });
+};
+
+window.submitMailCompose = async function() {
+    if (mailViewState.isSending) {
+        showToast('邮件正在发送，请稍候...');
+        return;
+    }
+    const toEl = document.getElementById('mailComposeTo');
+    const subjectEl = document.getElementById('mailComposeSubject');
+    const bodyEl = document.getElementById('mailComposeContent');
+    const htmlEl = document.getElementById('mailComposeIsHtml');
+    if (!toEl || !subjectEl || !bodyEl) return;
+
+    const recipient = (toEl.value || '').trim();
+    const subject = (subjectEl.value || '').trim();
+    const content = bodyEl.value || '';
+    const is_html = !!(htmlEl && htmlEl.checked);
+    if (!recipient) {
+        showToast('请输入收件人');
+        return;
+    }
+    if (!content.trim()) {
+        showToast('请输入邮件内容');
+        return;
+    }
+    const payload = { recipient, subject, content, is_html };
+
+    mailViewState.isSending = true;
+    mailViewState.mode = 'inbox';
+    renderMailDetailEmpty('邮件发送中，请稍候...');
+    showToast('已提交发送请求');
+
+    (async () => {
+        try {
+            const res = await fetch('/api/mail/me/send', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+            const data = await res.json();
+            if (!data.success) {
+                showToast(data.message || '发送失败');
+                return;
+            }
+            showToast('邮件已发送');
+            await loadMailInbox(mailViewState.query || '');
+        } catch (err) {
+            showToast('发送失败');
+        } finally {
+            mailViewState.isSending = false;
+        }
+    })();
+};
+
+window.toggleMailSidebar = function() {
+    mailViewState.sidebarCollapsed = !mailViewState.sidebarCollapsed;
+    saveMailSidebarCollapsedState(mailViewState.sidebarCollapsed);
+    const workspace = document.getElementById('mailWorkspace');
+    if (workspace) workspace.classList.toggle('mail-sidebar-collapsed', mailViewState.sidebarCollapsed);
+    const btn = document.querySelector('.mail-sidebar-toggle-btn');
+    if (btn) {
+        btn.title = mailViewState.sidebarCollapsed ? '展开侧栏' : '折叠侧栏';
+        btn.innerHTML = `<i class="fa-solid ${mailViewState.sidebarCollapsed ? 'fa-angles-right' : 'fa-angles-left'}"></i>`;
+    }
+};
 
 // --- Knowledge Search ---
 let lastKnowledgeSearchResults = [];
@@ -2087,6 +3200,8 @@ function closeKnowledgeSearchResultView() {
         };
         const toggleKP = document.getElementById('toggleKnowledgePanel');
         if(toggleKP) toggleKP.onclick = () => els.knowledgePanel.classList.toggle('visible');
+        const toggleMail = document.getElementById('toggleMailView');
+        if(toggleMail) toggleMail.onclick = () => openMailPlaceholderView();
     }
     originalHeaderState = null;
 }
@@ -2347,20 +3462,20 @@ function renderCustomModelSelect(models, defaultModel) {
     selectedModelId = (isValidStored ? stored : (isValidDefault ? defaultModel : models[0].id));
 
     const providerLabelMap = {
-        volcengine: '火山',
-        stepfun: '阶跃',
-        github: 'Github',
-        openai: 'OpenAI',
-        suanli: '算力',
-        aliyun: '阿里云'
+        volcengine: '火山引擎',
+        aliyun: '阿里云',
+        stepfun: '阶跃星辰',
+        github: 'GitHub',
+        suanli: '算力猫',
+        openai: 'OpenAI'
     };
     const providerOrderMap = {
         volcengine: 10,
-        stepfun: 20,
-        github: 30,
-        openai: 40,
+        aliyun: 20,
+        stepfun: 30,
+        github: 40,
         suanli: 50,
-        aliyun: 60
+        openai: 60
     };
     const normalizeProvider = (provider) => String(provider || 'other').toLowerCase();
     const providerLabel = (provider) => {
@@ -2572,6 +3687,32 @@ window.removeUploadedFile = function(index) {
     updateFilePreview();
 }
 
+function updateSidebarUserProfile(displayName, avatarUrl) {
+    const avatarEl = document.getElementById('sidebar-avatar');
+    if (avatarEl) {
+        const nameChar = (displayName || 'U').charAt(0).toUpperCase();
+        const hasAvatar = typeof avatarUrl === 'string' && avatarUrl.trim() !== '';
+        if (hasAvatar) {
+            avatarEl.classList.add('has-image');
+            avatarEl.style.backgroundImage = `url("${avatarUrl}")`;
+            avatarEl.textContent = '';
+            avatarEl.setAttribute('aria-label', displayName || 'avatar');
+        } else {
+            avatarEl.classList.remove('has-image');
+            avatarEl.style.backgroundImage = '';
+            avatarEl.textContent = nameChar;
+        }
+    }
+
+    let profileName = document.getElementById('profileUserName');
+    if (!profileName) {
+        profileName = document.querySelector('.profile-name');
+    }
+    if (profileName && displayName) {
+        profileName.textContent = displayName;
+    }
+}
+
 // --- Admin Functions ---
 // 查用户色并显示管理菜单
 async function checkUserRole() {
@@ -2579,30 +3720,28 @@ async function checkUserRole() {
         const res = await fetch('/api/user/info');
         const data = await res.json();
         if (data.success) {
-            currentUsername = data.username;
-            currentUserRole = data.role;
+            // API 返回结构是 data.user.{username, role}
+            currentUsername = data.user.id;
+            currentUserRole = data.user.role;
+            const displayName = data.user.username || data.user.id;
+            currentUserAvatarUrl = data.user.avatar_url || '';
             
-// 说明
-            const avatar = document.getElementById('sidebar-avatar');
-            if (avatar && data.username) {
-                avatar.textContent = data.username.charAt(0).toUpperCase();
-            }
+            console.log('[DEBUG] checkUserRole - username:', currentUsername, 'role:', currentUserRole);
+            updateSidebarUserProfile(displayName, currentUserAvatarUrl);
 
-            // 更新侧边栏用户名显示
-            const profileName = document.querySelector('.profile-name');
-            if (profileName) profileName.textContent = data.username;
-
-            const adminBtn = document.getElementById('adminBackendBtn');
-            if (data.role === 'admin') {
+            // 处理管理员入口显示（迁移到设置页面）
+            const settingsAdminGap = document.getElementById('settingsAdminGap');
+            const settingsAdminBtns = document.querySelectorAll('#settingsModal .settings-admin-entry');
+            if (currentUserRole === 'admin') {
                 document.body.classList.add('is-admin');
-                if (adminBtn) {
-                    adminBtn.style.setProperty('display', 'flex', 'important');
-                }
+                if (settingsAdminGap) settingsAdminGap.style.display = '';
+                settingsAdminBtns.forEach((btn) => { btn.style.display = ''; });
+                console.log('[ADMIN] User is admin, showing settings admin entry');
             } else {
                 document.body.classList.remove('is-admin');
-                if (adminBtn) {
-                    adminBtn.style.setProperty('display', 'none', 'important');
-                }
+                if (settingsAdminGap) settingsAdminGap.style.display = 'none';
+                settingsAdminBtns.forEach((btn) => { btn.style.display = 'none'; });
+                console.log('[ADMIN] User is not admin, hiding settings admin entry');
             }
         }
     } catch (err) {
@@ -2611,20 +3750,17 @@ async function checkUserRole() {
 }
 
 // 打开管理后台
-async function openAdminDashboard() {
-    const adminModal = document.getElementById('adminModal');
-    const userMenu = document.getElementById('userMenu');
-    if (userMenu) userMenu.classList.remove('active'); // 关闭菜单
-    
-    if (!adminModal) return;
-    adminModal.classList.add('active');
-    
-    // Load users list
-    await loadAdminUsersList();
-    
-    // Load stats
-    await loadAdminStats();
-    await loadAdminChromaStats();
+async function openAdminDashboard(defaultTab = 'users') {
+    // Kept for compatibility, now routes into settings modal.
+    await openSettingsModal();
+    const tabMap = {
+        users: 'admin-users',
+        mail: 'admin-mail',
+        stats: 'admin-stats',
+        models: 'admin-models',
+        chroma: 'admin-chroma'
+    };
+    switchSettingsTab(tabMap[defaultTab] || 'admin-users');
 }
 
 // 加载用户列表
@@ -2633,45 +3769,513 @@ async function loadAdminUsersList() {
         const res = await fetch('/api/admin/users');
         const data = await res.json();
         if (data.success) {
-            const usersList = document.getElementById('adminUsersList');
-            if (!usersList) return;
-            
-            usersList.innerHTML = data.users.map(user => {
-                const isSelf = user.username === currentUsername;
-                return `
-                    <tr class="${isSelf ? 'user-self' : ''}">
-                        <td>
-                            <strong>${user.username}</strong>
-                            ${isSelf ? '<span style="color:#64748b; font-size:11px; margin-left:4px;">(YOU)</span>' : ''}
-                        </td>
-                        <td><code style="background:#f1f5f9; padding:2px 4px; border-radius:4px; font-size:12px;">${user.password}</code></td>
-                        <td style="color:#64748b;">${user.last_ip || '-'}</td>
-                        <td class="mono" style="font-weight:600;">${user.total_token_usage.toLocaleString()}</td>
-                        <td>
-                            <span class="badge ${user.role}">
-                                ${user.role === 'admin' ? 'ADMIN' : 'MEMBER'}
-                            </span>
-                        </td>
-                        <td>
-                            <div style="display:flex; gap:8px;">
-                                <button class="btn-primary-outline" style="padding: 2px 8px; font-size: 11px;" onclick="openUserModelPerm('${user.username}')">模型</button>
-                                ${!isSelf ? `
-                                    <button class="btn-primary-outline" onclick="changeUserRole('${user.username}', '${user.role === 'admin' ? 'member' : 'admin'}')">
-                                        ${user.role === 'admin' ? '降级' : '提升'}
-                                    </button>
-                                    <button class="btn-danger-small" onclick="deleteAdminUser('${user.username}')">删除</button>
-                                ` : `
-                                    <span style="color:#ccc; font-size:12px;">Locked</span>
-                                `}
-                            </div>
-                        </td>
-                    </tr>
-                `;
-            }).join('');
+            adminUsersCache = Array.isArray(data.users) ? data.users : [];
+            if (!adminSelectedUserId || !adminUsersCache.some(u => (u.user_id || u.username) === adminSelectedUserId)) {
+                const first = adminUsersCache[0];
+                adminSelectedUserId = first ? (first.user_id || first.username) : null;
+            }
+            renderAdminUsersList();
+            renderAdminUserDetail();
         }
     } catch (err) {
         console.error('Failed to load users list', err);
     }
+}
+
+function renderAdminUsersList() {
+    const usersList = document.getElementById('adminUsersList');
+    if (!usersList) return;
+    const keyword = adminUserFilterKeyword;
+    const filtered = adminUsersCache.filter((user) => {
+        if (!keyword) return true;
+        const roleText = user.role === 'admin' ? 'admin 管理员' : 'member 普通用户';
+        const text = [
+            user.username || '',
+            user.user_id || '',
+            user.last_ip || '',
+            roleText
+        ].join(' ').toLowerCase();
+        return text.includes(keyword);
+    });
+    if (filtered.length === 0) {
+        usersList.innerHTML = '<div class="admin-user-detail-empty" style="padding:12px;">没有匹配的用户</div>';
+        return;
+    }
+    usersList.innerHTML = filtered.map((user) => {
+        const userId = user.user_id || user.username;
+        const active = userId === adminSelectedUserId ? 'active' : '';
+        const safeId = encodeURIComponent(userId);
+        const avatar = user.avatar_url || getDefaultAvatarDataUrl(user.username || userId);
+        return `
+            <div class="admin-user-item ${active}" onclick="selectAdminUser('${safeId}')">
+                <img class="admin-user-avatar" src="${avatar}" alt="avatar">
+                <div>
+                    <div class="admin-user-name">${escapeHtml(user.username || userId)}</div>
+                    <div class="admin-user-meta">${escapeHtml(userId)} · ${escapeHtml(user.role || 'member')}</div>
+                </div>
+            </div>
+        `;
+    }).join('');
+}
+
+function renderAdminUserDetail() {
+    const detail = document.getElementById('adminUserDetail');
+    if (!detail) return;
+    const selected = adminUsersCache.find((u) => (u.user_id || u.username) === adminSelectedUserId);
+    if (!selected) {
+        detail.innerHTML = '<div class="admin-user-detail-empty">请选择左侧用户查看详情</div>';
+        return;
+    }
+    const userId = selected.user_id || selected.username;
+    const encodedUserId = encodeURIComponent(userId);
+    const isSelf = userId === currentUsername;
+    const avatar = selected.avatar_url || getDefaultAvatarDataUrl(selected.username || userId);
+    const localMail = selected.local_mail || {};
+    const currentMailUsername = (localMail.username || '').trim();
+    const currentMailGroup = (localMail.group || 'default').trim() || 'default';
+    const currentMailText = currentMailUsername ? `${currentMailUsername} @ ${currentMailGroup}` : '未绑定';
+    const createdAt = selected.created_at ? new Date(selected.created_at * 1000).toLocaleString() : '-';
+    const lastLogin = selected.last_login ? new Date(selected.last_login * 1000).toLocaleString() : '-';
+    detail.innerHTML = `
+        <div class="admin-user-detail-head">
+            <img class="admin-user-avatar" src="${avatar}" alt="avatar">
+            <div>
+                <div class="admin-user-name" style="font-size:16px;">${escapeHtml(selected.username || userId)}</div>
+                <div class="admin-user-meta">ID: ${escapeHtml(userId)}</div>
+            </div>
+        </div>
+        <div class="admin-user-detail-grid">
+            <div class="form-group">
+                <label>用户名</label>
+                <input id="adminDetailNameInput" class="input-modern" value="${escapeHtml(selected.username || userId)}">
+            </div>
+            <div class="form-group">
+                <label>角色</label>
+                <select id="adminDetailRoleSelect" class="input-modern" ${isSelf ? 'disabled' : ''}>
+                    <option value="member" ${selected.role === 'member' ? 'selected' : ''}>member</option>
+                    <option value="admin" ${selected.role === 'admin' ? 'selected' : ''}>admin</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label>最后登录IP</label>
+                <div class="admin-info-text">${escapeHtml(selected.last_ip || '-')}</div>
+            </div>
+            <div class="form-group">
+                <label>Token 消耗</label>
+                <div class="admin-info-text mono">${(selected.total_token_usage || 0).toLocaleString()}</div>
+            </div>
+            <div class="form-group">
+                <label>创建时间</label>
+                <div class="admin-info-text">${createdAt}</div>
+            </div>
+            <div class="form-group">
+                <label>最后登录</label>
+                <div class="admin-info-text">${lastLogin}</div>
+            </div>
+            <div class="form-group" style="grid-column: 1 / -1;">
+                <label>绑定邮箱账户</label>
+                <div class="admin-info-text" style="margin-bottom:8px;">当前: ${escapeHtml(currentMailText)}</div>
+                <div style="display:flex; gap:8px;">
+                    <input id="adminDetailMailUsernameInput" class="input-modern" type="text" placeholder="输入邮箱用户名，例如 himpq">
+                    <button class="btn-primary-outline btn-compact" type="button" onclick="adminBindMailForUser('${encodeURIComponent(userId)}')">确认</button>
+                </div>
+            </div>
+            <div class="form-group" style="grid-column: 1 / -1;">
+                <label>重置密码</label>
+                <div style="display:flex; gap:8px;">
+                    <input id="adminDetailPasswordInput" class="input-modern" type="text" placeholder="输入新密码">
+                    <button class="btn-primary-outline btn-compact" type="button" onclick="adminResetPassword('${encodeURIComponent(userId)}')">重置</button>
+                </div>
+            </div>
+        </div>
+        <div class="admin-user-actions">
+            <button class="btn-primary-outline btn-compact" type="button" onclick="openUserModelPerm(decodeURIComponent('${encodedUserId}'))">模型权限</button>
+            <button class="btn-primary-outline btn-compact" type="button" onclick="saveAdminUserProfile('${encodedUserId}')">保存资料</button>
+            ${!isSelf ? `<button class="btn-danger-small btn-compact" type="button" onclick="deleteAdminUser(decodeURIComponent('${encodedUserId}'))">删除用户</button>` : ''}
+        </div>
+    `;
+}
+
+window.selectAdminUser = function(encodedUserId) {
+    adminSelectedUserId = decodeURIComponent(encodedUserId || '');
+    renderAdminUsersList();
+    renderAdminUserDetail();
+};
+
+async function loadAdminMailGroups() {
+    const groupSelect = document.getElementById('adminMailGroupSelect');
+    if (!groupSelect) return;
+    try {
+        const res = await fetch('/api/admin/nexora-mail/groups');
+        const data = await res.json();
+        if (!data.success) {
+            groupSelect.innerHTML = `<option value="default">default</option>`;
+            groupSelect.value = 'default';
+            adminMailGroup = 'default';
+            return;
+        }
+        const groups = Array.isArray(data.groups) ? data.groups : [];
+        const names = groups.map(g => String(g.group || '').trim()).filter(Boolean);
+        if (!names.includes('default')) names.unshift('default');
+        groupSelect.innerHTML = names.map(name => `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`).join('');
+        if (!names.includes(adminMailGroup)) adminMailGroup = names[0] || 'default';
+        groupSelect.value = adminMailGroup;
+    } catch (err) {
+        groupSelect.innerHTML = `<option value="default">default</option>`;
+        groupSelect.value = 'default';
+        adminMailGroup = 'default';
+    }
+}
+
+async function loadAdminMailUsersList() {
+    const listEl = document.getElementById('adminMailUsersList');
+    if (listEl) listEl.innerHTML = '<div class="admin-user-detail-empty" style="padding:12px;">加载中...</div>';
+    try {
+        await loadAdminMailGroups();
+        const res = await fetch(`/api/admin/nexora-mail/users?group=${encodeURIComponent(adminMailGroup)}`);
+        const data = await res.json();
+        if (!data.success) {
+            adminMailUsersCache = [];
+            adminSelectedMailUser = null;
+            renderAdminMailUsersList();
+            renderAdminMailDetailError(data.message || '读取邮箱用户失败');
+            return;
+        }
+        adminMailUsersCache = Array.isArray(data.users) ? data.users : [];
+        await ensureAdminUsersCacheForBinding();
+        if (!adminSelectedMailUser || !adminMailUsersCache.some(u => (u.username || '') === adminSelectedMailUser)) {
+            adminSelectedMailUser = adminMailUsersCache[0] ? adminMailUsersCache[0].username : null;
+        }
+        renderAdminMailUsersList();
+        renderAdminMailUserDetail();
+    } catch (err) {
+        adminMailUsersCache = [];
+        adminSelectedMailUser = null;
+        renderAdminMailUsersList();
+        renderAdminMailDetailError('邮箱服务连接失败');
+    }
+}
+
+async function ensureAdminUsersCacheForBinding() {
+    if (Array.isArray(adminUsersCache) && adminUsersCache.length > 0) return;
+    try {
+        const res = await fetch('/api/admin/users');
+        const data = await res.json();
+        if (data.success && Array.isArray(data.users)) {
+            adminUsersCache = data.users;
+        }
+    } catch (err) {
+        // ignore
+    }
+}
+
+function renderAdminMailUsersList() {
+    const listEl = document.getElementById('adminMailUsersList');
+    if (!listEl) return;
+    const kw = adminMailUserFilterKeyword;
+    const filtered = adminMailUsersCache.filter((item) => {
+        if (!kw) return true;
+        const perms = Array.isArray(item.permissions) ? item.permissions.join(' ') : '';
+        const txt = `${item.username || ''} ${item.path || ''} ${perms}`.toLowerCase();
+        return txt.includes(kw);
+    });
+    if (filtered.length === 0) {
+        listEl.innerHTML = '<div class="admin-user-detail-empty" style="padding:12px;">没有匹配的邮箱用户</div>';
+        return;
+    }
+    listEl.innerHTML = filtered.map((item) => {
+        const uname = String(item.username || '');
+        const active = uname === adminSelectedMailUser ? 'active' : '';
+        const safe = encodeURIComponent(uname);
+        const avatar = getDefaultAvatarDataUrl(uname || 'M');
+        return `
+            <div class="admin-user-item ${active}" onclick="selectAdminMailUser('${safe}')">
+                <img class="admin-user-avatar" src="${avatar}" alt="avatar">
+                <div>
+                    <div class="admin-user-name">${escapeHtml(uname)}</div>
+                    <div class="admin-user-meta">group: ${escapeHtml(adminMailGroup)}</div>
+                </div>
+            </div>
+        `;
+    }).join('');
+}
+
+function renderAdminMailDetailError(msg) {
+    const detail = document.getElementById('adminMailUserDetail');
+    if (!detail) return;
+    detail.innerHTML = `<div class="admin-user-detail-empty">${escapeHtml(msg || '加载失败')}</div>`;
+}
+
+function renderAdminMailCreateForm() {
+    const detail = document.getElementById('adminMailUserDetail');
+    if (!detail) return;
+    detail.innerHTML = `
+        <div class="admin-user-detail-head">
+            <div>
+                <div class="admin-user-name" style="font-size:16px;">新建邮箱用户</div>
+                <div class="admin-user-meta">当前组: ${escapeHtml(adminMailGroup)}</div>
+            </div>
+        </div>
+        <div class="admin-user-detail-grid">
+            <div class="form-group">
+                <label>邮箱用户名</label>
+                <input id="adminMailCreateUsername" class="input-modern" placeholder="例如: alice">
+            </div>
+            <div class="form-group">
+                <label>初始密码</label>
+                <input id="adminMailCreatePassword" class="input-modern" type="text" placeholder="输入密码">
+            </div>
+            <div class="form-group" style="grid-column: 1 / -1;">
+                <label>权限(可选，逗号分隔)</label>
+                <input id="adminMailCreatePermissions" class="input-modern" placeholder="mailbox.read, mailbox.write">
+            </div>
+        </div>
+        <div class="admin-user-actions">
+            <button class="btn-primary-outline btn-compact" type="button" onclick="submitAdminMailCreateUser()">创建邮箱用户</button>
+        </div>
+    `;
+}
+
+function renderAdminMailUserDetail() {
+    const detail = document.getElementById('adminMailUserDetail');
+    if (!detail) return;
+    const selected = adminMailUsersCache.find((u) => (u.username || '') === adminSelectedMailUser);
+    if (!selected) {
+        detail.innerHTML = '<div class="admin-user-detail-empty">请选择左侧邮箱用户查看详情</div>';
+        return;
+    }
+    const uname = String(selected.username || '');
+    const perms = Array.isArray(selected.permissions) ? selected.permissions : [];
+    const permsText = perms.length ? perms.join(', ') : '-';
+    const encoded = encodeURIComponent(uname);
+    const avatar = getDefaultAvatarDataUrl(uname || 'M');
+    const boundNexoraUser = (adminUsersCache || []).find((u) => {
+        const lm = u && typeof u === 'object' ? (u.local_mail || {}) : {};
+        return (lm.username || '') === uname && (lm.group || 'default') === adminMailGroup;
+    }) || null;
+    const boundPairHtml = boundNexoraUser ? `
+        <div class="admin-bind-pair">
+            <div class="admin-bind-card">
+                <img class="admin-user-avatar" src="${avatar}" alt="mail-avatar">
+                <div>
+                    <div class="admin-user-name">${escapeHtml(uname)}</div>
+                    <div class="admin-user-meta">Mail User · ${escapeHtml(adminMailGroup)}</div>
+                </div>
+            </div>
+            <div class="admin-bind-arrow" aria-hidden="true">↔</div>
+            <div class="admin-bind-card">
+                <img class="admin-user-avatar" src="${boundNexoraUser.avatar_url || getDefaultAvatarDataUrl(boundNexoraUser.username || boundNexoraUser.user_id || 'U')}" alt="nexora-avatar">
+                <div>
+                    <div class="admin-user-name">${escapeHtml(boundNexoraUser.username || boundNexoraUser.user_id || '')}</div>
+                    <div class="admin-user-meta">UserID: ${escapeHtml(boundNexoraUser.user_id || '')}</div>
+                </div>
+            </div>
+        </div>
+    ` : `
+        <div class="admin-bind-pair" style="grid-template-columns: minmax(0, 1fr);">
+            <div class="admin-bind-card">
+                <img class="admin-user-avatar" src="${avatar}" alt="mail-avatar">
+                <div>
+                    <div class="admin-user-name">${escapeHtml(uname)}</div>
+                    <div class="admin-user-meta">Mail User · ${escapeHtml(adminMailGroup)}</div>
+                </div>
+            </div>
+        </div>
+    `;
+    detail.innerHTML = `
+        ${boundPairHtml}
+        <div class="form-group" style="margin-bottom: 8px;">
+            <div style="display:flex; gap:8px;">
+                <input id="adminMailBindNexoraUserInput" class="input-modern" type="text" placeholder="输入 Nexora 用户ID，例如 mujica">
+                <button class="btn-primary-outline btn-compact" type="button" onclick="adminBindNexoraUserForMail('${encoded}')">确认</button>
+            </div>
+        </div>
+        <div class="admin-user-detail-grid">
+            <div class="form-group">
+                <label>邮箱用户名</label>
+                <div class="admin-info-text">${escapeHtml(uname)}</div>
+            </div>
+            <div class="form-group">
+                <label>权限</label>
+                <div class="admin-info-text">${escapeHtml(permsText)}</div>
+            </div>
+            <div class="form-group" style="grid-column: 1 / -1;">
+                <label>存储路径</label>
+                <div class="admin-info-text mono">${escapeHtml(selected.path || '-')}</div>
+            </div>
+            <div class="form-group" style="grid-column: 1 / -1;">
+                <label>重置密码</label>
+                <div style="display:flex; gap:8px;">
+                    <input id="adminMailPasswordInput" class="input-modern" type="text" placeholder="输入新密码">
+                    <button class="btn-primary-outline btn-compact" type="button" onclick="adminResetMailPassword('${encoded}')">重置</button>
+                </div>
+            </div>
+        </div>
+        <div class="admin-user-actions">
+            <button class="btn-danger-small btn-compact" type="button" onclick="adminDeleteMailUser('${encoded}')">删除邮箱用户</button>
+        </div>
+    `;
+}
+
+window.selectAdminMailUser = function(encodedUser) {
+    adminSelectedMailUser = decodeURIComponent(encodedUser || '');
+    renderAdminMailUsersList();
+    renderAdminMailUserDetail();
+};
+
+window.submitAdminMailCreateUser = async function() {
+    const unameEl = document.getElementById('adminMailCreateUsername');
+    const pwdEl = document.getElementById('adminMailCreatePassword');
+    const permsEl = document.getElementById('adminMailCreatePermissions');
+    const username = (unameEl && unameEl.value ? unameEl.value : '').trim();
+    const password = (pwdEl && pwdEl.value ? pwdEl.value : '').trim();
+    const permsRaw = (permsEl && permsEl.value ? permsEl.value : '').trim();
+    if (!username || !password) {
+        showToast('请填写邮箱用户名和密码');
+        return;
+    }
+    const permissions = permsRaw ? permsRaw.split(',').map(s => s.trim()).filter(Boolean) : null;
+    try {
+        const res = await fetch('/api/admin/nexora-mail/users', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                group: adminMailGroup,
+                mail_username: username,
+                password,
+                permissions
+            })
+        });
+        const data = await res.json();
+        if (!data.success) {
+            showToast(data.message || '创建失败');
+            return;
+        }
+        showToast('邮箱用户创建成功');
+        adminSelectedMailUser = username;
+        await loadAdminMailUsersList();
+    } catch (err) {
+        showToast('创建失败');
+    }
+};
+
+window.adminResetMailPassword = async function(encodedUser) {
+    const username = decodeURIComponent(encodedUser || '');
+    const pwdEl = document.getElementById('adminMailPasswordInput');
+    const password = (pwdEl && pwdEl.value ? pwdEl.value : '').trim();
+    if (!password) {
+        showToast('请输入新密码');
+        return;
+    }
+    try {
+        const res = await fetch('/api/admin/nexora-mail/users/password', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ group: adminMailGroup, mail_username: username, password })
+        });
+        const data = await res.json();
+        if (!data.success) {
+            showToast(data.message || '重置失败');
+            return;
+        }
+        showToast('邮箱密码已重置');
+        pwdEl.value = '';
+    } catch (err) {
+        showToast('重置失败');
+    }
+};
+
+window.adminBindMailForUser = async function(encodedUserId) {
+    const userId = decodeURIComponent(encodedUserId || '');
+    const input = document.getElementById('adminDetailMailUsernameInput');
+    const mailUsername = (input && input.value ? input.value : '').trim();
+    if (!userId || !mailUsername) {
+        showToast('请输入要绑定的邮箱用户名');
+        return;
+    }
+    try {
+        const res = await fetch('/api/admin/nexora-mail/bind', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                user_id: userId,
+                mail_username: mailUsername
+            })
+        });
+        const data = await res.json();
+        if (!data.success) {
+            showToast(data.message || '绑定失败');
+            return;
+        }
+        showToast('邮箱绑定成功');
+        await loadAdminUsersList();
+        if (document.getElementById('settings-admin-mail-tab')?.classList.contains('active')) {
+            await loadAdminMailUsersList();
+        }
+    } catch (err) {
+        showToast('绑定失败');
+    }
+};
+
+window.adminBindNexoraUserForMail = async function(encodedMailUser) {
+    const mailUsername = decodeURIComponent(encodedMailUser || '');
+    const input = document.getElementById('adminMailBindNexoraUserInput');
+    const nexoraUserId = (input && input.value ? input.value : '').trim();
+    if (!mailUsername || !nexoraUserId) {
+        showToast('请输入目标 Nexora 用户ID');
+        return;
+    }
+    try {
+        const res = await fetch('/api/admin/nexora-mail/bind', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                user_id: nexoraUserId,
+                group: adminMailGroup,
+                mail_username: mailUsername
+            })
+        });
+        const data = await res.json();
+        if (!data.success) {
+            showToast(data.message || '绑定失败');
+            return;
+        }
+        showToast('绑定已更新');
+        await loadAdminUsersList();
+        await loadAdminMailUsersList();
+    } catch (err) {
+        showToast('绑定失败');
+    }
+};
+
+window.adminDeleteMailUser = async function(encodedUser) {
+    const username = decodeURIComponent(encodedUser || '');
+    if (!username) return;
+    const ok = confirm(`确认删除邮箱用户 ${username} 吗？`);
+    if (!ok) return;
+    try {
+        const res = await fetch('/api/admin/nexora-mail/users/delete', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ group: adminMailGroup, mail_username: username })
+        });
+        const data = await res.json();
+        if (!data.success) {
+            showToast(data.message || '删除失败');
+            return;
+        }
+        showToast('邮箱用户已删除');
+        if (adminSelectedMailUser === username) adminSelectedMailUser = null;
+        await loadAdminMailUsersList();
+    } catch (err) {
+        showToast('删除失败');
+    }
+};
+
+function getDefaultAvatarDataUrl(name) {
+    const ch = (name || 'U').charAt(0).toUpperCase();
+    const svg = `<svg xmlns='http://www.w3.org/2000/svg' width='128' height='128'><rect width='100%' height='100%' rx='64' fill='#e2e8f0'/><text x='50%' y='56%' dominant-baseline='middle' text-anchor='middle' font-size='56' fill='#334155' font-family='Arial'>${ch}</text></svg>`;
+    return `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`;
 }
 
 // --- 模型权限管理 ---
@@ -2697,18 +4301,18 @@ window.openUserModelPerm = async function(username) {
         
         if (data.success && listContainer) {
             listContainer.innerHTML = data.models.map(m => `
-                <div class="perm-item" style="display: flex; align-items: center; padding: 14px 16px; border-bottom: 1px solid #f1f5f9; transition: all 0.2s ease; background: white;">
-                    <label style="display: flex; align-items: center; cursor: pointer; width: 100%; margin: 0; user-select: none;">
-                        <input type="checkbox" class="model-perm-checkbox" data-id="${m.id}" ${!m.is_blocked ? 'checked' : ''} style="margin-right: 14px; width: 18px; height: 18px; cursor: pointer; accent-color: #0f172a; flex-shrink: 0;">
-                        <div style="display: flex; flex-direction: column; flex: 1; min-width: 0;">
-                            <div style="display: flex; align-items: center; gap: 8px;">
-                                <span style="font-weight: 600; font-size: 14px; color: #1e293b;">${m.name}</span>
-                                ${m.provider ? `<span style="font-size: 11px; color: #94a3b8; background: #f0f4f8; padding: 2px 8px; border-radius: 3px;">${m.provider}</span>` : ''}
+                <div class="perm-item">
+                    <label>
+                        <input type="checkbox" class="model-perm-checkbox" data-id="${m.id}" ${!m.is_blocked ? 'checked' : ''}>
+                        <div class="model-info">
+                            <div class="model-name">${m.name}</div>
+                            <div class="model-meta">
+                                <span class="model-id">${m.id}</span>
+                                ${m.provider ? `<span class="provider-badge">${m.provider}</span>` : ''}
                             </div>
-                            <span style="font-size: 12px; color: #94a3b8; font-family: 'Monaco', 'Menlo', monospace; margin-top: 2px;">${m.id}</span>
                         </div>
-                        <span style="font-size: 11px; color: #cbd5e1; margin-left: 8px; flex-shrink: 0; padding: 4px 8px; background: ${!m.is_blocked ? '#dcfce7' : '#fee2e2'}; border-radius: 3px; font-weight: 500;">
-                            ${!m.is_blocked ? '✓ 可用' : '✗ 禁用'}
+                        <span class="status-badge ${!m.is_blocked ? 'status-allowed' : 'status-blocked'}">
+                            ${!m.is_blocked ? '✓ 已开启' : '× 已禁用'}
                         </span>
                     </label>
                 </div>
@@ -2763,6 +4367,381 @@ window.closeModelPermModal = function() {
     currentTargetPermUser = null;
 };
 
+let adminModelConfigCache = { models: {}, providers: {} };
+let adminSelectedProvider = '';
+let adminModelSearchKeyword = '';
+let adminTextConfirmHandler = null;
+let adminPanelScrollState = { providers: 0, models: 0 };
+let adminConfigState = { mode: '', originalKey: '' };
+
+function maskSecret(secret) {
+    const s = String(secret || '');
+    if (!s) return '(empty)';
+    if (s.length <= 8) return '*'.repeat(s.length);
+    return `${s.slice(0, 4)}...${s.slice(-4)}`;
+}
+
+window.closeAdminTextConfirmModal = function() {
+    const modal = document.getElementById('adminTextConfirmModal');
+    const input = document.getElementById('adminTextConfirmInput');
+    if (input) input.value = '';
+    if (modal) modal.classList.remove('active');
+    adminTextConfirmHandler = null;
+};
+
+function showAdminTextConfirmModal(onConfirm) {
+    const modal = document.getElementById('adminTextConfirmModal');
+    const input = document.getElementById('adminTextConfirmInput');
+    const okBtn = document.getElementById('adminTextConfirmOkBtn');
+    if (!modal || !input || !okBtn) return;
+
+    adminTextConfirmHandler = onConfirm;
+    input.value = '';
+    modal.classList.add('active');
+    setTimeout(() => input.focus(), 40);
+
+    okBtn.onclick = async () => {
+        const text = input.value.trim();
+        if (text !== '确认修改') {
+            showToast('请输入“确认修改”');
+            return;
+        }
+        if (typeof adminTextConfirmHandler === 'function') {
+            await adminTextConfirmHandler(text);
+        }
+        closeAdminTextConfirmModal();
+    };
+}
+
+async function loadAdminModelConfig() {
+    const listEl = document.getElementById('adminModelConfigList');
+    if (!listEl) return;
+    const searchInput = document.getElementById('adminModelSearchInput');
+    if (searchInput && searchInput.value !== adminModelSearchKeyword) {
+        searchInput.value = adminModelSearchKeyword;
+    }
+    listEl.innerHTML = '<div class="model-admin-empty">Loading...</div>';
+    try {
+        const res = await fetch('/api/admin/models/config');
+        const data = await res.json();
+        if (!data.success) {
+            listEl.innerHTML = `<div class="model-admin-empty" style="color:#dc2626;">${escapeHtml(data.message || '加载失败')}</div>`;
+            return;
+        }
+        adminModelConfigCache = {
+            models: data.models || {},
+            providers: data.providers || {}
+        };
+        const providerKeys = Object.keys(adminModelConfigCache.providers || {}).sort((a, b) => a.localeCompare(b));
+        if (!adminSelectedProvider || !adminModelConfigCache.providers[adminSelectedProvider]) {
+            adminSelectedProvider = providerKeys[0] || '';
+        }
+        renderAdminModelConfig();
+    } catch (err) {
+        listEl.innerHTML = `<div class="model-admin-empty" style="color:#dc2626;">${escapeHtml(err.message || '加载失败')}</div>`;
+    }
+}
+
+function renderAdminModelConfig(options = {}) {
+    const resetModelsScroll = !!options.resetModelsScroll;
+    const listEl = document.getElementById('adminModelConfigList');
+    if (!listEl) return;
+
+    const oldProviderList = listEl.querySelector('.model-admin-col-list[data-col="providers"]');
+    const oldModelList = listEl.querySelector('.model-admin-col-list[data-col="models"]');
+    const providerScroll = oldProviderList ? oldProviderList.scrollTop : adminPanelScrollState.providers;
+    const modelScroll = resetModelsScroll ? 0 : (oldModelList ? oldModelList.scrollTop : adminPanelScrollState.models);
+    adminPanelScrollState.providers = providerScroll;
+    adminPanelScrollState.models = modelScroll;
+
+    const providers = adminModelConfigCache.providers || {};
+    const models = adminModelConfigCache.models || {};
+    const allProviderEntries = Object.entries(providers).sort((a, b) => a[0].localeCompare(b[0]));
+    const query = String(adminModelSearchKeyword || '').trim().toLowerCase();
+
+    const providerMatches = (providerKey, providerInfo) => {
+        if (!query) return true;
+        const baseUrl = (providerInfo && providerInfo.base_url) ? String(providerInfo.base_url) : '';
+        return providerKey.toLowerCase().includes(query) || baseUrl.toLowerCase().includes(query);
+    };
+    const modelMatches = (modelId, modelInfo) => {
+        if (!query) return true;
+        const provider = (modelInfo && modelInfo.provider) ? String(modelInfo.provider) : '';
+        const name = (modelInfo && modelInfo.name) ? String(modelInfo.name) : '';
+        const status = (modelInfo && modelInfo.status) ? String(modelInfo.status) : '';
+        return (
+            modelId.toLowerCase().includes(query) ||
+            name.toLowerCase().includes(query) ||
+            status.toLowerCase().includes(query) ||
+            provider.toLowerCase().includes(query)
+        );
+    };
+
+    const providerEntries = allProviderEntries.filter(([providerKey, providerInfo]) => {
+        if (providerMatches(providerKey, providerInfo)) return true;
+        return Object.entries(models).some(([modelId, modelInfo]) => {
+            const provider = (modelInfo && modelInfo.provider) ? String(modelInfo.provider) : '';
+            return provider === providerKey && modelMatches(modelId, modelInfo);
+        });
+    });
+
+    if (!providerEntries.some(([providerKey]) => providerKey === adminSelectedProvider)) {
+        adminSelectedProvider = providerEntries[0] ? providerEntries[0][0] : '';
+    }
+
+    const selectedProviderInfo = providers[adminSelectedProvider] || {};
+    const selectedProviderMatch = providerMatches(adminSelectedProvider, selectedProviderInfo);
+    const modelEntries = Object.entries(models)
+        .filter(([, info]) => !adminSelectedProvider || ((info && info.provider) || '') === adminSelectedProvider)
+        .filter(([modelId, modelInfo]) => {
+            if (!query) return true;
+            if (selectedProviderMatch) return true;
+            return modelMatches(modelId, modelInfo);
+        })
+        .sort((a, b) => a[0].localeCompare(b[0]));
+
+    const providersHtml = providerEntries.length ? providerEntries.map(([key, info]) => `
+        <div class="provider-item ${key === adminSelectedProvider ? 'active' : ''}" onclick="adminSelectProviderByEncoded('${encodeURIComponent(key)}')">
+            <div class="model-admin-item-main">
+                <div class="provider-item-name">${escapeHtml(key)}</div>
+                <div class="provider-item-meta">${escapeHtml(maskSecret(info && info.api_key))}</div>
+                <div class="provider-item-meta">${escapeHtml((info && info.base_url) || '')}</div>
+            </div>
+            <div class="model-admin-item-actions">
+                <button class="model-icon-btn" title="Edit Provider" onclick="event.stopPropagation(); adminEditProviderByEncoded('${encodeURIComponent(key)}')"><i class="fa-solid fa-pen"></i></button>
+                <button class="model-icon-btn model-icon-btn-danger" title="Delete Provider" onclick="event.stopPropagation(); adminDeleteProviderByEncoded('${encodeURIComponent(key)}')"><i class="fa-solid fa-trash"></i></button>
+            </div>
+        </div>
+    `).join('') : '<div class="model-admin-empty">无供应商</div>';
+
+    const modelsHtml = modelEntries.length ? modelEntries.map(([id, info]) => `
+        <div class="model-admin-item">
+            <div class="model-admin-item-main">
+                <div class="model-admin-item-name">${escapeHtml(id)} (${escapeHtml((info && info.name) || id)})</div>
+                <div class="model-admin-item-meta">provider: ${escapeHtml((info && info.provider) || '')}</div>
+                <div class="model-admin-item-meta">status: ${escapeHtml((info && info.status) || 'normal')}</div>
+            </div>
+            <div class="model-admin-item-actions">
+                <button class="model-icon-btn" title="修改模型" onclick="adminEditModelByEncoded('${encodeURIComponent(id)}')"><i class="fa-solid fa-pen"></i></button>
+                <button class="model-icon-btn model-icon-btn-danger" title="Delete Model" onclick="adminDeleteModelByEncoded('${encodeURIComponent(id)}')"><i class="fa-solid fa-trash"></i></button>
+            </div>
+        </div>
+    `).join('') : `<div class="model-admin-empty">${adminSelectedProvider ? '该供应商无模型' : '无模型'}</div>`;
+
+    listEl.innerHTML = `
+        <div class="model-admin-master">
+            <div class="model-admin-col">
+                <div class="model-admin-col-title">供应商 (${providerEntries.length})</div>
+                <div class="model-admin-col-list" data-col="providers">${providersHtml}</div>
+            </div>
+            <div class="model-admin-col">
+                <div class="model-admin-col-title">模型 ${adminSelectedProvider ? `(${escapeHtml(adminSelectedProvider)})` : ''}</div>
+                <div class="model-admin-col-list" data-col="models">${modelsHtml}</div>
+            </div>
+        </div>
+    `;
+
+    requestAnimationFrame(() => {
+        const providerList = listEl.querySelector('.model-admin-col-list[data-col="providers"]');
+        const modelList = listEl.querySelector('.model-admin-col-list[data-col="models"]');
+        if (providerList) providerList.scrollTop = providerScroll;
+        if (modelList) modelList.scrollTop = modelScroll;
+    });
+}
+
+window.adminSelectProviderByEncoded = function(encoded) {
+    const next = decodeURIComponent(encoded || '');
+    if (next === adminSelectedProvider) return;
+    adminSelectedProvider = next;
+    renderAdminModelConfig({ resetModelsScroll: true });
+};
+
+function openAdminConfigModal(mode, payload = {}) {
+    const modal = document.getElementById('adminConfigModal');
+    const title = document.getElementById('adminConfigModalTitle');
+    const providerFields = document.getElementById('adminConfigProviderFields');
+    const modelFields = document.getElementById('adminConfigModelFields');
+    if (!modal || !title || !providerFields || !modelFields) return;
+
+    adminConfigState = {
+        mode,
+        originalKey: payload.originalKey || ''
+    };
+
+    if (mode === 'provider') {
+        title.textContent = payload.originalKey ? '修改供应商' : '添加供应商';
+        providerFields.style.display = '';
+        modelFields.style.display = 'none';
+        document.getElementById('adminProviderNameInput').value = payload.provider || '';
+        document.getElementById('adminProviderApiKeyInput').value = payload.api_key || '';
+        document.getElementById('adminProviderBaseUrlInput').value = payload.base_url || '';
+    } else {
+        title.textContent = payload.originalKey ? '修改模型' : '添加模型';
+        providerFields.style.display = 'none';
+        modelFields.style.display = '';
+        document.getElementById('adminModelIdInput').value = payload.model_id || '';
+        document.getElementById('adminModelNameInput').value = payload.name || '';
+        document.getElementById('adminModelStatusInput').value = payload.status || 'normal';
+
+        const providerSelect = document.getElementById('adminModelProviderInput');
+        const providers = Object.keys(adminModelConfigCache.providers || {}).sort((a, b) => a.localeCompare(b));
+        providerSelect.innerHTML = providers.map(p => `<option value="${escapeHtml(p)}">${escapeHtml(p)}</option>`).join('');
+        providerSelect.value = payload.provider || adminSelectedProvider || providers[0] || '';
+    }
+
+    modal.classList.add('active');
+}
+
+window.closeAdminConfigModal = function() {
+    const modal = document.getElementById('adminConfigModal');
+    if (modal) modal.classList.remove('active');
+    adminConfigState = { mode: '', originalKey: '' };
+};
+
+async function saveAdminConfigModal() {
+    try {
+        if (adminConfigState.mode === 'provider') {
+            const provider = (document.getElementById('adminProviderNameInput').value || '').trim();
+            const apiKey = document.getElementById('adminProviderApiKeyInput').value || '';
+            const baseUrl = document.getElementById('adminProviderBaseUrlInput').value || '';
+            if (!provider) {
+                showToast('供应商名称是必填项');
+                return;
+            }
+            const res = await fetch('/api/admin/models/provider/upsert', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    provider,
+                    api_key: apiKey,
+                    base_url: baseUrl
+                })
+            });
+            const data = await res.json();
+            if (!data.success) {
+                showToast('Save failed: ' + (data.message || 'Unknown error'));
+                return;
+            }
+            adminSelectedProvider = provider;
+            closeAdminConfigModal();
+            await loadAdminModelConfig();
+            return;
+        }
+
+        if (adminConfigState.mode === 'model') {
+            const modelId = (document.getElementById('adminModelIdInput').value || '').trim();
+            const modelName = (document.getElementById('adminModelNameInput').value || '').trim();
+            const provider = (document.getElementById('adminModelProviderInput').value || '').trim();
+            const status = (document.getElementById('adminModelStatusInput').value || 'normal').trim();
+            if (!modelId || !provider) {
+                showToast('模型ID和供应商是必填项');
+                return;
+            }
+            const res = await fetch('/api/admin/models/model/upsert', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    model_id: modelId,
+                    name: modelName || modelId,
+                    provider,
+                    status: status || 'normal'
+                })
+            });
+            const data = await res.json();
+            if (!data.success) {
+                showToast('保存失败: ' + (data.message || '未知错误'));
+                return;
+            }
+            adminSelectedProvider = provider;
+            closeAdminConfigModal();
+            await loadAdminModelConfig();
+        }
+    } catch (err) {
+        showToast('保存失败: ' + (err.message || '未知错误'));
+    }
+}
+
+async function openProviderEditor(providerName = '') {
+    const providers = adminModelConfigCache.providers || {};
+    const current = providerName ? (providers[providerName] || {}) : {};
+    openAdminConfigModal('provider', {
+        originalKey: providerName || '',
+        provider: providerName || '',
+        api_key: current.api_key || '',
+        base_url: current.base_url || ''
+    });
+}
+
+async function openModelEditor(modelId = '') {
+    const models = adminModelConfigCache.models || {};
+    const current = modelId ? (models[modelId] || {}) : {};
+    openAdminConfigModal('model', {
+        originalKey: modelId || '',
+        model_id: modelId || '',
+        name: current.name || '',
+        provider: current.provider || adminSelectedProvider || '',
+        status: current.status || 'normal'
+    });
+}
+
+window.adminEditProvider = function(provider) {
+    openProviderEditor(provider);
+};
+
+window.adminEditModel = function(modelId) {
+    openModelEditor(modelId);
+};
+
+window.adminEditProviderByEncoded = function(encoded) {
+    openProviderEditor(decodeURIComponent(encoded || ''));
+};
+
+window.adminDeleteProviderByEncoded = function(encoded) {
+    window.adminDeleteProvider(decodeURIComponent(encoded || ''));
+};
+
+window.adminEditModelByEncoded = function(encoded) {
+    openModelEditor(decodeURIComponent(encoded || ''));
+};
+
+window.adminDeleteModelByEncoded = function(encoded) {
+    window.adminDeleteModel(decodeURIComponent(encoded || ''));
+};
+
+window.adminDeleteProvider = function(provider) {
+    showAdminTextConfirmModal(async (confirmText) => {
+        const res = await fetch('/api/admin/models/provider/delete', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ provider, confirm_text: confirmText })
+        });
+        const data = await res.json();
+        if (!data.success) {
+            showToast('删除失败: ' + (data.message || '未知错误'));
+            return;
+        }
+        showToast('供应商已删除');
+        await loadAdminModelConfig();
+    });
+};
+
+window.adminDeleteModel = function(modelId) {
+    showAdminTextConfirmModal(async (confirmText) => {
+        const res = await fetch('/api/admin/models/model/delete', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ model_id: modelId, confirm_text: confirmText })
+        });
+        const data = await res.json();
+        if (!data.success) {
+            showToast('删除失败: ' + (data.message || '未知错误'));
+            return;
+        }
+        showToast('模型已删除');
+        await loadAdminModelConfig();
+    });
+};
+
 // 加载统计信息
 
 // ChromaDB stats
@@ -2796,7 +4775,7 @@ async function loadAdminChromaStats() {
         const rows = (data.collections || []).map(c => {
             return `<tr><td>${c.name}</td><td class="mono">${(c.count || 0).toLocaleString()}</td></tr>`;
         }).join('');
-        listEl.innerHTML = rows || '<tr><td colspan="2">No collections</td></tr>';
+        listEl.innerHTML = rows || '<tr><td colspan="2">无联系</td></tr>';
     } catch (err) {
         console.error('Failed to load chroma stats:', err);
     }
@@ -2819,10 +4798,94 @@ async function loadAdminStats() {
             if (tokenData.success) {
                 document.getElementById('statTotalTokens').textContent = (tokenData.total || 0).toLocaleString();
             }
+
+            const trendRes = await fetch('/api/admin/tokens/timeseries?days=30');
+            const trendData = await trendRes.json();
+            if (trendData.success) {
+                renderAdminTokenTrend(trendData);
+            }
         }
     } catch (err) {
         console.error('Failed to load stats:', err);
     }
+}
+
+function renderAdminTokenTrend(data) {
+    const chartWrap = document.getElementById('adminTokenTrendChart');
+    const meta = document.getElementById('adminTokenTrendMeta');
+    const top = document.getElementById('adminTokenTrendTop');
+    if (!chartWrap || !meta || !top) return;
+
+    const labels = Array.isArray(data.labels) ? data.labels : [];
+    const totalSeries = (data.series && Array.isArray(data.series.total_tokens)) ? data.series.total_tokens : [];
+    const reqSeries = (data.series && Array.isArray(data.series.requests)) ? data.series.requests : [];
+
+    if (!labels.length || !totalSeries.length) {
+        chartWrap.innerHTML = '<div style="padding:12px;color:#94a3b8;font-size:12px;">暂无趋势数据</div>';
+        meta.textContent = '-';
+        top.innerHTML = '';
+        return;
+    }
+
+    const totalSum = totalSeries.reduce((a, b) => a + (Number(b) || 0), 0);
+    const reqSum = reqSeries.reduce((a, b) => a + (Number(b) || 0), 0);
+    meta.textContent = `总请求 ${reqSum.toLocaleString()} · 总Token ${totalSum.toLocaleString()}`;
+
+    const width = Math.max((chartWrap.clientWidth || 720) - 24, 360);
+    const height = 220;
+    const padL = 44;
+    const padR = 14;
+    const padT = 12;
+    const padB = 28;
+    const plotW = width - padL - padR;
+    const plotH = height - padT - padB;
+    const maxVal = Math.max(...totalSeries, 1);
+
+    const points = totalSeries.map((v, i) => {
+        const x = padL + (plotW * i / Math.max(totalSeries.length - 1, 1));
+        const y = padT + plotH - ((Number(v) || 0) / maxVal) * plotH;
+        return `${x.toFixed(2)},${y.toFixed(2)}`;
+    }).join(' ');
+
+    const yTicks = [0, 0.25, 0.5, 0.75, 1].map(r => {
+        const y = padT + plotH - (plotH * r);
+        const val = Math.round(maxVal * r).toLocaleString();
+        return `
+            <line x1="${padL}" y1="${y}" x2="${width - padR}" y2="${y}" stroke="#eef2f7" stroke-width="1"/>
+            <text x="${padL - 6}" y="${y + 4}" text-anchor="end" font-size="10" fill="#94a3b8">${val}</text>
+        `;
+    }).join('');
+
+    const firstLabel = labels[0] || '';
+    const midLabel = labels[Math.floor(labels.length / 2)] || '';
+    const lastLabel = labels[labels.length - 1] || '';
+
+    chartWrap.innerHTML = `
+        <svg viewBox="0 0 ${width} ${height}" width="100%" height="${height}" xmlns="http://www.w3.org/2000/svg">
+            ${yTicks}
+            <polyline fill="none" stroke="#2563eb" stroke-width="2.2" points="${points}" stroke-linecap="round" stroke-linejoin="round"/>
+            <text x="${padL}" y="${height - 8}" font-size="10" fill="#94a3b8">${firstLabel}</text>
+            <text x="${padL + plotW / 2}" y="${height - 8}" font-size="10" fill="#94a3b8" text-anchor="middle">${midLabel}</text>
+            <text x="${width - padR}" y="${height - 8}" font-size="10" fill="#94a3b8" text-anchor="end">${lastLabel}</text>
+        </svg>
+    `;
+
+    const providers = Array.isArray(data.top_providers) ? data.top_providers.slice(0, 4) : [];
+    const models = Array.isArray(data.top_models) ? data.top_models.slice(0, 4) : [];
+    top.innerHTML = `
+        <div class="trend-block">
+            <div class="trend-title">Top Providers</div>
+            ${(providers.length ? providers : [{name:'-', tokens:0}]).map(p => `
+                <div class="trend-item"><span>${escapeHtml(String(p.name || '-'))}</span><span class="mono">${Number(p.tokens || 0).toLocaleString()}</span></div>
+            `).join('')}
+        </div>
+        <div class="trend-block">
+            <div class="trend-title">Top Models</div>
+            ${(models.length ? models : [{name:'-', tokens:0}]).map(m => `
+                <div class="trend-item"><span>${escapeHtml(String(m.name || '-'))}</span><span class="mono">${Number(m.tokens || 0).toLocaleString()}</span></div>
+            `).join('')}
+        </div>
+    `;
 }
 
 // 说明
@@ -2848,6 +4911,9 @@ function switchAdminTab(tabName) {
     if (selectedBtn) selectedBtn.classList.add('active');
     if (tabName === 'chroma') {
         loadAdminChromaStats();
+    }
+    if (tabName === 'models') {
+        loadAdminModelConfig();
     }
 
 }
@@ -2896,6 +4962,7 @@ async function submitAddUser() {
             document.getElementById('formUsername').value = '';
             document.getElementById('formPassword').value = '';
             closeAddUserModal(); // 关闭
+            adminSelectedUserId = username;
             await loadAdminUsersList();
             await loadAdminStats();
         } else {
@@ -2919,11 +4986,14 @@ async function deleteAdminUser(username) {
         const res = await fetch('/api/admin/user/delete', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ target_username: username })
+            body: JSON.stringify({ target_user_id: username })
         });
         const data = await res.json();
         if (data.success) {
             alert('用户已删除');
+            if (adminSelectedUserId === username) {
+                adminSelectedUserId = null;
+            }
             await loadAdminUsersList();
             await loadAdminStats();
         } else {
@@ -2949,7 +5019,7 @@ async function changeUserRole(username, newRole) {
         const res = await fetch('/api/admin/user/role', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ username, role: newRole })
+            body: JSON.stringify({ user_id: username, role: newRole })
         });
         const data = await res.json();
         if (data.success) {
@@ -2963,6 +5033,74 @@ async function changeUserRole(username, newRole) {
         alert('Network error');
     }
 }
+
+window.saveAdminUserProfile = async function(encodedUserId) {
+    const userId = decodeURIComponent(encodedUserId || '');
+    const nameInput = document.getElementById('adminDetailNameInput');
+    const roleSelect = document.getElementById('adminDetailRoleSelect');
+    if (!nameInput || !roleSelect) return;
+    const displayName = (nameInput.value || '').trim();
+    const role = roleSelect.value;
+    if (!displayName) {
+        showToast('用户名不能为空');
+        return;
+    }
+    try {
+        const profileRes = await fetch('/api/admin/user/profile', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ user_id: userId, display_name: displayName })
+        });
+        const profileData = await profileRes.json();
+        if (!profileData.success) {
+            showToast(profileData.message || '保存失败');
+            return;
+        }
+        if (userId !== currentUsername) {
+            const roleRes = await fetch('/api/admin/user/role', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ user_id: userId, role })
+            });
+            const roleData = await roleRes.json();
+            if (!roleData.success) {
+                showToast(roleData.message || '角色更新失败');
+                return;
+            }
+        }
+        showToast('用户资料已保存');
+        await loadAdminUsersList();
+    } catch (err) {
+        showToast('保存失败');
+    }
+};
+
+window.adminResetPassword = async function(encodedUserId) {
+    const userId = decodeURIComponent(encodedUserId || '');
+    const pwdInput = document.getElementById('adminDetailPasswordInput');
+    if (!pwdInput) return;
+    const pwd = (pwdInput.value || '').trim();
+    if (!pwd) {
+        showToast('请输入新密码');
+        return;
+    }
+    try {
+        const res = await fetch('/api/admin/user/password', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ target_user_id: userId, password: pwd })
+        });
+        const data = await res.json();
+        if (!data.success) {
+            showToast(data.message || '重置失败');
+            return;
+        }
+        showToast('密码已重置');
+        pwdInput.value = '';
+    } catch (err) {
+        showToast('重置失败');
+    }
+};
 
 
 
@@ -3501,4 +5639,422 @@ function setKnowledgeItemVectorState(title, state) {
     item.classList.remove('vector-pending', 'vector-uploading');
     if (state === 'pending') item.classList.add('vector-pending');
     if (state === 'uploading') item.classList.add('vector-uploading');
+}
+
+// 设置模态框相关函数
+async function openSettingsModal() {
+    try {
+        const settingsModal = document.getElementById('settingsModal');
+        if (!settingsModal) {
+            console.error('settingsModal not found in DOM');
+            showToast('设置界面未加载');
+            return;
+        }
+        // 确保有用户名
+        if (!currentUsername) await checkUserRole();
+
+        // 初始化标签页事件
+        initSettingsTabs();
+
+        // 默认切换到个人资料
+        switchSettingsTab('profile');
+        pendingAvatarDataUrl = '';
+
+        // 加载用户数据
+        await loadUserSettings();
+
+        // 显示模态框
+        settingsModal.classList.add('active');
+    } catch (e) {
+        console.error('打开设置模态框失败:', e);
+        showToast('加载设置失败');
+    }
+}
+
+function closeSettingsModal() {
+    const settingsModal = document.getElementById('settingsModal');
+    if (settingsModal) settingsModal.classList.remove('active');
+}
+
+function initSettingsTabs() {
+    const modal = document.getElementById('settingsModal');
+    if (!modal || modal.dataset.settingsTabsInit === '1') return;
+    modal.dataset.settingsTabsInit = '1';
+
+    const tabs = modal.querySelectorAll('.admin-tab');
+    tabs.forEach(tab => {
+        tab.addEventListener('click', () => {
+            const tabName = tab.getAttribute('data-tab');
+            if (tabName) switchSettingsTab(tabName);
+        });
+    });
+}
+
+function switchSettingsTab(tabName) {
+    // 隐藏所有标签页
+    document.querySelectorAll('#settingsModal .admin-tab-content').forEach(tab => {
+        tab.classList.remove('active');
+    });
+
+    // 取消激活所有按钮
+    document.querySelectorAll('#settingsModal .admin-tab').forEach(btn => {
+        btn.classList.remove('active');
+    });
+
+    // 显示选中的标签页
+    const selectedTab = document.getElementById('settings-' + tabName + '-tab');
+    if (selectedTab) {
+        selectedTab.classList.add('active');
+    }
+
+    // 激活选中的按钮
+    const selectedBtn = document.querySelector(`#settingsModal .admin-tab[data-tab="${tabName}"]`);
+    if (selectedBtn) selectedBtn.classList.add('active');
+
+    if (tabName === 'admin-users') {
+        adminUserFilterKeyword = '';
+        const filterInput = document.getElementById('adminUserFilterInput');
+        if (filterInput) filterInput.value = '';
+        loadAdminUsersList();
+        loadAdminStats();
+    }
+    if (tabName === 'admin-mail') {
+        adminMailUserFilterKeyword = '';
+        const filterInput = document.getElementById('adminMailUserFilterInput');
+        if (filterInput) filterInput.value = '';
+        loadAdminMailUsersList();
+    }
+    if (tabName === 'admin-stats') {
+        loadAdminStats();
+    }
+    if (tabName === 'admin-models') {
+        loadAdminModelConfig();
+    }
+    if (tabName === 'admin-chroma') {
+        loadAdminChromaStats();
+    }
+}
+
+async function loadUserSettings() {
+    try {
+        // 获取用户信息
+        const userRes = await fetch('/api/user/info');
+        const userData = await userRes.json();
+
+        if (userData.success) {
+            const user = userData.user;
+            // 填充个人资料
+            const usernameInput = document.getElementById('set-username-input');
+            if (usernameInput) usernameInput.value = user.username || '';
+            const userIdEl = document.getElementById('set-userid');
+            if (userIdEl) userIdEl.textContent = `UserID: ${user.id || '-'}`;
+            document.getElementById('set-created').textContent =
+                user.created_at ? new Date(user.created_at * 1000).toLocaleString() : '2026-02-10（默认）';
+            document.getElementById('set-lastlogin').textContent =
+                user.last_login ? new Date(user.last_login * 1000).toLocaleString() : new Date().toLocaleString();
+            currentUserAvatarUrl = user.avatar_url || '';
+            const avatarImg = document.getElementById('settingsAvatarImg');
+            if (avatarImg) {
+                avatarImg.src = currentUserAvatarUrl || getDefaultAvatarDataUrl(user.username || user.id);
+            }
+            updateSidebarUserProfile(user.username || user.id, currentUserAvatarUrl);
+
+            // 填充统计信息
+            const stats = user.stats || {};
+            document.getElementById('set-stat-convs').textContent = stats.total_conversations || 0;
+            document.getElementById('set-stat-tokens').textContent = (stats.total_tokens || 0).toLocaleString();
+            document.getElementById('set-stat-knowledge').textContent = stats.total_knowledge || 0;
+
+            // 填充模型使用统计
+            const modelStatsDiv = document.getElementById('modelUsageStats');
+            if (stats.model_usage && Object.keys(stats.model_usage).length > 0) {
+                const modelStatsHtml = Object.entries(stats.model_usage)
+                    .sort(([, a], [, b]) => b - a)
+                    .map(([model, count]) => `
+                        <div style="display: flex; justify-content: space-between; margin-bottom: 8px; border-bottom: 1px dashed #e2e8f0; padding-bottom: 4px;">
+                            <span style="color: #475569; font-weight: 500;">${model}</span>
+                            <span style="color: #0f172a; font-weight: 600;">${count} 次调用</span>
+                        </div>
+                    `)
+                    .join('');
+                modelStatsDiv.innerHTML = modelStatsHtml;
+            } else {
+                modelStatsDiv.innerHTML = '<div style="color:#94a3b8;">暂无数据</div>';
+            }
+        }
+
+        // 获取用户偏好设置
+        const prefsRes = await fetch('/api/user/preferences');
+        const prefsData = await prefsRes.json();
+
+        if (prefsData.success) {
+            const prefs = prefsData.preferences;
+            // 填充偏好设置
+            document.getElementById('set-defmodel').textContent = prefs.default_model || '自动选择';
+            document.getElementById('set-theme').textContent = prefs.theme === 'dark' ? '暗色主题' : '亮色主题';
+            document.getElementById('set-stream').textContent = prefs.streaming ? '流式输出 (开启)' : '完整输出 (关闭)';
+            document.getElementById('set-lang').textContent = prefs.language === 'zh' ? '简体中文' : 'English';
+        }
+
+    } catch (e) {
+        console.error('加载用户设置失败:', e);
+    }
+}
+
+async function saveUserProfile() {
+    const usernameInput = document.getElementById('set-username-input');
+    const displayName = (usernameInput && usernameInput.value ? usernameInput.value : '').trim();
+    if (!displayName) {
+        showToast('用户名不能为空');
+        return;
+    }
+    try {
+        const res = await fetch('/api/user/profile/update', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                display_name: displayName,
+                avatar_base64: pendingAvatarDataUrl || null
+            })
+        });
+        const data = await res.json();
+        if (!data.success) {
+            showToast(data.message || '保存失败');
+            return;
+        }
+        pendingAvatarDataUrl = '';
+        showToast('资料已保存');
+        await loadUserSettings();
+        await checkUserRole();
+    } catch (e) {
+        showToast('保存失败');
+    }
+}
+
+const avatarCropState = {
+    img: null,
+    canvas: null,
+    ctx: null,
+    isDragging: false,
+    startX: 0,
+    startY: 0,
+    zoom: 1,
+    offsetX: 0,
+    offsetY: 0,
+    baseScale: 1,
+    circleX: 0,
+    circleY: 0,
+    circleR: 0,
+    drawWidth: 0,
+    drawHeight: 0,
+    drawX: 0,
+    drawY: 0,
+    rafPending: false
+};
+
+function openAvatarCropModal(file) {
+    const modal = document.getElementById('avatarCropModal');
+    const canvas = document.getElementById('avatarCropCanvas');
+    const zoomInput = document.getElementById('avatarCropZoom');
+    if (!modal || !canvas || !zoomInput) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+        const img = new Image();
+        img.onload = () => {
+            avatarCropState.img = img;
+            avatarCropState.canvas = canvas;
+            avatarCropState.ctx = canvas.getContext('2d');
+            avatarCropState.zoom = 1;
+            avatarCropState.offsetX = 0;
+            avatarCropState.offsetY = 0;
+            zoomInput.value = '100';
+            const width = Math.max(480, Math.min(880, img.width));
+            const height = Math.max(280, Math.min(460, img.height));
+            canvas.width = width;
+            canvas.height = height;
+            avatarCropState.circleX = Math.round(width / 2);
+            avatarCropState.circleY = Math.round(height / 2);
+            avatarCropState.circleR = Math.round(Math.min(width, height) * 0.32);
+            const minCoverScale = Math.max(
+                (avatarCropState.circleR * 2) / img.width,
+                (avatarCropState.circleR * 2) / img.height
+            );
+            avatarCropState.baseScale = minCoverScale;
+            bindAvatarCropCanvasEvents();
+            drawAvatarCropCanvas();
+            modal.classList.add('active');
+        };
+        img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+}
+
+function closeAvatarCropModal() {
+    const modal = document.getElementById('avatarCropModal');
+    if (modal) modal.classList.remove('active');
+    avatarCropState.isDragging = false;
+}
+
+function bindAvatarCropCanvasEvents() {
+    const canvas = avatarCropState.canvas;
+    const zoomInput = document.getElementById('avatarCropZoom');
+    if (!canvas || canvas.dataset.avatarBound === '1') return;
+    canvas.dataset.avatarBound = '1';
+    canvas.style.touchAction = 'none';
+
+    const getPos = (e) => {
+        const rect = canvas.getBoundingClientRect();
+        const x = ((e.clientX - rect.left) / rect.width) * canvas.width;
+        const y = ((e.clientY - rect.top) / rect.height) * canvas.height;
+        return { x, y };
+    };
+
+    const queueDraw = () => {
+        if (avatarCropState.rafPending) return;
+        avatarCropState.rafPending = true;
+        requestAnimationFrame(() => {
+            avatarCropState.rafPending = false;
+            drawAvatarCropCanvas();
+        });
+    };
+
+    canvas.addEventListener('pointerdown', (e) => {
+        const p = getPos(e);
+        avatarCropState.isDragging = true;
+        avatarCropState.startX = p.x;
+        avatarCropState.startY = p.y;
+        if (canvas.setPointerCapture) {
+            canvas.setPointerCapture(e.pointerId);
+        }
+        canvas.style.cursor = 'grabbing';
+        queueDraw();
+    });
+
+    canvas.addEventListener('pointermove', (e) => {
+        if (!avatarCropState.isDragging) return;
+        const p = getPos(e);
+        const dx = p.x - avatarCropState.startX;
+        const dy = p.y - avatarCropState.startY;
+        avatarCropState.offsetX += dx;
+        avatarCropState.offsetY += dy;
+        avatarCropState.startX = p.x;
+        avatarCropState.startY = p.y;
+        queueDraw();
+    });
+
+    const stopDrag = (e) => {
+        if (!avatarCropState.isDragging) return;
+        avatarCropState.isDragging = false;
+        canvas.style.cursor = 'grab';
+        if (canvas.releasePointerCapture && e && typeof e.pointerId === 'number') {
+            try { canvas.releasePointerCapture(e.pointerId); } catch (_) {}
+        }
+    };
+    canvas.addEventListener('pointerup', stopDrag);
+    canvas.addEventListener('pointercancel', stopDrag);
+
+    if (zoomInput) {
+        zoomInput.addEventListener('input', (e) => {
+            avatarCropState.zoom = Number(e.target.value || 100) / 100;
+            queueDraw();
+        });
+    }
+}
+
+function drawAvatarCropCanvas() {
+    const { canvas, ctx, img, zoom, baseScale, offsetX, offsetY, circleX, circleY, circleR } = avatarCropState;
+    if (!canvas || !ctx || !img) return;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    const scale = baseScale * zoom;
+    const drawWidth = img.width * scale;
+    const drawHeight = img.height * scale;
+    const drawX = (canvas.width - drawWidth) / 2 + offsetX;
+    const drawY = (canvas.height - drawHeight) / 2 + offsetY;
+    avatarCropState.drawWidth = drawWidth;
+    avatarCropState.drawHeight = drawHeight;
+    avatarCropState.drawX = drawX;
+    avatarCropState.drawY = drawY;
+
+    ctx.drawImage(img, drawX, drawY, drawWidth, drawHeight);
+    ctx.save();
+    ctx.fillStyle = 'rgba(15, 23, 42, 0.45)';
+    ctx.beginPath();
+    ctx.rect(0, 0, canvas.width, canvas.height);
+    ctx.arc(circleX, circleY, circleR, 0, Math.PI * 2, true);
+    ctx.fill('evenodd');
+    ctx.restore();
+
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.arc(circleX, circleY, circleR + 1, 0, Math.PI * 2);
+    ctx.stroke();
+
+    ctx.strokeStyle = '#38bdf8';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(circleX, circleY, circleR, 0, Math.PI * 2);
+    ctx.stroke();
+
+    drawAvatarPreviewCanvas();
+}
+
+function getAvatarCircleSourceRect() {
+    const { img, circleX, circleY, circleR, drawX, drawY, drawWidth, drawHeight } = avatarCropState;
+    if (!img || !drawWidth || !drawHeight) return null;
+    const x = circleX - circleR;
+    const y = circleY - circleR;
+    const w = circleR * 2;
+    const h = circleR * 2;
+
+    const sx = Math.max(0, ((x - drawX) / drawWidth) * img.width);
+    const sy = Math.max(0, ((y - drawY) / drawHeight) * img.height);
+    const sw = Math.min(img.width - sx, (w / drawWidth) * img.width);
+    const sh = Math.min(img.height - sy, (h / drawHeight) * img.height);
+    return { sx, sy, sw, sh };
+}
+
+function drawAvatarPreviewCanvas() {
+    const preview = document.getElementById('avatarPreviewCanvas');
+    if (!preview || !avatarCropState.img) return;
+    const pctx = preview.getContext('2d');
+    const src = getAvatarCircleSourceRect();
+    if (!src) return;
+    pctx.clearRect(0, 0, preview.width, preview.height);
+    pctx.save();
+    pctx.beginPath();
+    pctx.arc(preview.width / 2, preview.height / 2, preview.width / 2 - 2, 0, Math.PI * 2);
+    pctx.clip();
+    pctx.drawImage(
+        avatarCropState.img,
+        src.sx,
+        src.sy,
+        src.sw,
+        src.sh,
+        0,
+        0,
+        preview.width,
+        preview.height
+    );
+    pctx.restore();
+}
+
+function applyAvatarCropAndPreview() {
+    const { img } = avatarCropState;
+    if (!img) return;
+    const src = getAvatarCircleSourceRect();
+    if (!src) return;
+    const size = 512;
+    const out = document.createElement('canvas');
+    out.width = size;
+    out.height = size;
+    const octx = out.getContext('2d');
+    octx.clearRect(0, 0, size, size);
+    // UI uses circle for positioning preview, but uploaded avatar keeps normal square image.
+    octx.drawImage(img, src.sx, src.sy, src.sw, src.sh, 0, 0, size, size);
+    pendingAvatarDataUrl = out.toDataURL('image/png');
+    const avatarImg = document.getElementById('settingsAvatarImg');
+    if (avatarImg) avatarImg.src = pendingAvatarDataUrl;
+    closeAvatarCropModal();
+    showToast('头像已裁切，点击“保存资料”后生效');
 }

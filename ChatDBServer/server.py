@@ -5,9 +5,13 @@ ChatDB Web Server - Flask应用
 import os
 import sys
 import json
-from flask import Flask, render_template, request, jsonify, session, redirect, url_for, Response
+import base64
+import binascii
+from copy import deepcopy
+from urllib import request as urllib_request, error as urllib_error, parse as urllib_parse
+from flask import Flask, render_template, request, jsonify, session, redirect, url_for, Response, send_file
 from flask_cors import CORS
-from datetime import timedelta
+from datetime import timedelta, datetime
 import time
 
 # 添加api目录到路径
@@ -31,16 +35,105 @@ os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.json')
 MODELS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'models.json')
+USERS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'user.json')
 
-def get_config_all():
-    """获取配置"""
-    config = {}
+DEFAULT_MAIN_CONFIG = {
+    "default_model": "doubao-seed-1-6-250615",
+    "conclusion_model": "doubao-seed-1-6-flash-250828",
+    "organization_model": "doubao-seed-1-6-flash-250828",
+    "websearch_model": "doubao-seed-1-6-flash-250828",
+    "continuous_summary": False,
+    "log_status": "silent",
+    "api": {
+        "public_api_key": "public-1234567890abcdef",
+        "public_api_enabled": True
+    },
+    "rag_database": {
+        "host": "127.0.0.1",
+        "port": 8100,
+        "api_key": "nexoradb-123456",
+        "rag_database_enabled": False,
+        "mode": "service",
+        "path": "./data/chroma",
+        "collection_prefix": "knowledge",
+        "distance": "cosine",
+        "service_url": "http://127.0.0.1:8100",
+        "chunk_size": 200,
+        "chunk_overlap": 40
+    },
+    "nexora_mail": {
+        "host": "127.0.0.1",
+        "port": 17171,
+        "api_key": "",
+        "nexora_mail_enabled": False,
+        "service_url": "http://127.0.0.1:17171",
+        "timeout": 10,
+        "default_group": "default"
+    }
+}
+
+
+def _merge_defaults(dst, src):
+    changed = False
+    for k, v in src.items():
+        if k not in dst:
+            dst[k] = v
+            changed = True
+        elif isinstance(v, dict) and isinstance(dst.get(k), dict):
+            if _merge_defaults(dst[k], v):
+                changed = True
+    return changed
+
+
+def ensure_main_config_defaults():
+    cfg = {}
     if os.path.exists(CONFIG_PATH):
         try:
             with open(CONFIG_PATH, 'r', encoding='utf-8') as f:
-                config = json.load(f)
-        except Exception as e:
-            print(f"Error loading config: {e}")
+                cfg = json.load(f)
+            if not isinstance(cfg, dict):
+                cfg = {}
+        except Exception:
+            cfg = {}
+
+    changed = _merge_defaults(cfg, json.loads(json.dumps(DEFAULT_MAIN_CONFIG, ensure_ascii=False)))
+    if changed or not os.path.exists(CONFIG_PATH):
+        with open(CONFIG_PATH, 'w', encoding='utf-8') as f:
+            json.dump(cfg, f, indent=4, ensure_ascii=False)
+    return cfg
+
+
+def load_users():
+    with open(USERS_PATH, 'r', encoding='utf-8') as f:
+        users = json.load(f)
+    if not isinstance(users, dict):
+        return {}
+    return users
+
+
+def save_users(users):
+    with open(USERS_PATH, 'w', encoding='utf-8') as f:
+        json.dump(users, f, indent=4, ensure_ascii=False)
+
+
+def get_user_avatar_file(user_id):
+    return os.path.join(os.path.dirname(__file__), 'data', 'users', user_id, 'profile', 'avatar.png')
+
+
+def build_user_avatar_url(user_id, user_data):
+    avatar_file = get_user_avatar_file(user_id)
+    if not os.path.exists(avatar_file):
+        return ''
+    stamp = int(user_data.get('avatar_updated_at') or os.path.getmtime(avatar_file))
+    return f'/api/user/avatar/{user_id}?v={stamp}'
+
+def get_config_all():
+    """获取配置"""
+    try:
+        config = ensure_main_config_defaults()
+    except Exception as e:
+        print(f"Error loading/ensuring config defaults: {e}")
+        config = {}
     if os.path.exists(MODELS_PATH):
         try:
             with open(MODELS_PATH, 'r', encoding='utf-8') as f:
@@ -51,6 +144,189 @@ def get_config_all():
         except Exception as e:
             print(f"Error loading models config: {e}")
     return config
+
+
+def get_local_mail_profile(user_data):
+    """标准化用户 local_mail 字段（默认空绑定）"""
+    default_profile = {
+        'provider': 'nexoramail',
+        'group': 'default',
+        'username': '',
+        'address': '',
+        'linked_at': None
+    }
+    if not isinstance(user_data, dict):
+        return default_profile
+    raw = user_data.get('local_mail')
+    if not isinstance(raw, dict):
+        return default_profile
+    profile = deepcopy(default_profile)
+    for k in default_profile.keys():
+        if k in raw:
+            profile[k] = raw.get(k)
+    profile['username'] = str(profile.get('username') or '').strip()
+    profile['address'] = str(profile.get('address') or '').strip()
+    profile['group'] = str(profile.get('group') or 'default').strip() or 'default'
+    profile['provider'] = str(profile.get('provider') or 'nexoramail').strip() or 'nexoramail'
+    if not profile['username']:
+        profile['address'] = ''
+        profile['linked_at'] = None
+    return profile
+
+
+def _get_nexora_mail_config():
+    cfg = get_config_all()
+    mail_cfg = cfg.get('nexora_mail', {}) if isinstance(cfg, dict) else {}
+    if not isinstance(mail_cfg, dict):
+        mail_cfg = {}
+
+    host = str(mail_cfg.get('host', '127.0.0.1')).strip() or '127.0.0.1'
+    port = int(mail_cfg.get('port', 17171) or 17171)
+    service_url = str(mail_cfg.get('service_url', '') or '').strip()
+    if not service_url:
+        service_url = f'http://{host}:{port}'
+    service_url = service_url.rstrip('/')
+
+    timeout_val = mail_cfg.get('timeout', 10)
+    try:
+        timeout = float(timeout_val)
+    except Exception:
+        timeout = 10.0
+    if timeout <= 0:
+        timeout = 10.0
+
+    return {
+        'enabled': bool(mail_cfg.get('nexora_mail_enabled', False)),
+        'service_url': service_url,
+        'api_key': str(mail_cfg.get('api_key', '') or '').strip(),
+        'timeout': timeout,
+        'default_group': str(mail_cfg.get('default_group', 'default') or 'default').strip() or 'default',
+        'host': host,
+        'port': port
+    }
+
+
+def _nexora_mail_call(path, method='GET', payload=None, query=None):
+    """
+    调用 NexoraMail API，统一返回:
+    (ok: bool, status: int, data: dict)
+    """
+    cfg = _get_nexora_mail_config()
+    if not cfg.get('enabled'):
+        return False, 503, {'success': False, 'message': 'NexoraMail 未启用'}
+
+    q = ''
+    if query and isinstance(query, dict):
+        pairs = []
+        for k, v in query.items():
+            if v is None:
+                continue
+            pairs.append((k, str(v)))
+        if pairs:
+            q = '?' + urllib_parse.urlencode(pairs)
+    url = f"{cfg['service_url']}{path}{q}"
+
+    body = None
+    headers = {'Accept': 'application/json'}
+    if cfg.get('api_key'):
+        headers['X-API-Key'] = cfg['api_key']
+    if payload is not None:
+        headers['Content-Type'] = 'application/json; charset=utf-8'
+        body = json.dumps(payload, ensure_ascii=False).encode('utf-8')
+
+    req = urllib_request.Request(url, data=body, method=method.upper(), headers=headers)
+    try:
+        with urllib_request.urlopen(req, timeout=cfg['timeout']) as resp:
+            status = getattr(resp, 'status', 200) or 200
+            raw = resp.read().decode('utf-8', errors='replace')
+            if raw.strip():
+                try:
+                    data = json.loads(raw)
+                except Exception:
+                    data = {'success': 200 <= status < 300, 'raw': raw}
+            else:
+                data = {'success': 200 <= status < 300}
+            if 'success' not in data:
+                data['success'] = 200 <= status < 300
+            return 200 <= status < 300, status, data
+    except urllib_error.HTTPError as e:
+        status = getattr(e, 'code', 500) or 500
+        try:
+            raw = e.read().decode('utf-8', errors='replace')
+            data = json.loads(raw) if raw.strip() else {}
+        except Exception:
+            data = {}
+        if not isinstance(data, dict):
+            data = {}
+        if 'message' not in data:
+            data['message'] = f'NexoraMail HTTP {status}'
+        data['success'] = False
+        return False, status, data
+    except Exception as e:
+        return False, 502, {'success': False, 'message': f'NexoraMail 连接失败: {str(e)}'}
+
+
+def _get_nexora_mail_primary_domain(group_name):
+    """读取 NexoraMail 用户组的首个绑定域名（bindDomains[0]）"""
+    group = str(group_name or '').strip()
+    if not group:
+        return None
+    ok, _, data = _nexora_mail_call('/api/groups', method='GET')
+    if not ok or not isinstance(data, dict):
+        return None
+    groups = data.get('groups', [])
+    if not isinstance(groups, list):
+        return None
+    for item in groups:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get('group') or '').strip() != group:
+            continue
+        domains = item.get('domains', [])
+        if isinstance(domains, list):
+            for d in domains:
+                domain = str(d or '').strip()
+                if domain:
+                    return domain
+    return None
+
+
+def _build_mail_sender_address(mail_username, group, fallback_host):
+    """按规则生成发件地址：mail_username@bindDomains[0]，无可用域名时回退 fallback_host"""
+    local = str(mail_username or '').strip()
+    if '@' in local:
+        local = local.split('@', 1)[0].strip()
+    if not local:
+        return ''
+    primary_domain = _get_nexora_mail_primary_domain(group)
+    domain = str(primary_domain or fallback_host or 'localhost').strip() or 'localhost'
+    return f"{local}@{domain}"
+
+def load_models_config():
+    """读取 models.json，返回标准结构"""
+    if not os.path.exists(MODELS_PATH):
+        return {"models": {}, "providers": {}}
+    with open(MODELS_PATH, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+    if not isinstance(data, dict):
+        return {"models": {}, "providers": {}}
+    models = data.get("models", {})
+    providers = data.get("providers", {})
+    if not isinstance(models, dict):
+        models = {}
+    if not isinstance(providers, dict):
+        providers = {}
+    return {"models": models, "providers": providers}
+
+
+def save_models_config(models_cfg):
+    """保存 models.json"""
+    payload = {
+        "models": models_cfg.get("models", {}),
+        "providers": models_cfg.get("providers", {})
+    }
+    with open(MODELS_PATH, 'w', encoding='utf-8') as f:
+        json.dump(payload, f, indent=4, ensure_ascii=False)
 
 def get_chroma_store():
     """Get Chroma store if enabled."""
@@ -147,8 +423,7 @@ def login():
     
     try:
         # 验证用户
-        with open('./data/user.json', 'r', encoding='utf-8') as f:
-            users = json.load(f)
+        users = load_users()
         
         if username not in users:
             return jsonify({'success': False, 'message': '用户不存在'})
@@ -158,8 +433,8 @@ def login():
         
         # 更新登录IP
         users[username]['last_ip'] = request.remote_addr
-        with open('./data/user.json', 'w', encoding='utf-8') as f:
-            json.dump(users, f, indent=4, ensure_ascii=False)
+        users[username]['last_login'] = int(time.time())
+        save_users(users)
             
         # 登录成功
         session['username'] = username
@@ -211,23 +486,441 @@ def get_user_info():
     if not username:
         return jsonify({'success': False, 'message': '未登录'}), 401
     
-    # 实时从数据库/文件读取角色，确保权限更改实时生效
-    role = 'member'
     try:
-        with open('./data/user.json', 'r', encoding='utf-8') as f:
-            users = json.load(f)
-            if username in users:
-                role = users[username].get('role', 'member')
-                # 同时更新 session 以保持同步
-                session['role'] = role
+        users = load_users()
+            
+        if username not in users:
+            return jsonify({'success': False, 'message': '用户不存在'}), 404
+            
+        user_data = users[username]
+        display_name = user_data.get('display_name', username)
+        
+        # 获取用户统计信息
+        user_path = user_data.get('path', f'./data/users/{username}/')
+        stats = get_user_stats(username, user_path)
+        
+        return jsonify({
+            'success': True,
+            'user': {
+                'id': username,
+                'username': display_name,
+                'role': user_data.get('role', 'member'),
+                'created_at': user_data.get('created_at'),  # 如果有创建时间
+                'last_login': user_data.get('last_login'),  # 如果有最后登录时间
+                'total_tokens': user_data.get('token_usage', 0),
+                'avatar_url': build_user_avatar_url(username, user_data),
+                'local_mail': get_local_mail_profile(user_data),
+                'stats': stats
+            }
+        })
     except Exception as e:
         print(f"Error reading user info: {e}")
-        
+        return jsonify({'success': False, 'message': '获取用户信息失败'}), 500
+
+
+@app.route('/api/user/profile/update', methods=['POST'])
+@require_login
+def update_user_profile():
+    """更新当前用户资料（显示名、头像）"""
+    user_id = session.get('username')
+    data = request.get_json() or {}
+    new_name = (data.get('display_name') or '').strip()
+    avatar_base64 = data.get('avatar_base64')
+
+    if not new_name:
+        return jsonify({'success': False, 'message': '用户名不能为空'}), 400
+    if len(new_name) > 32:
+        return jsonify({'success': False, 'message': '用户名长度不能超过 32'}), 400
+
+    try:
+        users = load_users()
+        if user_id not in users:
+            return jsonify({'success': False, 'message': '用户不存在'}), 404
+
+        users[user_id]['display_name'] = new_name
+
+        if avatar_base64:
+            if not isinstance(avatar_base64, str) or ',' not in avatar_base64:
+                return jsonify({'success': False, 'message': '头像数据格式错误'}), 400
+            _, b64_data = avatar_base64.split(',', 1)
+            try:
+                raw = base64.b64decode(b64_data, validate=True)
+            except (binascii.Error, ValueError):
+                return jsonify({'success': False, 'message': '头像解码失败'}), 400
+            if len(raw) > 6 * 1024 * 1024:
+                return jsonify({'success': False, 'message': '头像过大，最大 6MB'}), 400
+            profile_dir = os.path.dirname(get_user_avatar_file(user_id))
+            os.makedirs(profile_dir, exist_ok=True)
+            with open(get_user_avatar_file(user_id), 'wb') as f:
+                f.write(raw)
+            users[user_id]['avatar_updated_at'] = int(time.time())
+
+        save_users(users)
+        return jsonify({
+            'success': True,
+            'message': '资料已更新',
+            'user': {
+                'id': user_id,
+                'username': users[user_id].get('display_name', user_id),
+                'avatar_url': build_user_avatar_url(user_id, users[user_id])
+            }
+        })
+    except Exception as e:
+        print(f"Error updating user profile: {e}")
+        return jsonify({'success': False, 'message': '更新失败'}), 500
+
+
+@app.route('/api/user/local-mail', methods=['GET'])
+@require_login
+def get_current_user_local_mail():
+    """获取当前用户绑定的本地邮箱信息"""
+    user_id = session.get('username')
+    users = load_users()
+    if user_id not in users:
+        return jsonify({'success': False, 'message': '用户不存在'}), 404
+    return jsonify({'success': True, 'local_mail': get_local_mail_profile(users[user_id])})
+
+
+def _resolve_current_user_mail_binding():
+    """解析当前用户的本地邮箱绑定"""
+    user_id = session.get('username')
+    if not user_id:
+        return None, ('未登录', 401)
+    users = load_users()
+    if user_id not in users:
+        return None, ('用户不存在', 404)
+
+    cfg = _get_nexora_mail_config()
+    if not cfg.get('enabled'):
+        return None, ('NexoraMail 未启用', 503)
+
+    local_mail = get_local_mail_profile(users[user_id])
+    mail_username = str(local_mail.get('username') or '').strip()
+    if not mail_username:
+        return None, ('当前用户未绑定邮箱账户', 400)
+
+    group = str(local_mail.get('group') or cfg.get('default_group') or 'default').strip() or 'default'
+    return {
+        'user_id': user_id,
+        'group': group,
+        'mail_username': mail_username,
+        'local_mail': local_mail
+    }, None
+
+
+@app.route('/api/mail/me/status', methods=['GET'])
+@require_login
+def mail_me_status():
+    """当前用户邮件绑定状态"""
+    cfg = _get_nexora_mail_config()
+    user_id = session.get('username')
+    users = load_users()
+    local_mail = get_local_mail_profile(users.get(user_id, {}))
+    linked = bool(local_mail.get('username'))
+    sender_address = ''
+    if linked:
+        host = str(cfg.get('host') or 'localhost').strip() or 'localhost'
+        group = str(local_mail.get('group') or cfg.get('default_group') or 'default').strip() or 'default'
+        sender_address = _build_mail_sender_address(local_mail.get('username'), group, host)
+    if not cfg.get('enabled'):
+        return jsonify({
+            'success': True,
+            'enabled': False,
+            'linked': linked,
+            'local_mail': local_mail,
+            'sender_address': sender_address,
+            'message': 'NexoraMail 未启用'
+        })
+
+    health_ok, health_status, health_data = _nexora_mail_call('/api/health', method='GET')
     return jsonify({
         'success': True,
-        'username': username,
-        'role': role
+        'enabled': True,
+        'linked': linked,
+        'local_mail': local_mail,
+        'sender_address': sender_address,
+        'connected': bool(health_ok),
+        'upstream_status': health_status,
+        'upstream': health_data
     })
+
+
+@app.route('/api/mail/me/inbox', methods=['GET'])
+@require_login
+def mail_me_inbox():
+    """当前用户收件箱列表"""
+    binding, err = _resolve_current_user_mail_binding()
+    if err:
+        return jsonify({'success': False, 'message': err[0]}), err[1]
+
+    q = (request.args.get('q') or '').strip()
+    offset = max(int(request.args.get('offset', 0) or 0), 0)
+    limit = min(max(int(request.args.get('limit', 50) or 50), 1), 200)
+    path = f"/api/mailboxes/{urllib_parse.quote(binding['group'])}/{urllib_parse.quote(binding['mail_username'])}/mails"
+    ok, status, data = _nexora_mail_call(path, method='GET', query={'q': q, 'offset': offset, 'limit': limit})
+    if not ok:
+        return jsonify({'success': False, 'message': data.get('message', '读取收件箱失败'), 'upstream': data}), status
+
+    return jsonify({
+        'success': True,
+        'group': binding['group'],
+        'mail_username': binding['mail_username'],
+        'local_mail': binding['local_mail'],
+        'total': data.get('total', 0),
+        'unread_total': data.get('unread_total', 0),
+        'offset': data.get('offset', offset),
+        'limit': data.get('limit', limit),
+        'mails': data.get('mails', [])
+    })
+
+
+@app.route('/api/mail/me/inbox/<mail_id>', methods=['GET'])
+@require_login
+def mail_me_inbox_item(mail_id):
+    """当前用户读取单封邮件详情"""
+    binding, err = _resolve_current_user_mail_binding()
+    if err:
+        return jsonify({'success': False, 'message': err[0]}), err[1]
+
+    path = f"/api/mailboxes/{urllib_parse.quote(binding['group'])}/{urllib_parse.quote(binding['mail_username'])}/mails/{urllib_parse.quote(str(mail_id))}"
+    ok, status, data = _nexora_mail_call(path, method='GET')
+    if not ok:
+        return jsonify({'success': False, 'message': data.get('message', '读取邮件失败'), 'upstream': data}), status
+    return jsonify({
+        'success': True,
+        'group': binding['group'],
+        'mail_username': binding['mail_username'],
+        'mail': data.get('mail', {})
+    })
+
+
+@app.route('/api/mail/me/inbox/<mail_id>/read', methods=['PATCH'])
+@require_login
+def mail_me_mark_read(mail_id):
+    """当前用户更新邮件已读状态"""
+    binding, err = _resolve_current_user_mail_binding()
+    if err:
+        return jsonify({'success': False, 'message': err[0]}), err[1]
+
+    payload = request.get_json(silent=True) or {}
+    raw_value = payload.get('is_read', payload.get('read', True))
+    if isinstance(raw_value, bool):
+        is_read = raw_value
+    elif isinstance(raw_value, str):
+        is_read = raw_value.strip().lower() in ('1', 'true', 'yes', 'y', 'on')
+    elif isinstance(raw_value, (int, float)):
+        is_read = bool(raw_value)
+    else:
+        is_read = bool(raw_value)
+
+    path = f"/api/mailboxes/{urllib_parse.quote(binding['group'])}/{urllib_parse.quote(binding['mail_username'])}/mails/{urllib_parse.quote(str(mail_id))}/read"
+    ok, status, data = _nexora_mail_call(path, method='PATCH', payload={'is_read': bool(is_read)})
+    if not ok:
+        return jsonify({'success': False, 'message': data.get('message', '更新邮件状态失败'), 'upstream': data}), status
+
+    return jsonify({
+        'success': True,
+        'id': str(mail_id),
+        'is_read': bool(data.get('is_read', is_read)),
+        'mail': data.get('mail', {})
+    })
+
+
+@app.route('/api/mail/me/inbox/<mail_id>', methods=['DELETE'])
+@require_login
+def mail_me_delete(mail_id):
+    """当前用户删除单封邮件"""
+    binding, err = _resolve_current_user_mail_binding()
+    if err:
+        return jsonify({'success': False, 'message': err[0]}), err[1]
+
+    path = f"/api/mailboxes/{urllib_parse.quote(binding['group'])}/{urllib_parse.quote(binding['mail_username'])}/mails/{urllib_parse.quote(str(mail_id))}"
+    ok, status, data = _nexora_mail_call(path, method='DELETE')
+    if not ok:
+        return jsonify({'success': False, 'message': data.get('message', '删除邮件失败'), 'upstream': data}), status
+    return jsonify({'success': True, 'id': mail_id})
+
+
+@app.route('/api/mail/me/send', methods=['POST'])
+@require_login
+def mail_me_send():
+    """当前用户发送邮件"""
+    binding, err = _resolve_current_user_mail_binding()
+    if err:
+        return jsonify({'success': False, 'message': err[0]}), err[1]
+
+    payload = request.get_json() or {}
+    recipient = (payload.get('recipient') or payload.get('to') or '').strip()
+    subject = (payload.get('subject') or '').strip() or '(No Subject)'
+    content = payload.get('content')
+    is_html = bool(payload.get('is_html', False))
+
+    if not recipient:
+        return jsonify({'success': False, 'message': '收件人不能为空'}), 400
+    if content is None:
+        content = ''
+    content = str(content)
+    if not content.strip():
+        return jsonify({'success': False, 'message': '邮件内容不能为空'}), 400
+
+    cfg = _get_nexora_mail_config()
+    fallback_domain = str(cfg.get('host') or 'localhost').strip() or 'localhost'
+    sender = _build_mail_sender_address(binding['mail_username'], binding['group'], fallback_domain)
+    if not sender:
+        return jsonify({'success': False, 'message': '发件地址生成失败'}), 500
+
+    send_body = {
+        'group': binding['group'],
+        'sender': sender,
+        'recipient': recipient,
+        'subject': subject
+    }
+
+    if is_html:
+        send_body['raw'] = (
+            f"From: <{sender}>\r\n"
+            f"To: <{recipient}>\r\n"
+            f"Subject: {subject}\r\n"
+            "MIME-Version: 1.0\r\n"
+            "Content-Type: text/html; charset=\"UTF-8\"\r\n"
+            "\r\n"
+            f"{content}\r\n"
+        )
+    else:
+        send_body['content'] = content
+
+    ok, status, data = _nexora_mail_call('/api/send', method='POST', payload=send_body)
+    if not ok:
+        return jsonify({'success': False, 'message': data.get('message', '发送失败'), 'upstream': data}), status
+
+    return jsonify({
+        'success': True,
+        'group': binding['group'],
+        'mail_username': binding['mail_username'],
+        'sender': sender,
+        'recipient': recipient
+    })
+
+
+@app.route('/api/user/avatar/<user_id>', methods=['GET'])
+@require_login
+def get_user_avatar(user_id):
+    """读取头像（仅本人或管理员）"""
+    if session.get('username') != user_id and session.get('role') != 'admin':
+        return jsonify({'success': False, 'message': '无权限'}), 403
+    avatar_file = get_user_avatar_file(user_id)
+    if not os.path.exists(avatar_file):
+        return jsonify({'success': False, 'message': '头像不存在'}), 404
+    return send_file(avatar_file, mimetype='image/png')
+
+
+def get_user_stats(username, user_path):
+    """获取用户统计信息"""
+    stats = {
+        'total_conversations': 0,
+        'total_tokens': 0,
+        'total_knowledge': 0,
+        'model_usage': {}
+    }
+    
+    try:
+        # 计算对话数量
+        conversations_path = os.path.join(user_path, 'conversations')
+        if os.path.exists(conversations_path):
+            conversation_files = [f for f in os.listdir(conversations_path) if f.endswith('.json')]
+            stats['total_conversations'] = len(conversation_files)
+        
+        # 计算知识点数量
+        knowledge_path = os.path.join(user_path, 'database')
+        if os.path.exists(knowledge_path):
+            knowledge_files = [f for f in os.listdir(knowledge_path) if f.endswith('.json')]
+            stats['total_knowledge'] = len(knowledge_files)
+        
+        # 从token_usage.json获取统计信息
+        token_usage_path = os.path.join(user_path, 'token_usage.json')
+        if os.path.exists(token_usage_path):
+            with open(token_usage_path, 'r', encoding='utf-8') as f:
+                token_records = json.load(f)
+                
+            total_tokens = 0
+            model_usage = {}
+            
+            for record in token_records:
+                total_tokens += record.get('total_tokens', 0)
+                
+                # 统计模型使用情况（这里简化处理，实际可能需要从对话记录中提取）
+                # 暂时用action字段作为模型标识
+                action = record.get('action', 'unknown')
+                if action not in model_usage:
+                    model_usage[action] = 0
+                model_usage[action] += 1
+            
+            stats['total_tokens'] = total_tokens
+            stats['model_usage'] = model_usage
+            
+    except Exception as e:
+        print(f"Error getting user stats for {username}: {e}")
+    
+    return stats
+
+
+@app.route('/api/user/stats', methods=['GET'])
+def get_user_stats_api():
+    """获取当前用户的统计信息"""
+    username = session.get('username')
+    if not username:
+        return jsonify({'success': False, 'message': '未登录'}), 401
+    
+    try:
+        users = load_users()
+            
+        if username not in users:
+            return jsonify({'success': False, 'message': '用户不存在'}), 404
+            
+        user_data = users[username]
+        user_path = user_data.get('path', f'./data/users/{username}/')
+        stats = get_user_stats(username, user_path)
+        
+        return jsonify({
+            'success': True,
+            'stats': stats
+        })
+    except Exception as e:
+        print(f"Error getting user stats: {e}")
+        return jsonify({'success': False, 'message': '获取统计信息失败'}), 500
+
+
+@app.route('/api/user/preferences', methods=['GET'])
+def get_user_preferences():
+    """获取当前用户的偏好设置"""
+    username = session.get('username')
+    if not username:
+        return jsonify({'success': False, 'message': '未登录'}), 401
+    
+    try:
+        # 暂时返回默认偏好设置，后续可以从用户配置文件读取
+        preferences = {
+            'default_model': 'auto',  # 默认模型
+            'theme': 'dark',  # 主题
+            'streaming': True,  # 是否流式输出
+            'language': 'zh'  # 语言
+        }
+        
+        # 尝试从用户配置文件读取偏好设置
+        user_path = f'./data/users/{username}/'
+        prefs_file = os.path.join(user_path, 'preferences.json')
+        if os.path.exists(prefs_file):
+            with open(prefs_file, 'r', encoding='utf-8') as f:
+                user_prefs = json.load(f)
+                preferences.update(user_prefs)
+        
+        return jsonify({
+            'success': True,
+            'preferences': preferences
+        })
+    except Exception as e:
+        print(f"Error getting user preferences: {e}")
+        return jsonify({'success': False, 'message': '获取偏好设置失败'}), 500
 
 
 # ==================== 管理后台 API ====================
@@ -237,32 +930,38 @@ def get_user_info():
 def admin_get_users():
     """获取所有用户信息"""
     try:
-        with open('./data/user.json', 'r', encoding='utf-8') as f:
-            users = json.load(f)
+        users = load_users()
         
         user_list = []
-        for uname, info in users.items():
+        for user_id, info in users.items():
             # 计算总 token 消耗 (从 token_usage.json 读取)
             total_tokens = 0
-            # 这里我们简化一下，假设存在一个全局或用户目录下的 token_usage.json
-            user_token_file = os.path.join(os.path.dirname(__file__), f"data/users/{uname}/token_usage.json")
+            user_token_file = os.path.join(os.path.dirname(__file__), f"data/users/{user_id}/token_usage.json")
             if os.path.exists(user_token_file):
                 try:
                     with open(user_token_file, 'r', encoding='utf-8') as tf:
                         tokens = json.load(tf)
                         for log in tokens:
-                            total_tokens += log.get('input_tokens', 0) + log.get('output_tokens', 0)
+                            t = log.get('total_tokens', None)
+                            if t is None:
+                                t = log.get('input_tokens', 0) + log.get('output_tokens', 0)
+                            total_tokens += int(t or 0)
                 except:
                     pass
             
             user_list.append({
-                'username': uname,
+                'user_id': user_id,
+                'username': info.get('display_name', user_id),
                 'password': info.get('password'), # 管理员可见密码，符合用户要求
                 'role': info.get('role', 'member'),
                 'last_ip': info.get('last_ip', '未知'),
-                'total_token_usage': total_tokens
+                'last_login': info.get('last_login'),
+                'created_at': info.get('created_at'),
+                'total_token_usage': total_tokens,
+                'avatar_url': build_user_avatar_url(user_id, info),
+                'local_mail': get_local_mail_profile(info)
             })
-            
+        user_list.sort(key=lambda x: (x['role'] != 'admin', x['user_id']))
         return jsonify({'success': True, 'users': user_list})
     except Exception as e:
         return jsonify({'success': False, 'message': str(e)})
@@ -273,16 +972,16 @@ def admin_get_users():
 def admin_add_user():
     """添加用户"""
     data = request.get_json()
-    username = data.get('username')
+    username = (data.get('username') or '').strip()
     password = data.get('password')
+    display_name = (data.get('display_name') or '').strip()
     role = data.get('role', 'member')
     
     if not username or not password:
         return jsonify({'success': False, 'message': '用户名和密码不能为空'})
         
     try:
-        with open('./data/user.json', 'r', encoding='utf-8') as f:
-            users = json.load(f)
+        users = load_users()
             
         if username in users:
             return jsonify({'success': False, 'message': '用户已存在'})
@@ -312,14 +1011,21 @@ def admin_add_user():
         
         users[username] = {
             "username": username,
+            "display_name": display_name or username,
             "password": password,
             "path": user_path,
             "role": role,
-            "last_ip": "从未登录"
+            "last_ip": "从未登录",
+            "created_at": int(time.time()),
+            "local_mail": {
+                "provider": "nexoramail",
+                "group": "default",
+                "username": "",
+                "address": "",
+                "linked_at": None
+            }
         }
-        
-        with open('./data/user.json', 'w', encoding='utf-8') as f:
-            json.dump(users, f, indent=4, ensure_ascii=False)
+        save_users(users)
             
         return jsonify({'success': True, 'message': '用户添加成功'})
     except Exception as e:
@@ -331,22 +1037,20 @@ def admin_add_user():
 def admin_delete_user():
     """删除用户"""
     data = request.get_json()
-    username = data.get('target_username')
+    username = data.get('target_user_id') or data.get('target_username')
     
     if username == session['username']:
         return jsonify({'success': False, 'message': '不能删除自己'})
         
     try:
-        with open('./data/user.json', 'r', encoding='utf-8') as f:
-            users = json.load(f)
+        users = load_users()
             
         if username not in users:
             return jsonify({'success': False, 'message': '用户不存在'})
             
         del users[username]
         
-        with open('./data/user.json', 'w', encoding='utf-8') as f:
-            json.dump(users, f, indent=4, ensure_ascii=False)
+        save_users(users)
             
         # 注意：此处不主动删除磁盘文件，以防操作失误（数据无价）
         return jsonify({'success': True, 'message': '用户账号已注销'})
@@ -359,7 +1063,7 @@ def admin_delete_user():
 def admin_set_role():
     """修改用户权限"""
     data = request.get_json()
-    username = data.get('username') or data.get('target_username')
+    username = data.get('user_id') or data.get('username') or data.get('target_username')
     new_role = data.get('role') # 'admin' or 'member'
     
     if not username or not new_role:
@@ -369,16 +1073,14 @@ def admin_set_role():
         return jsonify({'success': False, 'message': '管理员不能修改自己的权限'})
         
     try:
-        with open('./data/user.json', 'r', encoding='utf-8') as f:
-            users = json.load(f)
+        users = load_users()
             
         if username not in users:
             return jsonify({'success': False, 'message': '用户不存在'})
             
         users[username]['role'] = new_role
         
-        with open('./data/user.json', 'w', encoding='utf-8') as f:
-            json.dump(users, f, indent=4, ensure_ascii=False)
+        save_users(users)
             
         return jsonify({'success': True, 'message': f'用户 {username} 已设为 {new_role}'})
     except Exception as e:
@@ -389,27 +1091,249 @@ def admin_set_role():
 def admin_set_password():
     """修改用户密码"""
     data = request.get_json()
-    username = data.get('target_username')
+    username = data.get('target_user_id') or data.get('target_username')
     new_password = data.get('password')
     
     if not username or not new_password:
         return jsonify({'success': False, 'message': '参数不完整'})
         
     try:
-        with open('./data/user.json', 'r', encoding='utf-8') as f:
-            users = json.load(f)
+        users = load_users()
             
         if username not in users:
             return jsonify({'success': False, 'message': '用户不存在'})
             
         users[username]['password'] = new_password
         
-        with open('./data/user.json', 'w', encoding='utf-8') as f:
-            json.dump(users, f, indent=4, ensure_ascii=False)
+        save_users(users)
             
         return jsonify({'success': True, 'message': '密码重置成功'})
     except Exception as e:
         return jsonify({'success': False, 'message': str(e)})
+
+
+@app.route('/api/admin/nexora-mail/status', methods=['GET'])
+@require_admin
+def admin_nexora_mail_status():
+    """查询 NexoraMail 连接状态及基础配置"""
+    cfg = _get_nexora_mail_config()
+    ok, status, data = _nexora_mail_call('/api/health', method='GET')
+    return jsonify({
+        'success': True,
+        'enabled': cfg.get('enabled', False),
+        'service_url': cfg.get('service_url'),
+        'default_group': cfg.get('default_group', 'default'),
+        'connected': bool(ok),
+        'upstream_status': status,
+        'upstream': data
+    })
+
+
+@app.route('/api/admin/nexora-mail/groups', methods=['GET'])
+@require_admin
+def admin_nexora_mail_groups():
+    """读取 NexoraMail 用户组列表"""
+    ok, status, data = _nexora_mail_call('/api/groups', method='GET')
+    if not ok:
+        return jsonify({'success': False, 'message': data.get('message', '读取组列表失败'), 'upstream': data}), status
+    return jsonify({'success': True, 'groups': data.get('groups', [])})
+
+
+@app.route('/api/admin/nexora-mail/users', methods=['GET'])
+@require_admin
+def admin_nexora_mail_users():
+    """读取 NexoraMail 用户列表"""
+    cfg = _get_nexora_mail_config()
+    group = (request.args.get('group') or cfg.get('default_group') or 'default').strip() or 'default'
+    ok, status, data = _nexora_mail_call('/api/users', method='GET', query={'group': group})
+    if not ok:
+        return jsonify({'success': False, 'message': data.get('message', '读取邮箱用户失败'), 'upstream': data}), status
+    return jsonify({
+        'success': True,
+        'group': data.get('group', group),
+        'users': data.get('users', [])
+    })
+
+
+@app.route('/api/admin/nexora-mail/users', methods=['POST'])
+@require_admin
+def admin_nexora_mail_create_user():
+    """创建 NexoraMail 用户，可选自动绑定到 Nexora 用户"""
+    payload = request.get_json() or {}
+    cfg = _get_nexora_mail_config()
+    group = (payload.get('group') or cfg.get('default_group') or 'default').strip() or 'default'
+    mail_username = (payload.get('mail_username') or payload.get('username') or '').strip()
+    password = str(payload.get('password') or '')
+    permissions = payload.get('permissions')
+    bind_user_id = (payload.get('bind_user_id') or '').strip()
+    domain = str(payload.get('domain') or '').strip()
+
+    if not mail_username or not password:
+        return jsonify({'success': False, 'message': 'mail_username 和 password 不能为空'}), 400
+
+    body = {
+        'group': group,
+        'username': mail_username,
+        'password': password
+    }
+    if isinstance(permissions, list):
+        body['permissions'] = permissions
+
+    ok, status, data = _nexora_mail_call('/api/users', method='POST', payload=body)
+    if not ok:
+        return jsonify({'success': False, 'message': data.get('message', '创建邮箱用户失败'), 'upstream': data}), status
+
+    bind_result = None
+    if bind_user_id:
+        users = load_users()
+        if bind_user_id not in users:
+            return jsonify({
+                'success': False,
+                'message': f'邮箱用户已创建，但绑定失败：Nexora 用户 {bind_user_id} 不存在',
+                'mail_user': data
+            }), 404
+        address = mail_username if '@' in mail_username else (f'{mail_username}@{domain}' if domain else '')
+        users[bind_user_id]['local_mail'] = {
+            'provider': 'nexoramail',
+            'group': group,
+            'username': mail_username,
+            'address': address,
+            'linked_at': int(time.time())
+        }
+        save_users(users)
+        bind_result = {
+            'user_id': bind_user_id,
+            'local_mail': users[bind_user_id]['local_mail']
+        }
+
+    return jsonify({
+        'success': True,
+        'mail_user': data,
+        'bind': bind_result
+    })
+
+
+@app.route('/api/admin/nexora-mail/bind', methods=['POST'])
+@require_admin
+def admin_nexora_mail_bind():
+    """将 Nexora 用户绑定到指定本地邮箱账号"""
+    payload = request.get_json() or {}
+    user_id = (payload.get('user_id') or payload.get('target_user_id') or '').strip()
+    group = (payload.get('group') or _get_nexora_mail_config().get('default_group') or 'default').strip() or 'default'
+    mail_username = (payload.get('mail_username') or payload.get('username') or '').strip()
+    domain = str(payload.get('domain') or '').strip()
+
+    if not user_id or not mail_username:
+        return jsonify({'success': False, 'message': 'user_id 和 mail_username 不能为空'}), 400
+
+    users = load_users()
+    if user_id not in users:
+        return jsonify({'success': False, 'message': 'Nexora 用户不存在'}), 404
+
+    # 绑定前先验证邮箱用户存在
+    ok, status, data = _nexora_mail_call(f"/api/users/{urllib_parse.quote(group)}/{urllib_parse.quote(mail_username)}", method='GET')
+    if not ok:
+        return jsonify({'success': False, 'message': data.get('message', '邮箱用户不存在或不可访问'), 'upstream': data}), status
+
+    address = mail_username if '@' in mail_username else (f'{mail_username}@{domain}' if domain else '')
+    users[user_id]['local_mail'] = {
+        'provider': 'nexoramail',
+        'group': group,
+        'username': mail_username,
+        'address': address,
+        'linked_at': int(time.time())
+    }
+    save_users(users)
+
+    return jsonify({
+        'success': True,
+        'user_id': user_id,
+        'local_mail': users[user_id]['local_mail']
+    })
+
+
+@app.route('/api/admin/nexora-mail/unbind', methods=['POST'])
+@require_admin
+def admin_nexora_mail_unbind():
+    """解绑 Nexora 用户的本地邮箱"""
+    payload = request.get_json() or {}
+    user_id = (payload.get('user_id') or payload.get('target_user_id') or '').strip()
+    if not user_id:
+        return jsonify({'success': False, 'message': 'user_id 不能为空'}), 400
+
+    users = load_users()
+    if user_id not in users:
+        return jsonify({'success': False, 'message': 'Nexora 用户不存在'}), 404
+
+    users[user_id]['local_mail'] = {
+        'provider': 'nexoramail',
+        'group': 'default',
+        'username': '',
+        'address': '',
+        'linked_at': None
+    }
+    save_users(users)
+    return jsonify({'success': True, 'user_id': user_id, 'local_mail': users[user_id]['local_mail']})
+
+
+@app.route('/api/admin/nexora-mail/users/password', methods=['POST'])
+@require_admin
+def admin_nexora_mail_set_password():
+    """重置 NexoraMail 用户密码"""
+    payload = request.get_json() or {}
+    cfg = _get_nexora_mail_config()
+    group = (payload.get('group') or cfg.get('default_group') or 'default').strip() or 'default'
+    mail_username = (payload.get('mail_username') or payload.get('username') or '').strip()
+    password = str(payload.get('password') or '')
+    if not mail_username or not password:
+        return jsonify({'success': False, 'message': 'mail_username 和 password 不能为空'}), 400
+
+    ok, status, data = _nexora_mail_call(
+        f"/api/users/{urllib_parse.quote(group)}/{urllib_parse.quote(mail_username)}",
+        method='PATCH',
+        payload={'password': password}
+    )
+    if not ok:
+        return jsonify({'success': False, 'message': data.get('message', '重置邮箱密码失败'), 'upstream': data}), status
+    return jsonify({'success': True, 'group': group, 'mail_username': mail_username})
+
+
+@app.route('/api/admin/nexora-mail/users/delete', methods=['POST'])
+@require_admin
+def admin_nexora_mail_delete_user():
+    """删除 NexoraMail 用户"""
+    payload = request.get_json() or {}
+    cfg = _get_nexora_mail_config()
+    group = (payload.get('group') or cfg.get('default_group') or 'default').strip() or 'default'
+    mail_username = (payload.get('mail_username') or payload.get('username') or '').strip()
+    if not mail_username:
+        return jsonify({'success': False, 'message': 'mail_username 不能为空'}), 400
+
+    ok, status, data = _nexora_mail_call(
+        f"/api/users/{urllib_parse.quote(group)}/{urllib_parse.quote(mail_username)}",
+        method='DELETE'
+    )
+    if not ok:
+        return jsonify({'success': False, 'message': data.get('message', '删除邮箱用户失败'), 'upstream': data}), status
+
+    # 删除邮箱用户后，清理已绑定该邮箱的 Nexora 用户记录
+    users = load_users()
+    changed = False
+    for uid, uinfo in users.items():
+        lm = get_local_mail_profile(uinfo)
+        if lm.get('group') == group and lm.get('username') == mail_username:
+            users[uid]['local_mail'] = {
+                'provider': 'nexoramail',
+                'group': 'default',
+                'username': '',
+                'address': '',
+                'linked_at': None
+            }
+            changed = True
+    if changed:
+        save_users(users)
+
+    return jsonify({'success': True, 'group': group, 'mail_username': mail_username, 'unbind_synced': changed})
 
 
 @app.route('/api/admin/tokens/stats', methods=['GET'])
@@ -426,7 +1350,10 @@ def admin_token_stats():
                     with open(token_file, 'r', encoding='utf-8') as f:
                         logs = json.load(f)
                         for log in logs:
-                            total_tokens += log.get('input_tokens', 0) + log.get('output_tokens', 0)
+                            t = log.get('total_tokens', None)
+                            if t is None:
+                                t = log.get('input_tokens', 0) + log.get('output_tokens', 0)
+                            total_tokens += int(t or 0)
                 except:
                     pass
         return jsonify({'success': True, 'total': total_tokens})
@@ -572,7 +1499,10 @@ def chat():
     """聊天页面"""
     if 'username' not in session:
         return redirect(url_for('login'))
-    return render_template('chat.html', username=session['username'])
+    cfg = get_config_all()
+    mail_cfg = cfg.get('nexora_mail', {}) if isinstance(cfg, dict) else {}
+    mail_enabled = bool(mail_cfg.get('nexora_mail_enabled', False))
+    return render_template('chat.html', username=session['username'], nexora_mail_enabled=mail_enabled)
 
 
 @app.route('/api/upload', methods=['POST'])
@@ -834,6 +1764,263 @@ def admin_update_user_models():
     return jsonify({'success': False, 'message': '配置加载失败'})
 
 
+@app.route('/api/admin/models/config', methods=['GET'])
+@require_admin
+def admin_get_models_config():
+    """管理员读取模型/Provider配置"""
+    try:
+        cfg = load_models_config()
+        return jsonify({
+            'success': True,
+            'models': cfg.get('models', {}),
+            'providers': cfg.get('providers', {})
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)})
+
+
+@app.route('/api/admin/tokens/timeseries', methods=['GET'])
+@require_admin
+def admin_token_timeseries():
+    """返回管理端 token 按天趋势，用于折线图展示"""
+    try:
+        days = int(request.args.get('days', 30) or 30)
+    except Exception:
+        days = 30
+    days = max(1, min(days, 365))
+
+    today = datetime.now().date()
+    labels = []
+    buckets = {}
+    for i in range(days - 1, -1, -1):
+        d = today - timedelta(days=i)
+        key = d.strftime('%Y-%m-%d')
+        labels.append(key)
+        buckets[key] = {
+            'input_tokens': 0,
+            'output_tokens': 0,
+            'total_tokens': 0,
+            'requests': 0
+        }
+
+    provider_totals = {}
+    model_totals = {}
+    user_dir = os.path.join(os.path.dirname(__file__), "data/users")
+    if os.path.exists(user_dir):
+        for username in os.listdir(user_dir):
+            token_file = os.path.join(user_dir, username, "token_usage.json")
+            if not os.path.exists(token_file):
+                continue
+            try:
+                with open(token_file, 'r', encoding='utf-8') as f:
+                    logs = json.load(f)
+            except Exception:
+                continue
+
+            for log in logs:
+                ts = str(log.get('timestamp', ''))
+                day = ts[:10]
+                if day not in buckets:
+                    continue
+
+                in_tokens = int(log.get('input_tokens', 0) or 0)
+                out_tokens = int(log.get('output_tokens', 0) or 0)
+                total = log.get('total_tokens', None)
+                if total is None:
+                    total = in_tokens + out_tokens
+                total = int(total or 0)
+
+                buckets[day]['input_tokens'] += in_tokens
+                buckets[day]['output_tokens'] += out_tokens
+                buckets[day]['total_tokens'] += total
+                buckets[day]['requests'] += 1
+
+                provider = (log.get('provider') or 'unknown').strip() or 'unknown'
+                model = (log.get('model') or 'unknown').strip() or 'unknown'
+                if provider not in provider_totals:
+                    provider_totals[provider] = {'tokens': 0, 'requests': 0}
+                if model not in model_totals:
+                    model_totals[model] = {'tokens': 0, 'requests': 0}
+                provider_totals[provider]['tokens'] += total
+                provider_totals[provider]['requests'] += 1
+                model_totals[model]['tokens'] += total
+                model_totals[model]['requests'] += 1
+
+    series = {
+        'input_tokens': [buckets[d]['input_tokens'] for d in labels],
+        'output_tokens': [buckets[d]['output_tokens'] for d in labels],
+        'total_tokens': [buckets[d]['total_tokens'] for d in labels],
+        'requests': [buckets[d]['requests'] for d in labels],
+    }
+
+    top_providers = sorted(
+        [{'name': k, 'tokens': v['tokens'], 'requests': v['requests']} for k, v in provider_totals.items()],
+        key=lambda x: x['tokens'],
+        reverse=True
+    )[:8]
+    top_models = sorted(
+        [{'name': k, 'tokens': v['tokens'], 'requests': v['requests']} for k, v in model_totals.items()],
+        key=lambda x: x['tokens'],
+        reverse=True
+    )[:10]
+
+    return jsonify({
+        'success': True,
+        'days': days,
+        'labels': labels,
+        'series': series,
+        'top_providers': top_providers,
+        'top_models': top_models
+    })
+
+
+@app.route('/api/admin/user/profile', methods=['POST'])
+@require_admin
+def admin_update_user_profile():
+    """管理员更新用户资料（显示名）"""
+    data = request.get_json() or {}
+    user_id = data.get('user_id') or data.get('target_user_id') or data.get('target_username')
+    display_name = (data.get('display_name') or '').strip()
+    if not user_id:
+        return jsonify({'success': False, 'message': '缺少用户ID'}), 400
+    if not display_name:
+        return jsonify({'success': False, 'message': '用户名不能为空'}), 400
+    if len(display_name) > 32:
+        return jsonify({'success': False, 'message': '用户名长度不能超过 32'}), 400
+    try:
+        users = load_users()
+        if user_id not in users:
+            return jsonify({'success': False, 'message': '用户不存在'}), 404
+        users[user_id]['display_name'] = display_name
+        save_users(users)
+        return jsonify({'success': True, 'message': '用户资料已更新'})
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)})
+
+
+@app.route('/api/admin/models/provider/upsert', methods=['POST'])
+@require_admin
+def admin_upsert_provider():
+    """新增或更新 Provider"""
+    data = request.get_json() or {}
+    provider = (data.get('provider') or '').strip()
+    api_key = data.get('api_key')
+    base_url = data.get('base_url')
+
+    if not provider:
+        return jsonify({'success': False, 'message': 'provider 不能为空'}), 400
+    if api_key is None:
+        api_key = ''
+    if base_url is None:
+        base_url = ''
+
+    try:
+        cfg = load_models_config()
+        providers = cfg.setdefault('providers', {})
+        providers[provider] = {
+            'api_key': str(api_key),
+            'base_url': str(base_url)
+        }
+        save_models_config(cfg)
+        return jsonify({'success': True, 'message': f'Provider {provider} 已保存'})
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)})
+
+
+@app.route('/api/admin/models/provider/delete', methods=['POST'])
+@require_admin
+def admin_delete_provider():
+    """删除 Provider，需要输入确认文本"""
+    data = request.get_json() or {}
+    provider = (data.get('provider') or '').strip()
+    confirm_text = data.get('confirm_text')
+
+    if not provider:
+        return jsonify({'success': False, 'message': 'provider 不能为空'}), 400
+    if confirm_text != '确认修改':
+        return jsonify({'success': False, 'message': '确认文本错误'}), 400
+
+    try:
+        cfg = load_models_config()
+        providers = cfg.setdefault('providers', {})
+        models = cfg.setdefault('models', {})
+
+        if provider not in providers:
+            return jsonify({'success': False, 'message': 'Provider 不存在'}), 404
+
+        used_by = [mid for mid, minfo in models.items() if isinstance(minfo, dict) and minfo.get('provider') == provider]
+        if used_by:
+            return jsonify({
+                'success': False,
+                'message': f'Provider 正在被模型引用: {", ".join(used_by[:6])}'
+            }), 400
+
+        del providers[provider]
+        save_models_config(cfg)
+        return jsonify({'success': True, 'message': f'Provider {provider} 已删除'})
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)})
+
+
+@app.route('/api/admin/models/model/upsert', methods=['POST'])
+@require_admin
+def admin_upsert_model():
+    """新增或更新模型"""
+    data = request.get_json() or {}
+    model_id = (data.get('model_id') or '').strip()
+    name = (data.get('name') or '').strip()
+    provider = (data.get('provider') or '').strip()
+    status = (data.get('status') or 'normal').strip()
+
+    if not model_id:
+        return jsonify({'success': False, 'message': 'model_id 不能为空'}), 400
+    if not provider:
+        return jsonify({'success': False, 'message': 'provider 不能为空'}), 400
+
+    try:
+        cfg = load_models_config()
+        providers = cfg.setdefault('providers', {})
+        models = cfg.setdefault('models', {})
+
+        if provider not in providers:
+            return jsonify({'success': False, 'message': f'Provider 不存在: {provider}'}), 400
+
+        models[model_id] = {
+            'name': name or model_id,
+            'provider': provider,
+            'status': status or 'normal'
+        }
+        save_models_config(cfg)
+        return jsonify({'success': True, 'message': f'模型 {model_id} 已保存'})
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)})
+
+
+@app.route('/api/admin/models/model/delete', methods=['POST'])
+@require_admin
+def admin_delete_model():
+    """删除模型，需要输入确认文本"""
+    data = request.get_json() or {}
+    model_id = (data.get('model_id') or '').strip()
+    confirm_text = data.get('confirm_text')
+
+    if not model_id:
+        return jsonify({'success': False, 'message': 'model_id 不能为空'}), 400
+    if confirm_text != '确认修改':
+        return jsonify({'success': False, 'message': '确认文本错误'}), 400
+
+    try:
+        cfg = load_models_config()
+        models = cfg.setdefault('models', {})
+        if model_id not in models:
+            return jsonify({'success': False, 'message': '模型不存在'}), 404
+        del models[model_id]
+        save_models_config(cfg)
+        return jsonify({'success': True, 'message': f'模型 {model_id} 已删除'})
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)})
+
+
 @app.route('/api/chat/stream', methods=['POST'])
 @require_login
 def chat_stream():
@@ -934,7 +2121,8 @@ def chat_stream():
             ):
                 if log_all_chunks:
                     _log_stream_chunk(chunk, model_name=model_name or model.model_name)
-                chunk_data = json.dumps(chunk, ensure_ascii=False)
+                # 关键修复：添加 default=str 作为最后的保险，防止任何遗漏的 SDK 对象导致 JSON 序列化失败
+                chunk_data = json.dumps(chunk, ensure_ascii=False, default=str)
                 yield f"data: {chunk_data}\n\n"
                 time.sleep(0.01)  # 小延迟避免过快
             
@@ -2046,17 +3234,85 @@ def query_knowledge_vectors():
     if not query_text:
         return jsonify({'success': False, 'message': '缺少查询文本'})
 
+    def _keyword_fallback_payload(reason):
+        try:
+            user = User(username)
+            basis = user.getKnowledgeList(1) or {}
+            q = str(query_text).strip().lower()
+            if not q:
+                return {
+                    'success': True,
+                    'fallback': True,
+                    'fallback_reason': reason,
+                    'result': {
+                        'documents': [[]],
+                        'metadatas': [[]],
+                        'distances': [[]]
+                    }
+                }
+
+            scored = []
+            for title in basis.keys():
+                title_text = str(title or '')
+                title_lower = title_text.lower()
+                title_hits = title_lower.count(q)
+                content = ''
+                try:
+                    content = user.getBasisContent(title) or ''
+                except Exception:
+                    content = ''
+                content_lower = content.lower()
+                content_hits = content_lower.count(q)
+
+                if title_hits <= 0 and content_hits <= 0:
+                    continue
+
+                score = title_hits * 3 + content_hits
+                snippet = content[:500] if content else title_text
+                scored.append({
+                    'title': title_text,
+                    'doc': snippet,
+                    'score': score
+                })
+
+            scored.sort(key=lambda x: x['score'], reverse=True)
+            scored = scored[:max(1, top_k)]
+
+            documents = [item['doc'] for item in scored]
+            metadatas = [{
+                'title': item['title'],
+                'source': 'keyword_fallback'
+            } for item in scored]
+            # Keep distance contract: smaller means better.
+            distances = [round(1.0 / (1.0 + float(item['score'])), 6) for item in scored]
+
+            return {
+                'success': True,
+                'fallback': True,
+                'fallback_reason': reason,
+                'result': {
+                    'documents': [documents],
+                    'metadatas': [metadatas],
+                    'distances': [distances]
+                }
+            }
+        except Exception as fallback_err:
+            return {
+                'success': False,
+                'message': f'关键词回退失败: {str(fallback_err)}'
+            }
+
     store, store_err = get_chroma_store()
     if not store:
-        return jsonify({'success': False, 'message': f'ChromaDB错误: {store_err}'})
+        return jsonify(_keyword_fallback_payload(f'NexoraDB unavailable: {store_err}'))
 
     try:
         if getattr(store, 'mode', '') != 'service':
-            return jsonify({'success': False, 'message': 'NexoraDB service mode required'})
+            return jsonify(_keyword_fallback_payload('NexoraDB service mode not available'))
         result = store.query_text(username, query_text, top_k=top_k)
         return jsonify({'success': True, 'result': result})
     except Exception as e:
-        return jsonify({'success': False, 'message': str(e)})
+        return jsonify(_keyword_fallback_payload(f'NexoraDB query failed: {str(e)}'))
 
 
 @app.route('/api/knowledge/vector/delete', methods=['POST'])

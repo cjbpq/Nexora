@@ -1,4 +1,4 @@
-"""
+﻿"""
 火山引擎大模型封装类 - 重构版
 基于 Responses API 最佳实践
 参考文档：
@@ -46,6 +46,21 @@ if 'HTTPS_PROXY' in os.environ:
 
 # 全局客户端缓存，实现连接池复用 (Keep-Alive)
 _CLIENT_CACHE = {}
+
+def _ensure_json_serializable(obj):
+    """
+    递归确保对象可以被 JSON 序列化
+    将所有不可序列化的对象转换为字符串
+    """
+    if isinstance(obj, (str, int, float, bool, type(None))):
+        return obj
+    elif isinstance(obj, dict):
+        return {k: _ensure_json_serializable(v) for k, v in obj.items()}
+    elif isinstance(obj, (list, tuple)):
+        return [_ensure_json_serializable(item) for item in obj]
+    else:
+        # 对于任何其他类型（包括 SDK 对象），转换为字符串
+        return str(obj)
 
 class Model:
     """大模型封装类 - 支持多供应商"""
@@ -192,12 +207,33 @@ class Model:
 
     def _get_default_system_prompt(self) -> str:
         """获取极简高效的系统提示词"""
-        return """你是智能知识库管家。
-**核心：**主动理解意图，禁止臆测。
-**流程：**优先 searchKeyword；查详情用 getBasisContent。联网、写长文、搜资料请直接 web_search 并 addBasis (无需询问)。
-**addBasis 标准：**学术报告级。包含：背景、核心概念(含表格对比)、深度分析、数据支撑、引用(含链接)、结论。要求详尽（3000字+）。
-**存库要求：**长文必存 Basis。用户偏好/重要近况存 Short。**禁止**自动记录系统提供的当前时间或环境信息到 Short 中，除非用户明确要求。
-**回复：**默认简洁，存库需详尽。所有总结需标注精确引用。使用 Markdown 格式。"""
+        import prompts
+        # 检查是否有特定模型的自定义提示词
+        if hasattr(prompts, 'others') and self.model_name in prompts.others:
+            return prompts.others[self.model_name]
+        return prompts.default
+    
+    def _get_default_web_search_prompt(self) -> str:
+        """获取默认的联网搜索系统提示词"""
+        import prompts
+        return prompts.web_search_default
+
+    def _estimate_token_count(self, text: str) -> int:
+        """估算 token 数（当 provider 不返回 usage 时的兜底）"""
+        if not text:
+            return 0
+        try:
+            s = str(text)
+            cjk = 0
+            for ch in s:
+                if '\u4e00' <= ch <= '\u9fff':
+                    cjk += 1
+            other = max(0, len(s) - cjk)
+            # 经验估算：中文约 1.6 token/字，其他字符约 1 token/4字符
+            est = int(cjk * 1.6 + other / 4.0)
+            return max(1, est)
+        except Exception:
+            return max(1, len(str(text)) // 4)
 
     def _parse_tools(self, tools_config: List[Dict]) -> List[Dict]:
         """解析工具定义为API格式 - 兼容不同供应商"""
@@ -503,7 +539,7 @@ class Model:
                 response = search_client.chat.completions.create(
                     model=volc_model,
                     messages=[
-                        {"role": "system", "content": "你是一个联网搜索助手。请根据搜索结果直接回答用户的问题，不要解释搜索过程。"},
+                        {"role": "system", "content": self._get_default_web_search_prompt()},
                         {"role": "user", "content": query}
                     ],
                     # 提示模型立即使用搜索
@@ -767,6 +803,9 @@ class Model:
                     # [FIX] 内部去重标志：防止某些模型同时输出 reasoning_text 和 reasoning_summary_text 导致前端重复
                     has_received_detail_reasoning = False
                     
+                    # [FIX] 记录本轮最后一次出现的 usage，避免在流中多次记录导致日志爆炸
+                    round_usage = None
+
                     try:
                         for chunk in chunks:
                             # [CHUNK_DEBUG] 每一个 chunk 的详细信息
@@ -776,13 +815,15 @@ class Model:
                                     # 提取内容摘要
                                     c_content = ""
                                     if hasattr(chunk, 'delta'): 
-                                        c_content = chunk.delta
+                                        c_content = str(chunk.delta)  # 强制转换为字符串，防止 ResponseOutputText 对象
                                     elif hasattr(chunk, 'item') and chunk.item:
-                                        if hasattr(chunk.item, 'content'): c_content = chunk.item.content
-                                        elif hasattr(chunk.item, 'type'): c_content = f"Item({chunk.item.type})"
+                                        if hasattr(chunk.item, 'content'): 
+                                            c_content = str(chunk.item.content)  # 强制转换为字符串
+                                        elif hasattr(chunk.item, 'type'): 
+                                            c_content = f"Item({chunk.item.type})"
                                     
-                                    # 统一输出格式 (Type/Content)
-                                    print(f"[CHUNK_DEBUG] type={c_type} content={json.dumps(c_content, ensure_ascii=False) if not isinstance(c_content, str) else c_content}")
+                                    # 统一输出格式 (Type/Content) - 直接使用字符串，不需要 json.dumps
+                                    print(f"[CHUNK_DEBUG] type={c_type} content={c_content}")
                                 else:
                                     # OpenAI / Stepfun 结构
                                     c_type = "openai_chunk"
@@ -790,13 +831,18 @@ class Model:
                                     c_content = ""
                                     if delta:
                                         if hasattr(delta, 'content') and delta.content: 
-                                            c_content = delta.content
+                                            c_content = str(delta.content)  # 强制转换为字符串
                                         elif hasattr(delta, 'reasoning_content') and delta.reasoning_content: 
-                                            c_content = "[Reasoning] " + delta.reasoning_content
+                                            c_content = "[Reasoning] " + str(delta.reasoning_content)  # 强制转换为字符串
                                         elif hasattr(delta, 'tool_calls'): 
                                             c_content = "[ToolCalls]"
                                     
-                                    print(f"[CHUNK_DEBUG] type={c_type} content={c_content}")
+                                    # 额外检查 usage
+                                    usage_str = ""
+                                    if hasattr(chunk, 'usage') and chunk.usage:
+                                        usage_str = f" | Usage: {chunk.usage}"
+                                    
+                                    print(f"[CHUNK_DEBUG] type={c_type} content={c_content}{usage_str}")
 
                             # --- 处理：火山引擎 (Ark Responses API 专用结构) ---
                             if self.provider == 'volcengine':
@@ -814,9 +860,11 @@ class Model:
                                 if chunk_type in ['response.output_text.delta', 'response.message.delta']:
                                     delta = getattr(chunk, 'delta', '')
                                     if delta:
-                                        round_content += delta
-                                        accumulated_content += delta
-                                        yield {"type": "content", "content": delta}
+                                        # 关键修复：强制转换为字符串，防止 ResponseOutputText 对象导致 JSON 序列化失败
+                                        delta_str = str(delta) if not isinstance(delta, str) else delta
+                                        round_content += delta_str
+                                        accumulated_content += delta_str
+                                        yield {"type": "content", "content": delta_str}
                             
                                 # 思考过程增量 (核心修复: 重新兼容 summary 类型，并防止 detail 和 summary 同时出现时的视觉重复)
                                 elif 'reasoning' in chunk_type_str and 'delta' in chunk_type_str:
@@ -833,8 +881,10 @@ class Model:
                                         
                                     delta = getattr(chunk, 'delta', '')
                                     if delta:
-                                        accumulated_reasoning += delta
-                                        yield {"type": "reasoning_content", "content": delta}
+                                        # 关键修复：确保思维链内容也是字符串
+                                        delta_str = str(delta) if not isinstance(delta, str) else delta
+                                        accumulated_reasoning += delta_str
+                                        yield {"type": "reasoning_content", "content": delta_str}
 
                                 # 核心修复: 过滤干扰并按序提取
                                 elif chunk_type == 'response.output_item.done':
@@ -845,15 +895,19 @@ class Model:
                                         if 'web_search' in item_type:
                                             action = getattr(item, 'action', None)
                                             if action and hasattr(action, 'query'):
-                                                query = action.query
+                                                query = str(action.query)  # 确保转换为字符串
                                                 step = {"type": "web_search", "content": f"正在搜索: {query}", "status": "正在搜索", "query": query}
                                                 yield step
                                                 process_steps.append(step)
                                         
                                         # 2. 只有在没有产生任何 delta 文本的情况下才使用 done 的文本，防止重复
                                         elif item_type == 'text' and not round_content:
+                                            # 关键修复：确保 content 被转换为字符串，防止 ResponseOutputText 对象导致 JSON 序列化失败
                                             text_content = getattr(item, 'content', '')
                                             if text_content:
+                                                # 如果是对象类型，**立即**转换为字符串，在任何其他操作之前
+                                                text_content = str(text_content) if not isinstance(text_content, str) else text_content
+                                                # 现在 text_content 肯定是字符串了，可以安全地累积和 yield
                                                 round_content += text_content
                                                 accumulated_content += text_content
                                                 yield {"type": "content", "content": text_content}
@@ -864,7 +918,9 @@ class Model:
                                     status = '正在搜索' if 'searching' in str(chunk_type) else '搜索完成'
                                     query_text = ""
                                     ws_obj = getattr(chunk, 'web_search_call', None) or getattr(chunk, 'web_search', None)
-                                    if ws_obj: query_text = getattr(ws_obj, 'query', "")
+                                    if ws_obj:
+                                        query_raw = getattr(ws_obj, 'query', "")
+                                        query_text = str(query_raw) if query_raw else ""  # 确保转换为字符串
                                     step = {"type": "web_search", "content": f"{status}: {query_text}" if query_text else status, "status": status, "query": query_text}
                                     yield step
                                     process_steps.append(step)
@@ -876,13 +932,18 @@ class Model:
                                         output = response_obj.output
                                         for item in output:
                                             if getattr(item, 'type', None) == 'function_call':
-                                                function_calls.append({"name": getattr(item, 'name', None), "arguments": getattr(item, 'arguments', '{}'), "call_id": getattr(item, 'call_id', None)})
+                                                # 确保所有值都是可序列化的基本类型
+                                                func_call = {
+                                                    "name": str(getattr(item, 'name', '')) if getattr(item, 'name', None) else None,
+                                                    "arguments": str(getattr(item, 'arguments', '{}')),
+                                                    "call_id": str(getattr(item, 'call_id', '')) if getattr(item, 'call_id', None) else None
+                                                }
+                                                function_calls.append(func_call)
                                     
-                                    # Token统计
+                                    # Token统计 (暂存，等循环结束一并记录)
                                     if hasattr(response_obj, 'usage'):
-                                        usage = response_obj.usage
-                                        yield {"type": "token_usage", "input_tokens": usage.input_tokens, "output_tokens": usage.output_tokens, "total_tokens": usage.total_tokens}
-                                        self._log_token_usage_safe(usage, has_web_search, function_calls, process_steps, msg)
+                                        round_usage = response_obj.usage
+                                        yield {"type": "token_usage", "input_tokens": round_usage.input_tokens, "output_tokens": round_usage.output_tokens, "total_tokens": round_usage.total_tokens}
                                 
                                 else:
                                     # 未知类型记录 (仅调试)
@@ -898,41 +959,88 @@ class Model:
                                 
                                 # 文本内容
                                 if hasattr(delta, 'content') and delta.content:
-                                    round_content += delta.content
-                                    accumulated_content += delta.content
-                                    yield {"type": "content", "content": delta.content}
+                                    # 关键修复：确保 OpenAI/Stepfun 的 delta.content 也是字符串
+                                    content_str = str(delta.content) if not isinstance(delta.content, str) else delta.content
+                                    round_content += content_str
+                                    accumulated_content += content_str
+                                    yield {"type": "content", "content": content_str}
                                 
                                 # 思维链 (Stepfun/Kimi/DeepSeek 兼容字段)
                                 if hasattr(delta, 'reasoning_content') and delta.reasoning_content:
-                                    accumulated_reasoning += delta.reasoning_content
-                                    yield {"type": "reasoning_content", "content": delta.reasoning_content}
+                                    # 关键修复：确保推理内容是字符串
+                                    reasoning_str = str(delta.reasoning_content) if not isinstance(delta.reasoning_content, str) else delta.reasoning_content
+                                    accumulated_reasoning += reasoning_str
+                                    yield {"type": "reasoning_content", "content": reasoning_str}
                                 
                                 # 函数调用 (OpenAI 标准流式格式)
                                 if hasattr(delta, 'tool_calls') and delta.tool_calls:
                                     for tc in delta.tool_calls:
                                         if tc.index >= len(function_calls):
-                                            function_calls.append({"name": "", "arguments": "", "call_id": tc.id})
+                                            # 关键修复：确保 call_id 是字符串
+                                            call_id_str = str(tc.id) if tc.id else ""
+                                            function_calls.append({"name": "", "arguments": "", "call_id": call_id_str})
                                         
                                         f_info = function_calls[tc.index]
-                                        if tc.id: f_info["call_id"] = tc.id
+                                        if tc.id: f_info["call_id"] = str(tc.id)
                                         if tc.function:
-                                            if tc.function.name: f_info["name"] += tc.function.name
-                                            if tc.function.arguments: f_info["arguments"] += tc.function.arguments
+                                            if tc.function.name: f_info["name"] += str(tc.function.name)
+                                            if tc.function.arguments: f_info["arguments"] += str(tc.function.arguments)
 
                                 # Token统计 (部分 OpenAI Provider 在最后一个 chunk 的 usage 字段)
                                 if hasattr(chunk, 'usage') and chunk.usage:
-                                    usage = chunk.usage
-                                    yield {"type": "token_usage", "input_tokens": usage.prompt_tokens, "output_tokens": usage.completion_tokens, "total_tokens": usage.total_tokens}
-                                    self._log_token_usage_safe(usage, has_web_search, function_calls, process_steps, msg)
-                    
+                                    round_usage = chunk.usage
+                                    yield {
+                                        "type": "token_usage", 
+                                        "input_tokens": getattr(round_usage, 'prompt_tokens', 0), 
+                                        "output_tokens": getattr(round_usage, 'completion_tokens', 0), 
+                                        "total_tokens": getattr(round_usage, 'total_tokens', 0)
+                                    }
                     
                     except Exception as e:
                         print(f"[ERROR] Stream processing error: {e}")
+                        print(f"[ERROR] Error type: {type(e).__name__}")
+                        # 额外调试：尝试找出哪个变量包含不可序列化的对象
+                        import traceback
+                        traceback.print_exc()
                         # 如果是上下文错误，在这里其实很难直接retry，因为已经yield了部分内容
                         # 但至少我们捕获它，防止整个Server崩掉
                         if "previous response" in str(e):
                              print("[CRITICAL] Context consistency error detected.")
                         raise e
+
+                    # [FIX] 在 chunk 循环结束后，统一记录本轮的 Token 消耗
+                    if round_usage:
+                        self._log_token_usage_safe(round_usage, has_web_search, function_calls, process_steps, msg)
+                    else:
+                        # 某些 Provider 不返回 usage，使用估算值，避免 token 全为 0
+                        fallback_title = (str(msg).strip()[:30] + "...") if msg and len(str(msg).strip()) > 30 else (str(msg).strip() if msg else "新对话")
+                        try:
+                            prompt_snapshot = json.dumps(messages, ensure_ascii=False, default=str)
+                        except Exception:
+                            prompt_snapshot = str(messages)
+                        est_input = self._estimate_token_count(prompt_snapshot)
+                        est_output = self._estimate_token_count(round_content or accumulated_content)
+                        est_total = est_input + est_output
+                        self.user.log_token_usage(
+                            self.conversation_id or "unknown",
+                            fallback_title or "新对话",
+                            "tool:web_search" if has_web_search else ("tool:" + function_calls[0].get('name', 'unknown') if function_calls else "chat"),
+                            est_input,
+                            est_output,
+                            total_tokens=est_total,
+                            metadata={
+                                "provider": self.provider,
+                                "model": self.model_name,
+                                "token_details": {
+                                    "estimated": True,
+                                    "estimate_method": "cjk1.6+ascii/4",
+                                    "prompt_chars": len(prompt_snapshot),
+                                    "output_chars": len(round_content or accumulated_content or "")
+                                },
+                                "has_web_search": has_web_search,
+                                "tool_call_count": len(function_calls or [])
+                            }
+                        )
 
                     # 检查 previous_response_id 获取情况 (仅针对火山引擎)
                     if self.provider == 'volcengine':
@@ -1129,31 +1237,50 @@ class Model:
             error_msg = f"错误: {str(e)}"
             print(f"[ERROR] {error_msg}")
             yield {"type": "error", "content": error_msg}
-    
+
     def _log_token_usage_safe(self, usage, has_web_search, function_calls, process_steps, user_message=None):
-        """安全地记录Token日志（不影响主流程）"""
+        """安全记录Token日志（不影响主流程）"""
         try:
-            # 推断动作类型
+            def _safe_int(v, default=0):
+                try:
+                    if v is None:
+                        return default
+                    if isinstance(v, bool):
+                        return int(v)
+                    if isinstance(v, (int, float)):
+                        return int(v)
+                    s = str(v).strip()
+                    if not s:
+                        return default
+                    if s.isdigit() or (s.startswith('-') and s[1:].isdigit()):
+                        return int(s)
+                    return int(float(s))
+                except Exception:
+                    return default
+
+            def _uv(obj, key, default=0):
+                if isinstance(obj, dict):
+                    return obj.get(key, default)
+                return getattr(obj, key, default)
+
             action_type = "chat"
             if has_web_search:
-                action_type = "web_search"
+                action_type = "tool:web_search"
             elif function_calls:
-                # 如果有函数调用，取第一个函数名作为动作类型
                 action_type = f"tool:{function_calls[0].get('name', 'unknown')}"
             elif len(process_steps) > 0:
-                # 检查之前的步骤是否有tool
                 for step in process_steps:
                     if step.get('type') == 'function_call':
                         action_type = f"tool:{step.get('name')}"
                         break
                     elif step.get('type') == 'web_search':
-                        action_type = "web_search"
+                        action_type = "tool:web_search"
                         break
-            
-            # 获取当前对话标题
-            # 优先使用当前用户消息作为本轮对话的标题（截取前30个字符）
+
+            action_type = action_type.lower()
+
             if user_message:
-                clean_msg = user_message.strip()
+                clean_msg = str(user_message).strip()
                 conv_title = clean_msg[:30] + "..." if len(clean_msg) > 30 else clean_msg
             else:
                 conv_title = "新对话"
@@ -1163,37 +1290,52 @@ class Model:
                         conv_title = conv_data.get("title", conv_title)
                     except:
                         pass
-                
-            # 适配不同 SDK 的 Token 字段命名 (OpenAI 使用 prompt_tokens/completion_tokens)
-            input_tokens = getattr(usage, 'input_tokens', getattr(usage, 'prompt_tokens', 0))
-            output_tokens = getattr(usage, 'output_tokens', getattr(usage, 'completion_tokens', 0))
-            total_tokens = getattr(usage, 'total_tokens', input_tokens + output_tokens)
-            
-            # 根据 config['log_status'] 决定是否输出详细日志
+
+            input_tokens = _uv(usage, 'input_tokens', _uv(usage, 'prompt_tokens', 0))
+            output_tokens = _uv(usage, 'output_tokens', _uv(usage, 'completion_tokens', 0))
+            usage_total = _uv(usage, 'total_tokens', 0)
+            usage_total_int = _safe_int(usage_total, 0)
+            input_tokens_int = _safe_int(input_tokens, 0)
+            output_tokens_int = _safe_int(output_tokens, 0)
+            if usage_total_int > 0:
+                total_tokens = usage_total_int
+            else:
+                total_tokens = input_tokens_int + output_tokens_int
+
+            prompt_details = _uv(usage, 'prompt_tokens_details', {}) or {}
+            completion_details = _uv(usage, 'completion_tokens_details', {}) or {}
+            token_details = {
+                "cached_tokens": _safe_int(_uv(prompt_details, 'cached_tokens', 0), 0),
+                "reasoning_tokens": _safe_int(_uv(completion_details, 'reasoning_tokens', 0), 0),
+                "audio_input_tokens": _safe_int(_uv(prompt_details, 'audio_tokens', 0), 0),
+                "audio_output_tokens": _safe_int(_uv(completion_details, 'audio_tokens', 0), 0)
+            }
+
             log_status = CONFIG.get('log_status', 'silent')
             if log_status == 'all':
-                # 输出所有 token 信息用于调试
                 print(f"[TOKEN_DEBUG] ==================== Token Usage Info ====================")
-                print(f"[TOKEN_DEBUG] Model: {self.model_name}")
-                print(f"[TOKEN_DEBUG] Provider: {self.provider}")
-                print(f"[TOKEN_DEBUG] Action Type: {action_type}")
-                print(f"[TOKEN_DEBUG] Input Tokens: {input_tokens}")
-                print(f"[TOKEN_DEBUG] Output Tokens: {output_tokens}")
-                print(f"[TOKEN_DEBUG] Total Tokens: {total_tokens}")
-                print(f"[TOKEN_DEBUG] Usage Object Type: {type(usage).__name__}")
-                print(f"[TOKEN_DEBUG] Usage Object Attributes: {dir(usage)}")
-                print(f"[TOKEN_DEBUG] Raw Usage Object: {usage}")
+                print(f"[TOKEN_DEBUG] Model: {self.model_name} | Provider: {self.provider}")
+                print(f"[TOKEN_DEBUG] Action: {action_type} | Input: {input_tokens_int} | Output: {output_tokens_int}")
+                print(f"[TOKEN_DEBUG] Total: {total_tokens}")
                 print(f"[TOKEN_DEBUG] ==========================================================")
-                
+
             self.user.log_token_usage(
-                self.conversation_id or "unknown", 
-                conv_title, 
-                action_type, 
-                input_tokens, 
-                output_tokens
+                self.conversation_id or "unknown",
+                conv_title,
+                action_type,
+                input_tokens_int,
+                output_tokens_int,
+                total_tokens=total_tokens,
+                metadata={
+                    "provider": self.provider,
+                    "model": self.model_name,
+                    "token_details": token_details,
+                    "has_web_search": has_web_search,
+                    "tool_call_count": len(function_calls or [])
+                }
             )
         except Exception as e:
-            print(f"[WARNING] 记录Token日志失败: {e}")
+            print(f"[WARNING] 记录 Token 日志失败: {e}")
 
     def _build_initial_messages(self, user_msg: str) -> List[Dict]:
         """构建初始消息列表 (优化 Prefix Caching)"""
@@ -1270,8 +1412,8 @@ class Model:
             # 构建prompt
             prompt = f"""根据以下对话内容，生成一个简洁准确的标题（10-20字）。
 
-用户问题：{user_message[:200]}
-助手回答：{assistant_response[:500]}
+用户问题：{user_message[:100]}
+助手回答：{assistant_response[:100]}
 
 要求：
 1. 准确概括对话核心内容
@@ -1322,6 +1464,10 @@ class Model:
             "model": self.model_name,
             "stream": True
         }
+
+        # 对于 OpenAI 兼容接口，开启 stream_options 以获取 Token 统计
+        if self.provider != 'volcengine':
+            params["stream_options"] = {"include_usage": True}
 
         # --- 火山引擎 (Ark Responses API) 专用逻辑 ---
         if self.provider == 'volcengine':
@@ -1379,7 +1525,17 @@ class Model:
             # 注意：对于非火山引擎模型，messages 列表已经由 sendMessage 循环维护好了正确的 role
             # 剔除可能存在的 reasoning_content 或其他非标准字段，确保兼容性
             params["messages"] = self._strip_reasoning_content(list(messages))
-            
+
+            # --- 阿里云 / DashScope 专用逻辑 ---
+            if self.provider == "aliyun" and enable_thinking:
+                # 查阅阿里云文档可知，需要通过 extra_body 传参控制
+                params["extra_body"] = {
+                    "enable_thinking": True
+                }
+                # Qwen-Max-Latest 和部分模型支持 thinking_config
+                # 但通用开启只需 enable_thinking
+                print(f"[DEBUG] [Aliyun-Thinking] 已为 {self.model_name} 开启思维链模式 (extra_body)")
+
         return params
     
     def _append_function_outputs(
@@ -1484,3 +1640,5 @@ class Model:
     def analyzeConnections(self, title: str) -> str:
         """分析知识连接（简化实现）"""
         return f"知识 '{title}' 的连接分析功能尚未完整实现"
+
+

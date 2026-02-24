@@ -21,25 +21,25 @@ TOOLS = [
             }
         }
     },
-    {
-        "type": "function",
-        "function": {
-            "name": "getKnowledgeList",
-            "description": "获取用户知识库的标题列表，分为短期记忆和基础知识库两种，请优先使用本函数查阅知识库内容。",
+    # {
+    #     "type": "function",
+    #     "function": {
+    #         "name": "getKnowledgeList",
+    #         "description": "获取用户知识库的标题列表，分为短期记忆和基础知识库两种，请优先使用本函数查阅知识库内容。",
 
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "_type": {
-                        "type": "integer",
-                        "description": "知识库的类型，例如短期记忆为0，基础知识库为1",
-                        "enum": [0, 1]
-                    }
-                },
-                "required": ["_type"]
-            }
-        }
-    },
+    #         "parameters": {
+    #             "type": "object",
+    #             "properties": {
+    #                 "_type": {
+    #                     "type": "integer",
+    #                     "description": "知识库的类型，例如短期记忆为0，基础知识库为1",
+    #                     "enum": [0, 1]
+    #                 }
+    #             },
+    #             "required": ["_type"]
+    #         }
+    #     }
+    # },
     {
         "type": "function",
         "function": {
@@ -185,7 +185,7 @@ TOOLS = [
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "搜索问题，应该是清晰、完整的问题描述。"
+                        "description": "搜索关键字或问题描述，必须是精确的单体查询，而不是宽泛的概念。"
                     }
                 },
                 "required": ["query"]
@@ -338,119 +338,117 @@ TOOLS = [
             }
         }
     },
-    
-    {
-        "type": "function",
-        "function": {
-            "name": "getContextLength",
-            "description": "获取前offset个对话的总字符长度。用于评估对话内容的规模，帮助决定是否需要分段读取。",
 
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "offset": {
-                        "type": "integer",
-                        "description": "从最新往前数第offset个对话（0=当前对话，1=上一个对话）"
-                    }
-                },
-                "required": ["offset"]
-            }
-        }
-    },
-    
-    {
-        "type": "function",
-        "function": {
-            "name": "getContext",
-            "description": "获取前offset个对话从from位置到to位置的内容切片。用于分段读取长对话内容，避免一次性加载过多token。",
+    # {
+    #     "type": "function",
+    #     "function": {
+    #         "name": "getContextLength",
+    #         "description": "获取前offset个对话的总字符长度。用于评估对话内容的规模，帮助决定是否需要分段读取。",
 
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "offset": {
-                        "type": "integer",
-                        "description": "从最新往前数第offset个对话"
-                    },
-                    "from_pos": {
-                        "type": "integer",
-                        "description": "起始字符位置"
-                    },
-                    "to_pos": {
-                        "type": "integer",
-                        "description": "结束字符位置（不填则读取到结尾）"
-                    }
-                },
-                "required": ["offset", "from_pos"]
-            }
-        }
-    },
+    #         "parameters": {
+    #             "type": "object",
+    #             "properties": {
+    #                 "offset": {
+    #                     "type": "integer",
+    #                     "description": "从最新往前数第offset个对话（0=当前对话，1=上一个对话）"
+    #                 }
+    #             },
+    #             "required": ["offset"]
+    #         }
+    #     }
+    # },
     
-    {
-        "type": "function",
-        "function": {
-            "name": "getContext_findKeyword",
-            "description": "在前offset个对话中搜索关键词，返回关键词前后range个字符的上下文。用于快速定位历史对话中的特定内容。",
+    # {
+    #     "type": "function",
+    #     "function": {
+    #         "name": "getContext",
+    #         "description": "获取前offset个对话从from位置到to位置的内容切片。用于分段读取长对话内容，避免一次性加载过多token。",
 
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "offset": {
-                        "type": "integer",
-                        "description": "从最新往前数第offset个对话"
-                    },
-                    "keyword": {
-                        "type": "string",
-                        "description": "要搜索的关键词"
-                    },
-                    "range": {
-                        "type": "integer",
-                        "description": "关键词前后返回的字符数，默认10"
-                    }
-                },
-                "required": ["offset", "keyword"]
-            }
-        }
-    },
+    #         "parameters": {
+    #             "type": "object",
+    #             "properties": {
+    #                 "offset": {
+    #                     "type": "integer",
+    #                     "description": "从最新往前数第offset个对话"
+    #                 },
+    #                 "from_pos": {
+    #                     "type": "integer",
+    #                     "description": "起始字符位置"
+    #                 },
+    #                 "to_pos": {
+    #                     "type": "integer",
+    #                     "description": "结束字符位置（不填则读取到结尾）"
+    #                 }
+    #             },
+    #             "required": ["offset", "from_pos"]
+    #         }
+    #     }
+    # },
     
-    {
-        "type": "function",
-        "function": {
-            "name": "searchKeyword",
-            "description": "在知识库（短期记忆和基础知识）中搜索关键词，返回包含关键词的标题和内容片段。用于快速查找知识库中的相关信息。",
+    # {
+    #     "type": "function",
+    #     "function": {
+    #         "name": "getContext_findKeyword",
+    #         "description": "在前offset个对话中搜索关键词，返回关键词前后range个字符的上下文。用于快速定位历史对话中的特定内容。",
 
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "keyword": {
-                        "type": "string",
-                        "description": "要搜索的关键词"
-                    },
-                    "range": {
-                        "type": "integer",
-                        "description": "关键词前后返回的字符数，默认10"
-                    }
-                },
-                "required": ["keyword"]
-            }
-        }
-    },
+    #         "parameters": {
+    #             "type": "object",
+    #             "properties": {
+    #                 "offset": {
+    #                     "type": "integer",
+    #                     "description": "从最新往前数第offset个对话"
+    #                 },
+    #                 "keyword": {
+    #                     "type": "string",
+    #                     "description": "要搜索的关键词"
+    #                 },
+    #                 "range": {
+    #                     "type": "integer",
+    #                     "description": "关键词前后返回的字符数，默认10"
+    #                 }
+    #             },
+    #             "required": ["offset", "keyword"]
+    #         }
+    #     }
+    # },        {
+    #     "type": "function",
+    #     "function": {
+    #         "name": "searchKeyword",
+    #         "description": "在知识库（短期记忆和基础知识）中搜索关键词，返回包含关键词的标题和内容片段。用于快速查找知识库中的相关信息。",
+
+    #         "parameters": {
+    #             "type": "object",
+    #             "properties": {
+    #                 "keyword": {
+    #                     "type": "string",
+    #                     "description": "要搜索的关键词"
+    #                 },
+    #                 "range": {
+    #                     "type": "integer",
+    #                     "description": "关键词前后返回的字符数，默认10"
+    #                 }
+    #             },
+    #             "required": ["keyword"]
+    #         }
+    #     }
+    # },
     
-    {
-        "type": "function",
-        "function": {
-            "name": "getMainTitle",
-            "description": "获取之前某次交流的总结。用于快速了解历史交流的核心内容，无需加载完整对话。offset=1表示上一次交流，offset=2表示上上次。",
+    # {
+    #     "type": "function",
+    #     "function": {
+    #         "name": "getMainTitle",
+    #         "description": "获取之前某次交流的总结。用于快速了解历史交流的核心内容，无需加载完整对话。offset=1表示上一次交流，offset=2表示上上次。",
 
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "offset": {
-                        "type": "integer",
-                        "description": "从最新往前数第offset次交流（1=上一次交流，2=上上次交流）"
-                    }
-                },
-                "required": ["offset"]
-            }
-        }
-    }
+    #         "parameters": {
+    #             "type": "object",
+    #             "properties": {
+    #                 "offset": {
+    #                     "type": "integer",
+    #                     "description": "从最新往前数第offset次交流（1=上一次交流，2=上上次交流）"
+    #                 }
+    #             },
+    #             "required": ["offset"]
+    #         }
+    #     }
+    # }
 ]

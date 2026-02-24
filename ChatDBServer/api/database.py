@@ -1,4 +1,4 @@
-import os
+﻿import os
 import json
 import time
 import threading
@@ -451,21 +451,36 @@ class User:
     
     # ==================== Token 统计日志 ====================
     
-    def log_token_usage(self, conversation_id, conversation_title, action_type, input_tokens, output_tokens):
+    def log_token_usage(
+        self,
+        conversation_id,
+        conversation_title,
+        action_type,
+        input_tokens,
+        output_tokens,
+        total_tokens=None,
+        metadata=None
+    ):
         """记录Token使用情况"""
         log_file = self.path + "token_usage.json"
-        
+        metadata = metadata if isinstance(metadata, dict) else {}
+        input_tokens = int(input_tokens or 0)
+        output_tokens = int(output_tokens or 0)
+        if total_tokens is None:
+            total_tokens = input_tokens + output_tokens
+        total_tokens = int(total_tokens or 0)
+
         # 确保日志文件存在
         if not os.path.exists(log_file):
             with open(log_file, "w", encoding="utf-8") as f:
                 json.dump([], f, indent=4, ensure_ascii=False)
-        
+
         try:
             with open(log_file, "r", encoding="utf-8") as f:
                 logs = json.load(f)
         except:
             logs = []
-        
+
         # 添加新日志
         log_entry = {
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
@@ -474,18 +489,23 @@ class User:
             "action": action_type,
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
-            "total_tokens": input_tokens + output_tokens
+            "total_tokens": total_tokens,
+            "provider": metadata.get("provider") or "",
+            "model": metadata.get("model") or "",
+            "token_details": metadata.get("token_details") or {},
+            "has_web_search": bool(metadata.get("has_web_search", False)),
+            "tool_call_count": int(metadata.get("tool_call_count", 0) or 0)
         }
-        
+
         logs.insert(0, log_entry)  # 最新的在最前
-        
+
         # 限制日志数量（例如保留最近1000条）
         if len(logs) > 1000:
             logs = logs[:1000]
-            
+
         with open(log_file, "w", encoding="utf-8") as f:
             json.dump(logs, f, indent=4, ensure_ascii=False)
-            
+
         # 同时更新全局 user.json 中的累计 token 消耗
         try:
             users_meta_path = "./data/user.json"
@@ -493,16 +513,16 @@ class User:
                 with _global_file_lock:  # 使用锁保护全局文件的读写操作
                     with open(users_meta_path, "r", encoding="utf-8") as f:
                         users_data = json.load(f)
-                    
+
                     if self.user in users_data:
                         current_usage = users_data[self.user].get("token_usage", 0)
-                        users_data[self.user]["token_usage"] = current_usage + (input_tokens + output_tokens)
-                        
+                        users_data[self.user]["token_usage"] = current_usage + total_tokens
+
                         with open(users_meta_path, "w", encoding="utf-8") as f:
                             json.dump(users_data, f, indent=4, ensure_ascii=False)
         except Exception as e:
             print(f"Error updating global token usage: {e}")
-            
+
     def get_token_logs(self):
         """获取Token使用日志"""
         log_file = self.path + "token_usage.json"

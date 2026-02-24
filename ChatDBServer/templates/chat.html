@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
@@ -63,10 +63,6 @@
                             <i class="fa-solid fa-gear"></i>
                             <span>设置</span>
                         </a>
-                        <a href="#" class="menu-item admin-only" id="adminBackendBtn" style="display:none;">
-                            <i class="fa-solid fa-shield-halved"></i>
-                            <span>管理</span>
-                        </a>
                         <div class="menu-divider"></div>
                         <a href="/logout" class="menu-item logout">
                             <i class="fa-solid fa-right-from-bracket"></i>
@@ -99,6 +95,14 @@
                 </div>
 
                 <div class="header-right">
+                   {% if nexora_mail_enabled %}
+                   <button class="btn-icon" id="toggleMailView" title="邮件" onclick="openMailPlaceholderView()">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M4 4h16a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z"></path>
+                            <polyline points="22,6 12,13 2,6"></polyline>
+                        </svg>
+                    </button>
+                   {% endif %}
                    <button class="btn-icon" id="toggleKnowledgePanel" title="Knowledge Base">
                         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"></path><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"></path></svg>
                     </button>
@@ -262,101 +266,6 @@
     <!-- Scripts -->
     <script src="/static/js/chat.js?v=20260210"></script>
 
-    <!-- 管理后台模态窗口 -->
-    <div id="adminModal" class="modal-backdrop">
-        <div class="modal admin-modal-custom">
-            <div class="modal-head">
-                <div class="head-title">
-                    <h3>管理后台</h3>
-                </div>
-                <button id="closeAdminModal" class="btn-close-circle" type="button">×</button>
-            </div>
-            <div class="modal-body">
-                <div class="admin-tabs">
-                    <button class="admin-tab active" data-tab="users">用户管理</button>
-                    <button class="admin-tab" data-tab="stats">统计信息</button>
-                    <button class="admin-tab" data-tab="chroma">ChromaDB</button>
-                </div>
-
-                <!-- 用户管理标签 -->
-                <div id="users-tab" class="admin-tab-content active">
-                    <div style="margin-bottom: 16px;">
-                        <button class="btn-primary" id="openAddUserForm">+ 添加新用户</button>
-                    </div>
-
-                    <!-- 用户列表 -->
-                    <div class="admin-table-wrapper">
-                        <table class="admin-table">
-                            <thead>
-                                <tr>
-                                    <th>用户名</th>
-                                    <th>密码</th>
-                                    <th>最后登入IP</th>
-                                    <th>消耗(Tokens)</th>
-                                    <th>角色</th>
-                                    <th>操作</th>
-                                </tr>
-                            </thead>
-                            <tbody id="adminUsersList"></tbody>
-                        </table>
-                    </div>
-                </div>
-
-                <!-- 统计信息标签 -->
-                <div id="stats-tab" class="admin-tab-content">
-                    <div class="admin-stats-grid">
-                        <div class="stat-card">
-                            <span class="label">总用户数</span>
-                            <span id="statTotalUsers" class="value mono">-</span>
-                        </div>
-                        <div class="stat-card">
-                            <span class="label">管理员数</span>
-                            <span id="statAdminCount" class="value mono">-</span>
-                        </div>
-                        <div class="stat-card">
-                            <span class="label">总Token消耗</span>
-                            <span id="statTotalTokens" class="value mono">-</span>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- ChromaDB -->
-                <div id="chroma-tab" class="admin-tab-content">
-                    <div class="admin-stats-grid" style="margin-bottom: 12px;">
-                        <div class="stat-card">
-                            <span class="label" style="font-size: 11px;">ChromaDB 状态</span>
-                            <span id="statChromaStatus" class="value mono" style="font-size: 14px;">-</span>
-                        </div>
-                        <div class="stat-card">
-                            <span class="label" style="font-size: 11px;">向量总数</span>
-                            <span id="statChromaTotal" class="value mono" style="font-size: 14px;">-</span>
-                        </div>
-                    </div>
-                    <div class="admin-search-bar" style="display: flex; gap: 8px; margin-bottom: 12px;">
-                        <input id="chromaSearchInput" class="input-modern" placeholder="搜索向量库..." style="flex: 1; font-size: 12px;">
-                        <button class="btn-primary" onclick="searchChroma()" style="padding: 6px 12px; min-width: 64px; background: #111; color: #fff; border: 1px solid #111;">搜索</button>
-                    </div>
-                    <div id="chromaSearchResults" style="display:none; margin-bottom: 12px; font-size: 12px; color: #475569;"></div>
-
-                    <div class="admin-table-wrapper">
-                        <table class="admin-table">
-                            <thead>
-                                <tr>
-                                    <th>Collection</th>
-                                    <th>向量数</th>
-                                </tr>
-                            </thead>
-                            <tbody id="adminChromaList"></tbody>
-                        </table>
-                    </div>
-                </div>
-
-            </div>
-        </div>
-    </div>
-        </div>
-    </div>
-
     <!-- 添加用户表单 -->
     <div id="addUserModal" class="modal-backdrop" style="z-index: 2200;">
         <div class="modal" style="width: 400px; padding: 0;">
@@ -418,14 +327,14 @@
                     <h3>模型可见性配置</h3>
                     <span id="permTargetUser" style="margin-left: 12px; font-size: 13px; color: #666; background: #f1f5f9; padding: 4px 10px; border-radius: 4px; font-weight: 500;"></span>
                 </div>
-                <button onclick="closeModelPermModal()" class="btn-modal-close" type="button">×</button>
+                    <button onclick="closeModelPermModal()" class="btn-modal-close" type="button">×</button>
             </div>
             <div class="modal-body" style="padding: 0; flex: 1; overflow: hidden; display: flex; flex-direction: column;">
                 <div style="background: linear-gradient(135deg, #f8fafc 0%, #f0f4f8 100%); padding: 14px 20px; border-bottom: 2px solid #e2e8f0; font-size: 13px; color: #475569;">
                     <p style="margin: 0; font-weight: 500;">✓ 勾选的模型用户可以使用 | × 未勾选的模型用户无法访问</p>
                 </div>
                 <div id="modelPermList" style="flex: 1; overflow-y: auto; padding: 12px 8px;">
-                    <!-- JS 动态填充 -->
+                    <!-- JS 会动态填充 -->
                 </div>
             </div>
             <div class="modal-footer" style="padding: 14px 20px; border-top: 1px solid #e2e8f0; display: flex; justify-content: flex-end; gap: 10px; flex-shrink: 0;">
@@ -452,6 +361,70 @@
     </div>
 
     <!-- 知识库单项设置模态框 -->
+    <div id="adminTextConfirmModal" class="modal-backdrop" style="z-index: 4200;">
+        <div class="modal" style="width: 420px; padding: 0;">
+            <div class="modal-head">
+                <h3>确认删除</h3>
+                <button class="btn-modal-close" onclick="closeAdminTextConfirmModal()" title="Close"><i class="fa-solid fa-xmark"></i></button>
+            </div>
+            <div class="modal-body" style="padding: 16px 20px;">
+                <p style="margin-bottom: 10px;">请输入 <code>确认修改</code> 来继续删除。</p>
+                <input id="adminTextConfirmInput" class="input-modern" placeholder="确认修改" style="width: 100%; margin-bottom: 12px;">
+                <div class="modal-footer" style="margin-top: 0;">
+                    <button class="btn-cancel" onclick="closeAdminTextConfirmModal()">取消</button>
+                    <button id="adminTextConfirmOkBtn" class="btn-confirm btn-confirm-del">删除</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="adminConfigModal" class="modal-backdrop" style="z-index: 4201;">
+        <div class="modal" style="width: 520px; padding: 0;">
+            <div class="modal-head">
+                <h3 id="adminConfigModalTitle">配置项</h3>
+                <button class="btn-modal-close" onclick="closeAdminConfigModal()" title="Close"><i class="fa-solid fa-xmark"></i></button>
+            </div>
+            <div class="modal-body" style="padding: 16px 20px;">
+                <div id="adminConfigProviderFields">
+                    <div class="form-group" style="margin-bottom: 10px;">
+                        <label>Provider 名称</label>
+                        <input id="adminProviderNameInput" class="input-modern" placeholder="provider name">
+                    </div>
+                    <div class="form-group" style="margin-bottom: 10px;">
+                        <label>API Key</label>
+                        <input id="adminProviderApiKeyInput" class="input-modern" placeholder="api key">
+                    </div>
+                    <div class="form-group" style="margin-bottom: 0;">
+                        <label>Base URL</label>
+                        <input id="adminProviderBaseUrlInput" class="input-modern" placeholder="https://...">
+                    </div>
+                </div>
+                <div id="adminConfigModelFields" style="display:none;">
+                    <div class="form-group" style="margin-bottom: 10px;">
+                        <label>模型 ID</label>
+                        <input id="adminModelIdInput" class="input-modern" placeholder="model id">
+                    </div>
+                    <div class="form-group" style="margin-bottom: 10px;">
+                        <label>模型名称</label>
+                        <input id="adminModelNameInput" class="input-modern" placeholder="display name">
+                    </div>
+                    <div class="form-group" style="margin-bottom: 10px;">
+                        <label>Provider</label>
+                        <select id="adminModelProviderInput" class="input-modern"></select>
+                    </div>
+                    <div class="form-group" style="margin-bottom: 0;">
+                        <label>状态</label>
+                        <input id="adminModelStatusInput" class="input-modern" placeholder="normal">
+                    </div>
+                </div>
+                <div class="modal-footer" style="margin-top: 14px;">
+                    <button class="btn-cancel" onclick="closeAdminConfigModal()">取消</button>
+                    <button id="adminConfigSaveBtn" class="btn-confirm">保存</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <div id="knowledgeSettingsModal" class="modal-backdrop">
         <div class="modal" style="width: 450px; padding: 0;">
             <div class="modal-head" style="padding: 16px 20px; border-bottom: 1px solid #eee;">
@@ -500,18 +473,18 @@
 
                 <div id="ks-vector-tab" class="admin-tab-content">
                     <div style="display:flex; gap: 8px; margin-bottom: 8px;">
-                        <button class="btn-primary" onclick="updateVectorInSettings()" style="background:#0f172a;">总更新</button>
-                        <button class="btn-primary" onclick="deleteVectorInSettings()" style="background:#ef4444;">删除</button>
+                        <button class="btn-primary" onclick="updateVectorInSettings()" style="background:#0f172a;">更新向量</button>
+                        <button class="btn-primary" onclick="deleteVectorInSettings()" style="background:#ef4444;">鍒犻櫎</button>
                     </div>
                     <div id="vectorProgressWrap" style="display:none; margin-bottom: 8px;">
                         <div style="height: 6px; background: #e2e8f0; border-radius: 999px; overflow: hidden;">
                             <div id="vectorProgressBar" style="height: 100%; width: 0%; background: linear-gradient(90deg, #0f172a, #1e293b); transition: width 200ms ease;"></div>
                         </div>
-                        <div id="vectorProgressText" style="font-size: 11px; color: #64748b; margin-top: 6px;">准备中</div>
+                        <div id="vectorProgressText" style="font-size: 11px; color: #64748b; margin-top: 6px;">向量处理中...</div>
                     </div>
                     <div id="vectorStatusText" style="font-size: 11px; color: #64748b; margin-bottom: 8px;">未加载</div>
                     <div id="vectorChunkList" style="font-size: 12px; color: #475569; max-height: 180px; overflow-y: auto; border: 1px solid #e2e8f0; border-radius: 6px; padding: 8px; background: #f8fafc;">
-                        <div style="color:#94a3b8;">暂无数据</div>
+                        <div style="color:#94a3b8;">暂无分块</div>
                     </div>
                 </div>
 
@@ -522,7 +495,8 @@
                 </div>
             </div>
             <div class="modal-footer" style="padding: 16px 20px; border-top: 1px solid #eee; display: flex; justify-content: flex-end; gap: 12px;">
-                <button class="btn-cancel" onclick="closeKnowledgeSettingsModal()">取消</button>                <button class="btn-confirm" onclick="applyKnowledgeSettings()" style="background: #111; color: #fff; border: none; padding: 8px 20px; border-radius: 6px; cursor: pointer;">保存</button>
+                <button class="btn-cancel" onclick="closeKnowledgeSettingsModal()">取消</button>
+                <button class="btn-confirm" onclick="applyKnowledgeSettings()" style="background: #111; color: #fff; border: none; padding: 8px 20px; border-radius: 6px; cursor: pointer;">保存设置</button>
             </div>
         </div>
     </div>
@@ -539,5 +513,202 @@
             </div>
         </div>
     </div>
+    <div id="settingsModal" class="modal-backdrop">
+        <div class="modal settings-modal-custom">
+            <div class="modal-head">
+                <h3>设置</h3>
+                <button onclick="closeSettingsModal()" class="btn-close-circle" type="button">×</button>
+            </div>
+            <div class="modal-body">
+                <div class="admin-shell settings-shell">
+                    <aside class="admin-nav settings-nav">
+                        <button class="admin-tab active" data-tab="profile">个人资料</button>
+                        <button class="admin-tab" data-tab="preferences">偏好设置</button>
+                        <button class="admin-tab" data-tab="statistics">使用统计</button>
+                        <div id="settingsAdminGap" class="settings-nav-gap" style="display:none;"></div>
+                        <button id="settingsAdminUsersBtn" class="admin-tab settings-admin-entry" data-tab="admin-users" style="display:none;">用户管理</button>
+                        {% if nexora_mail_enabled %}
+                        <button id="settingsAdminMailBtn" class="admin-tab settings-admin-entry" data-tab="admin-mail" style="display:none;">邮箱管理</button>
+                        {% endif %}
+                        <button id="settingsAdminStatsBtn" class="admin-tab settings-admin-entry" data-tab="admin-stats" style="display:none;">统计信息</button>
+                        <button id="settingsAdminModelsBtn" class="admin-tab settings-admin-entry" data-tab="admin-models" style="display:none;">模型管理</button>
+                        <button id="settingsAdminChromaBtn" class="admin-tab settings-admin-entry" data-tab="admin-chroma" style="display:none;">向量库</button>
+                    </aside>
+                    <section class="admin-content settings-content">
+                        <div id="settings-profile-tab" class="admin-tab-content active">
+                            <div class="settings-placeholder">个人资料</div>
+                            <div class="settings-profile-head">
+                                <div class="settings-avatar-panel">
+                                    <img id="settingsAvatarImg" class="settings-avatar" src="" alt="avatar">
+                                    <div class="settings-avatar-actions">
+                                        <button id="settingsAvatarUploadBtn" class="btn-primary-outline" type="button">上传头像</button>
+                                        <input id="settingsAvatarFileInput" type="file" accept="image/*" style="display:none;">
+                                    </div>
+                                </div>
+                                <div class="settings-profile-meta">
+                                    <div class="form-group">
+                                        <label>用户名</label>
+                                        <input id="set-username-input" class="input-modern" type="text" placeholder="输入用户名">
+                                    </div>
+                                    <div id="set-userid" class="settings-userid-inline">UserID: -</div>
+                                    <div class="form-group">
+                                        <button id="saveProfileBtn" class="btn-primary btn-compact" type="button">保存资料</button>
+                                    </div>
+                                </div>
+                            </div>
+                            <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 14px;">
+                                <div class="form-group"><label>创建时间</label><div id="set-created" class="settings-field">-</div></div>
+                                <div class="form-group"><label>最后登录</label><div id="set-lastlogin" class="settings-field">-</div></div>
+                            </div>
+                        </div>
+                        <div id="settings-preferences-tab" class="admin-tab-content">
+                            <div class="settings-placeholder">偏好设置</div>
+                            <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 14px;">
+                                <div class="form-group"><label>默认模型</label><div id="set-defmodel" class="settings-field">-</div></div>
+                                <div class="form-group"><label>主题</label><div id="set-theme" class="settings-field">-</div></div>
+                                <div class="form-group"><label>流式输出</label><div id="set-stream" class="settings-field">-</div></div>
+                                <div class="form-group"><label>语言</label><div id="set-lang" class="settings-field">-</div></div>
+                            </div>
+                        </div>
+                        <div id="settings-statistics-tab" class="admin-tab-content">
+                            <div class="settings-placeholder">使用统计</div>
+                            <div style="display:grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; margin-bottom: 14px;">
+                                <div class="form-group"><label>对话数</label><div id="set-stat-convs" class="settings-stat">-</div></div>
+                                <div class="form-group"><label>Token 消耗</label><div id="set-stat-tokens" class="settings-stat">-</div></div>
+                                <div class="form-group"><label>知识点数</label><div id="set-stat-knowledge" class="settings-stat">-</div></div>
+                            </div>
+                            <div class="form-group">
+                                <label>模型使用统计</label>
+                                <div id="modelUsageStats" class="settings-field" style="min-height: 120px;">-</div>
+                            </div>
+                        </div>
+                        <div id="settings-admin-users-tab" class="admin-tab-content">
+                            <div class="admin-users-toolbar">
+                                <button class="btn-primary" id="openAddUserForm">+ 添加新用户</button>
+                                <input id="adminUserFilterInput" class="input-modern" placeholder="筛选用户：用户名 / ID / 角色 / IP">
+                            </div>
+                            <div class="admin-users-layout">
+                                <div id="adminUsersList" class="admin-users-list"></div>
+                                <div id="adminUserDetail" class="admin-user-detail">
+                                    <div class="admin-user-detail-empty">请选择左侧用户查看详情</div>
+                                </div>
+                            </div>
+                        </div>
+                        {% if nexora_mail_enabled %}
+                        <div id="settings-admin-mail-tab" class="admin-tab-content">
+                            <div class="admin-users-toolbar">
+                                <button class="btn-primary" id="openAddMailUserForm">+ 添加邮箱用户</button>
+                                <select id="adminMailGroupSelect" class="input-modern" style="max-width: 220px;"></select>
+                                <input id="adminMailUserFilterInput" class="input-modern" placeholder="筛选邮箱用户：用户名 / 权限 / 路径">
+                            </div>
+                            <div class="admin-users-layout">
+                                <div id="adminMailUsersList" class="admin-users-list"></div>
+                                <div id="adminMailUserDetail" class="admin-user-detail">
+                                    <div class="admin-user-detail-empty">请选择左侧邮箱用户查看详情</div>
+                                </div>
+                            </div>
+                        </div>
+                        {% endif %}
+                        <div id="settings-admin-stats-tab" class="admin-tab-content">
+                            <div class="admin-stats-grid">
+                                <div class="stat-card">
+                                    <span class="label">总用户数</span>
+                                    <span id="statTotalUsers" class="value mono">-</span>
+                                </div>
+                                <div class="stat-card">
+                                    <span class="label">管理员数</span>
+                                    <span id="statAdminCount" class="value mono">-</span>
+                                </div>
+                                <div class="stat-card">
+                                    <span class="label">总Token消耗</span>
+                                    <span id="statTotalTokens" class="value mono">-</span>
+                                </div>
+                            </div>
+                            <div class="admin-token-trend-card">
+                                <div class="admin-token-trend-head">
+                                    <h4>Token Trend (30d)</h4>
+                                    <span id="adminTokenTrendMeta" class="admin-token-trend-meta">-</span>
+                                </div>
+                                <div id="adminTokenTrendChart" class="admin-token-trend-chart"></div>
+                                <div id="adminTokenTrendTop" class="admin-token-trend-top"></div>
+                            </div>
+                        </div>
+                        <div id="settings-admin-models-tab" class="admin-tab-content">
+                            <div class="model-admin-panel">
+                                <div class="model-admin-head">
+                                    <h4>模型列表</h4>
+                                    <input id="adminModelSearchInput" class="input-modern model-admin-search" placeholder="搜索：Provider / BaseURL / 模型ID / 名称 / 状态">
+                                    <div class="model-admin-actions">
+                                        <button id="btnAddProvider" class="model-icon-btn model-icon-btn-dark" title="Add Provider"><i class="fa-solid fa-plug"></i></button>
+                                        <button id="btnAddModel" class="model-icon-btn model-icon-btn-dark" title="Add Model"><i class="fa-solid fa-cube"></i></button>
+                                    </div>
+                                </div>
+                                <div id="adminModelConfigList" class="model-admin-list">
+                                    <div class="model-admin-empty">Loading...</div>
+                                </div>
+                            </div>
+                        </div>
+                        <div id="settings-admin-chroma-tab" class="admin-tab-content">
+                            <div class="admin-stats-grid" style="margin-bottom: 12px;">
+                                <div class="stat-card">
+                                    <span class="label" style="font-size: 11px;">ChromaDB 状态</span>
+                                    <span id="statChromaStatus" class="value mono" style="font-size: 14px;">-</span>
+                                </div>
+                                <div class="stat-card">
+                                    <span class="label" style="font-size: 11px;">向量总数</span>
+                                    <span id="statChromaTotal" class="value mono" style="font-size: 14px;">-</span>
+                                </div>
+                            </div>
+                            <div class="admin-search-bar" style="display: flex; gap: 8px; margin-bottom: 12px;">
+                                <input id="chromaSearchInput" class="input-modern" placeholder="搜索向量库..." style="flex: 1; font-size: 12px;">
+                                <button class="btn-primary" onclick="searchChroma()" style="padding: 6px 12px; min-width: 64px; background: #111; color: #fff; border: 1px solid #111;">搜索</button>
+                            </div>
+                            <div id="chromaSearchResults" style="display:none; margin-bottom: 12px; font-size: 12px; color: #475569;"></div>
+                            <div class="admin-table-wrapper">
+                                <table class="admin-table">
+                                    <thead>
+                                        <tr>
+                                            <th>Collection</th>
+                                            <th>向量数</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="adminChromaList"></tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </section>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div id="avatarCropModal" class="modal-backdrop">
+        <div class="modal" style="width: 760px; max-width: 92vw; padding: 0;">
+            <div class="modal-head">
+                <h3>裁切头像</h3>
+                <button class="btn-close-circle" id="closeAvatarCropBtn" type="button">×</button>
+            </div>
+            <div class="modal-body" style="padding: 16px 20px;">
+                <div class="avatar-crop-layout">
+                    <div class="avatar-crop-main">
+                        <canvas id="avatarCropCanvas" style="width: 100%; max-height: 420px; border: 1px solid #e5e7eb; border-radius: 8px; background: #f8fafc; cursor: grab;"></canvas>
+                        <div style="margin-top: 12px; display: flex; align-items: center; gap: 10px;">
+                            <label style="font-size: 12px; color: #64748b; min-width: 70px;">缩放</label>
+                            <input id="avatarCropZoom" type="range" min="100" max="250" value="100" style="flex: 1;">
+                        </div>
+                    </div>
+                    <div class="avatar-crop-preview-wrap">
+                        <div class="avatar-crop-preview-title">圆形预览</div>
+                        <canvas id="avatarPreviewCanvas" width="160" height="160" class="avatar-preview-canvas"></canvas>
+                        <div class="avatar-crop-tip">拖动图片定位，圆形区域将作为头像。</div>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer" style="padding: 12px 20px; display: flex; justify-content: flex-end; gap: 10px;">
+                <button class="btn-cancel" id="cancelAvatarCropBtn" type="button">取消</button>
+                <button class="btn-confirm" id="applyAvatarCropBtn" type="button">应用并上传</button>
+            </div>
+        </div>
+    </div>
 </body>
 </html>
+
