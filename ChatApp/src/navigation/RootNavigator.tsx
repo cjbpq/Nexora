@@ -2,6 +2,10 @@ import { createNativeStackNavigator } from "@react-navigation/native-stack";
 
 import { useSession } from "../app/providers/SessionProvider";
 import { StateView, Screen } from "../design";
+import { AdminHomeScreen } from "../features/admin/screens/AdminHomeScreen";
+import { BookUploadScreen } from "../features/admin/screens/BookUploadScreen";
+import { RefinementQueueScreen } from "../features/admin/screens/RefinementQueueScreen";
+import { VectorizeScreen } from "../features/admin/screens/VectorizeScreen";
 import { BookDetailScreen } from "../features/books/screens/BookDetailScreen";
 import { BookReaderScreen } from "../features/books/screens/BookReaderScreen";
 import { CourseDetailScreen } from "../features/courses/screens/CourseDetailScreen";
@@ -29,6 +33,26 @@ export function RootNavigator() {
   return (
     <Stack.Navigator>
       <Stack.Screen name="MainTabs" component={MainTabs} options={{ headerShown: false }} />
+      <Stack.Screen
+        name="AdminHome"
+        component={AdminHomeScreen}
+        options={{ title: "内容管理" }}
+      />
+      <Stack.Screen
+        name="BookUpload"
+        component={BookUploadScreen}
+        options={{ title: "上传教材" }}
+      />
+      <Stack.Screen
+        name="RefinementQueue"
+        component={RefinementQueueScreen}
+        options={{ title: "提炼队列" }}
+      />
+      <Stack.Screen
+        name="Vectorize"
+        component={VectorizeScreen}
+        options={{ title: "向量化" }}
+      />
       <Stack.Screen
         name="CourseDetail"
         component={CourseDetailScreen}

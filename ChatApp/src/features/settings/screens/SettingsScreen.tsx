@@ -1,6 +1,7 @@
 import { StyleSheet, View } from "react-native";
 
 import { useSession } from "../../../app/providers/SessionProvider";
+import { appInfo } from "../../../config/appInfo";
 import { appEnv } from "../../../config/env";
 import { AppButton, AppCard, AppText, Screen, spacing } from "../../../design";
 
@@ -42,8 +43,9 @@ export function SettingsScreen() {
       <AppText variant="title">设置</AppText>
       <AppCard style={styles.card}>
         <AppText variant="heading">应用信息</AppText>
-        <DetailRow label="版本" value="0.4.0" />
-        <DetailRow label="API 基地址" value={appEnv.nexoraLearningBaseUrl} />
+        <DetailRow label="版本" value={appInfo.version} />
+        <DetailRow label="Learning API" value={appEnv.nexoraLearningBaseUrl} />
+        <DetailRow label="Chat API" value={appEnv.chatDBServerBaseUrl} />
       </AppCard>
       <AppCard style={styles.card}>
         <AppText variant="heading">用户上下文</AppText>

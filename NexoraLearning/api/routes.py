@@ -3258,12 +3258,15 @@ def frontend_learning_feeds():
     channel_map = {str(row.get("id") or "").strip(): row for row in visible_channels if isinstance(row, dict)}
     if selected_channel_id not in channel_map:
         selected_channel_id = "public_all"
-    rows = list_learning_feed_items(_cfg, limit=max(limit, 200))
+    can_view_selected_channel = _can_view_feed_channel(
+        channel_map.get(selected_channel_id, {"id": "public_all", "type": "public"}),
+        username,
+        current_is_admin,
+    )
+    rows = list_learning_feed_items(_cfg, limit=limit, channel_id=selected_channel_id) if can_view_selected_channel else []
     rows = [
         row for row in rows
         if isinstance(row, dict)
-        and str(row.get("channel_id") or "public_all").strip() == selected_channel_id
-        and _can_view_feed_channel(channel_map.get(selected_channel_id, {"id": "public_all", "type": "public"}), username, current_is_admin)
     ][:limit]
     author_cache: Dict[str, Dict[str, Any]] = {}
     current_user_id = username

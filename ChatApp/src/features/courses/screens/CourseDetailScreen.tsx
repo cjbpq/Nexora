@@ -29,6 +29,14 @@ function getBookTitle(book: Book) {
   return String(book.title || "").trim() || "未命名教材";
 }
 
+function getProgressLabel(lecture: Lecture | null) {
+  const progress = Number(lecture?.progress ?? 0);
+  if (!Number.isFinite(progress)) {
+    return "0%";
+  }
+  return `${Math.max(0, Math.min(100, progress))}%`;
+}
+
 export function CourseDetailScreen({ navigation, route }: CourseDetailScreenProps) {
   const { lectureId, lectureTitle } = route.params;
   const [lecture, setLecture] = useState<Lecture | null>(null);
@@ -126,10 +134,26 @@ export function CourseDetailScreen({ navigation, route }: CourseDetailScreenProp
       </View>
 
       <AppCard style={styles.summaryCard}>
-        <AppText variant="caption" tone="secondary">
-          教材数量
-        </AppText>
-        <AppText variant="heading">{books.length} 本</AppText>
+        <View style={styles.summaryRow}>
+          <View style={styles.summaryItem}>
+            <AppText variant="caption" tone="secondary">
+              教材数量
+            </AppText>
+            <AppText variant="heading">{books.length} 本</AppText>
+          </View>
+          <View style={styles.summaryItem}>
+            <AppText variant="caption" tone="secondary">
+              学习进度
+            </AppText>
+            <AppText variant="heading">{getProgressLabel(lecture)}</AppText>
+          </View>
+        </View>
+        {lecture?.current_chapter ? (
+          <AppText tone="secondary">
+            当前章节：{String(lecture.current_chapter)}
+            {lecture.next_chapter ? `，下一章：${String(lecture.next_chapter)}` : ""}
+          </AppText>
+        ) : null}
       </AppCard>
 
       <View style={styles.sectionHeader}>
@@ -173,6 +197,14 @@ const styles = StyleSheet.create({
     gap: spacing.xs,
   },
   summaryCard: {
+    gap: spacing.xs,
+  },
+  summaryRow: {
+    flexDirection: "row",
+    gap: spacing.lg,
+  },
+  summaryItem: {
+    flex: 1,
     gap: spacing.xs,
   },
   sectionHeader: {

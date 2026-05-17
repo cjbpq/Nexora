@@ -1,4 +1,6 @@
 import { BottomTabScreenProps } from "@react-navigation/bottom-tabs";
+import type { CompositeScreenProps } from "@react-navigation/native";
+import type { NativeStackScreenProps } from "@react-navigation/native-stack";
 import { useCallback, useEffect, useState } from "react";
 import { StyleSheet, View } from "react-native";
 
@@ -13,9 +15,12 @@ import {
 } from "../../../design";
 import { getDashboard } from "../../../services/frontendService";
 import type { DashboardResponse, LectureRow } from "../../../services/types";
-import type { MainTabParamList } from "../../../navigation/types";
+import type { MainTabParamList, RootStackParamList } from "../../../navigation/types";
 
-type DashboardScreenProps = BottomTabScreenProps<MainTabParamList, "Dashboard">;
+type DashboardScreenProps = CompositeScreenProps<
+  BottomTabScreenProps<MainTabParamList, "Dashboard">,
+  NativeStackScreenProps<RootStackParamList>
+>;
 
 function normalizeError(err: unknown) {
   return err instanceof Error ? err : new Error(String(err || "Unknown error"));
@@ -61,13 +66,20 @@ function MetricCard({ label, value }: MetricCardProps) {
 
 type LearningCourseCardProps = {
   row: LectureRow;
+  onContinue: () => void;
 };
 
-function LearningCourseCard({ row }: LearningCourseCardProps) {
+function LearningCourseCard({ row, onContinue }: LearningCourseCardProps) {
   const lecture = row.lecture || {};
   const category = String(lecture.category || "").trim();
   const status = String(lecture.status || "").trim();
   const description = String(lecture.description || "").trim();
+  const currentChapter = String(lecture.current_chapter || "").trim();
+  const nextChapter = String(lecture.next_chapter || "").trim();
+  const progress = Number(lecture.progress ?? 0);
+  const progressLabel = Number.isFinite(progress)
+    ? `${Math.max(0, Math.min(100, progress))}%`
+    : "0%";
   const meta = [category, status].filter(Boolean).join(" · ");
 
   return (
@@ -107,12 +119,20 @@ function LearningCourseCard({ row }: LearningCourseCardProps) {
           </AppText>
           <AppText>{formatHours(lecture.study_hours)}</AppText>
         </View>
+        <View style={styles.metaItem}>
+          <AppText variant="caption" tone="secondary">
+            进度
+          </AppText>
+          <AppText>{progressLabel}</AppText>
+        </View>
       </View>
 
       <View style={styles.continueBlock}>
-        <AppButton title="继续学习" disabled style={styles.continueButton} />
+        <AppButton title="继续学习" onPress={onContinue} style={styles.continueButton} />
         <AppText variant="caption" tone="secondary">
-          继续学习位置等待后端支持。
+          {currentChapter
+            ? `当前章节：${currentChapter}${nextChapter ? `，下一章：${nextChapter}` : ""}`
+            : "进入课程教材列表继续阅读。"}
         </AppText>
       </View>
     </AppCard>
@@ -144,6 +164,20 @@ export function DashboardScreen({ navigation }: DashboardScreenProps) {
   const goToCourses = useCallback(() => {
     navigation.navigate("Courses");
   }, [navigation]);
+
+  const openCourseDetail = useCallback(
+    (row: LectureRow) => {
+      const lectureId = String(row.lecture?.id || "").trim();
+      if (!lectureId) {
+        return;
+      }
+      navigation.navigate("CourseDetail", {
+        lectureId,
+        lectureTitle: getLectureTitle(row),
+      });
+    },
+    [navigation],
+  );
 
   if (loading) {
     return (
@@ -210,6 +244,7 @@ export function DashboardScreen({ navigation }: DashboardScreenProps) {
           <LearningCourseCard
             key={lectureId || getLectureTitle(row)}
             row={row}
+            onContinue={() => openCourseDetail(row)}
           />
         );
       })}

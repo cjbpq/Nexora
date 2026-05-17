@@ -1,5 +1,5 @@
 import { appEnv } from "../config/env";
-import type { ApiErrorPayload } from "./types";
+import type { ApiErrorPayload, ApiSuccess } from "./types";
 
 export class ApiClientError extends Error {
   status: number;
@@ -17,108 +17,163 @@ type RequestOptions = RequestInit & {
   query?: Record<string, string | number | boolean | undefined | null>;
 };
 
-let baseUrl = appEnv.nexoraLearningBaseUrl.replace(/\/+$/, "");
-let currentUsername = "";
+type ApiClientState = {
+  baseUrl: string;
+  username: string;
+};
+
+export type ApiClient = {
+  requestJson<T>(path: string, options?: RequestOptions): Promise<T>;
+  getJson<T>(path: string, options?: RequestOptions): Promise<T>;
+  postJson<T>(path: string, payload?: unknown, options?: RequestOptions): Promise<T>;
+  patchJson<T>(path: string, payload?: unknown, options?: RequestOptions): Promise<T>;
+  deleteJson<T>(path: string, options?: RequestOptions): Promise<T>;
+  setBaseUrl(nextBaseUrl: string): void;
+  setUsername(username: string): void;
+  getState(): ApiClientState;
+};
+
+function normalizeBaseUrl(nextBaseUrl: string) {
+  return String(nextBaseUrl || "").trim().replace(/\/+$/, "");
+}
+
+export function createApiClient(initialBaseUrl: string): ApiClient {
+  let baseUrl = normalizeBaseUrl(initialBaseUrl);
+  let currentUsername = "";
+
+  function getBasePathPrefix() {
+    const withoutOrigin = baseUrl.replace(/^[a-z][a-z\d+\-.]*:\/\/[^/?#]+/i, "");
+    const pathOnly = withoutOrigin.split(/[?#]/)[0].replace(/\/+$/, "");
+    return pathOnly.startsWith("/") ? pathOnly : "";
+  }
+
+  function buildUrl(path: string, query?: RequestOptions["query"]) {
+    const normalizedPath = path.startsWith("/") ? path : `/${path}`;
+    const basePathPrefix = getBasePathPrefix();
+    const pathSuffix =
+      basePathPrefix &&
+      (normalizedPath === basePathPrefix || normalizedPath.startsWith(`${basePathPrefix}/`))
+        ? normalizedPath.slice(basePathPrefix.length)
+        : normalizedPath;
+    const queryString = Object.entries(query || {})
+      .filter(([, value]) => value !== undefined && value !== null && value !== "")
+      .map(
+        ([key, value]) =>
+          `${encodeURIComponent(key)}=${encodeURIComponent(String(value))}`,
+      )
+      .join("&");
+
+    const joinedPath = pathSuffix
+      ? pathSuffix.startsWith("/")
+        ? pathSuffix
+        : `/${pathSuffix}`
+      : "";
+    const url = `${baseUrl}${joinedPath}`;
+    return queryString ? `${url}?${queryString}` : url;
+  }
+
+  function buildHeaders(headers?: HeadersInit) {
+    const merged = new Headers(headers);
+    if (currentUsername && !merged.has("X-Nexora-Username")) {
+      merged.set("X-Nexora-Username", currentUsername);
+    }
+    return merged;
+  }
+
+  const requestJson = async <T>(path: string, options: RequestOptions = {}): Promise<T> => {
+    const { query, headers, body, ...rest } = options;
+    const response = await fetch(buildUrl(path, query), {
+      ...rest,
+      body,
+      headers: buildHeaders(headers),
+    });
+    const payload = (await response.json().catch(() => null)) as
+      | ApiSuccess
+      | ApiErrorPayload
+      | null;
+    if (!response.ok || (payload && payload.success === false)) {
+      const message =
+        String(payload?.error || payload?.message || "").trim() ||
+        `Request failed with HTTP ${response.status}`;
+      throw new ApiClientError(message, response.status, payload);
+    }
+    return payload as T;
+  };
+
+  const getJson = <T>(path: string, options?: RequestOptions) =>
+    requestJson<T>(path, { ...options, method: "GET" });
+
+  const postJson = <T>(path: string, payload?: unknown, options?: RequestOptions) =>
+    requestJson<T>(path, {
+      ...options,
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(options?.headers || {}),
+      },
+      body: JSON.stringify(payload ?? {}),
+    });
+
+  const patchJson = <T>(path: string, payload?: unknown, options?: RequestOptions) =>
+    requestJson<T>(path, {
+      ...options,
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+        ...(options?.headers || {}),
+      },
+      body: JSON.stringify(payload ?? {}),
+    });
+
+  const deleteJson = <T>(path: string, options?: RequestOptions) =>
+    requestJson<T>(path, { ...options, method: "DELETE" });
+
+  return {
+    requestJson,
+    getJson,
+    postJson,
+    patchJson,
+    deleteJson,
+    setBaseUrl(nextBaseUrl: string) {
+      baseUrl = normalizeBaseUrl(nextBaseUrl);
+    },
+    setUsername(username: string) {
+      currentUsername = String(username || "").trim();
+    },
+    getState() {
+      return {
+        baseUrl,
+        username: currentUsername,
+      };
+    },
+  };
+}
+
+export const learningApiClient = createApiClient(appEnv.nexoraLearningBaseUrl);
+export const chatApiClient = createApiClient(appEnv.chatDBServerBaseUrl);
+
+export const requestJson = learningApiClient.requestJson;
+export const getJson = learningApiClient.getJson;
+export const postJson = learningApiClient.postJson;
+export const patchJson = learningApiClient.patchJson;
+export const deleteJson = learningApiClient.deleteJson;
 
 export function setApiBaseUrl(nextBaseUrl: string) {
-  baseUrl = String(nextBaseUrl || "").trim().replace(/\/+$/, "");
+  learningApiClient.setBaseUrl(nextBaseUrl);
+}
+
+export function setChatApiBaseUrl(nextBaseUrl: string) {
+  chatApiClient.setBaseUrl(nextBaseUrl);
 }
 
 export function setApiUsername(username: string) {
-  currentUsername = String(username || "").trim();
-}
-
-function getBasePathPrefix() {
-  const withoutOrigin = baseUrl.replace(/^[a-z][a-z\d+\-.]*:\/\/[^/?#]+/i, "");
-  const pathOnly = withoutOrigin.split(/[?#]/)[0].replace(/\/+$/, "");
-  return pathOnly.startsWith("/") ? pathOnly : "";
-}
-
-function buildUrl(path: string, query?: RequestOptions["query"]) {
-  const normalizedPath = path.startsWith("/") ? path : `/${path}`;
-  const basePathPrefix = getBasePathPrefix();
-  const pathSuffix =
-    basePathPrefix &&
-    (normalizedPath === basePathPrefix || normalizedPath.startsWith(`${basePathPrefix}/`))
-      ? normalizedPath.slice(basePathPrefix.length)
-      : normalizedPath;
-  const queryString = Object.entries(query || {})
-    .filter(([, value]) => value !== undefined && value !== null && value !== "")
-    .map(
-      ([key, value]) =>
-        `${encodeURIComponent(key)}=${encodeURIComponent(String(value))}`,
-    )
-    .join("&");
-
-  const joinedPath = pathSuffix
-    ? pathSuffix.startsWith("/")
-      ? pathSuffix
-      : `/${pathSuffix}`
-    : "";
-  const url = `${baseUrl}${joinedPath}`;
-  return queryString ? `${url}?${queryString}` : url;
-}
-
-function buildHeaders(headers?: HeadersInit) {
-  const merged = new Headers(headers);
-  if (currentUsername && !merged.has("X-Nexora-Username")) {
-    merged.set("X-Nexora-Username", currentUsername);
-  }
-  return merged;
-}
-
-export async function requestJson<T>(path: string, options: RequestOptions = {}): Promise<T> {
-  const { query, headers, body, ...rest } = options;
-  const response = await fetch(buildUrl(path, query), {
-    ...rest,
-    body,
-    headers: buildHeaders(headers),
-  });
-  const payload = await response.json().catch(() => null);
-  if (!response.ok || (payload && payload.success === false)) {
-    const message =
-      String(payload?.error || payload?.message || "").trim() ||
-      `Request failed with HTTP ${response.status}`;
-    throw new ApiClientError(message, response.status, payload);
-  }
-  return payload as T;
-}
-
-export function getJson<T>(path: string, options?: RequestOptions) {
-  return requestJson<T>(path, { ...options, method: "GET" });
-}
-
-export function postJson<T>(path: string, payload?: unknown, options?: RequestOptions) {
-  return requestJson<T>(path, {
-    ...options,
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      ...(options?.headers || {}),
-    },
-    body: JSON.stringify(payload ?? {}),
-  });
-}
-
-export function patchJson<T>(path: string, payload?: unknown, options?: RequestOptions) {
-  return requestJson<T>(path, {
-    ...options,
-    method: "PATCH",
-    headers: {
-      "Content-Type": "application/json",
-      ...(options?.headers || {}),
-    },
-    body: JSON.stringify(payload ?? {}),
-  });
-}
-
-export function deleteJson<T>(path: string, options?: RequestOptions) {
-  return requestJson<T>(path, { ...options, method: "DELETE" });
+  learningApiClient.setUsername(username);
+  chatApiClient.setUsername(username);
 }
 
 export function getApiState() {
   return {
-    baseUrl,
-    username: currentUsername,
+    learning: learningApiClient.getState(),
+    chat: chatApiClient.getState(),
   };
 }

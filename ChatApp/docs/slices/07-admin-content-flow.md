@@ -11,9 +11,9 @@
 3. 管理员创建教材元数据并上传教材文件。
 4. App 明确显示教材“已上传，等待提炼处理”。
 5. 管理员打开待提炼列表。
-6. App 调用 `GET /api/frontend/settings/refinement` 展示候选教材和队列状态。
-7. 管理员触发或停止单本教材提炼。
-8. App 轮询队列状态，并展示粗读/精读生成状态和错误。
+6. App 调用 `GET /api/frontend/settings/refinement` 展示候选教材、队列状态和粗读/精读/分节状态。
+7. 管理员触发单本教材的粗读、精读或分节处理。
+8. App 刷新队列状态，并展示粗读、精读、分节状态和错误。
 
 ## API
 
@@ -21,8 +21,14 @@
 - `POST /api/lectures/{lecture_id}/books/{book_id}/file`
 - `GET /api/frontend/settings/refinement`
 - `POST /api/frontend/settings/refinement/start`
+- `POST /api/frontend/settings/refinement/intensive`
+- `POST /api/frontend/settings/refinement/section`
 - `POST /api/frontend/settings/refinement/stop`
-- `GET /api/refinement/queue`，如需要更细队列快照
+- `GET /api/books/refinement/list`
+- `GET /api/lectures/{lecture_id}/books/refinement/list`
+- `GET /api/refinement/queue`
+- `POST /api/lectures/{lecture_id}/books/refinement`
+- `POST /api/lectures/{lecture_id}/books/{book_id}/refinement`
 
 ## 页面
 
@@ -48,6 +54,9 @@
 - queued
 - running
 - stopping
+- coarse ready
+- intensive ready
+- section ready
 
 ## 不做范围
 
@@ -55,6 +64,7 @@
 - 向量化触发和监控
 - AI 问答
 - 模型配置编辑
+- 出题提炼，后端当前对 `/api/frontend/settings/refinement/question` 返回 410
 - 自动上传后立即提炼
 
 ## 验收标准
@@ -63,6 +73,9 @@
 - 上传教材后 UI 不暗示已经完成粗读/精读。
 - 管理员可以查看待提炼教材和队列状态。
 - 管理员可以触发单本教材提炼，提炼语义明确为“粗读/精读生成”。
+- 管理员可以触发精读生成，输出对应 `bookdetail`。
+- 管理员可以触发分节生成，输出对应章节结构。
 - 管理员可以停止单本教材提炼并看到状态变化。
+- 管理员可以触发整门课程下选中教材的批量提炼。
 - 队列和教材状态加载失败时有可重试错误状态。
 - Screen 层没有直接 `fetch`。

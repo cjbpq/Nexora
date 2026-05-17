@@ -43,6 +43,9 @@ export type Lecture = {
   description?: string;
   category?: string;
   status?: string;
+  progress?: number;
+  current_chapter?: string;
+  next_chapter?: string;
   study_hours?: number;
   [key: string]: unknown;
 };

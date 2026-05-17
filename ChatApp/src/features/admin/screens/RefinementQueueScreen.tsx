@@ -1,12 +1,304 @@
-import { AppCard, AppText, Screen } from "../../../design";
+import { useCallback, useEffect, useState } from "react";
+import { StyleSheet, View } from "react-native";
+
+import { useSession } from "../../../app/providers/SessionProvider";
+import {
+  AppButton,
+  AppCard,
+  AppText,
+  Screen,
+  spacing,
+  StateView,
+} from "../../../design";
+import {
+  getRefinementSettings,
+  startIntensiveRefinement,
+  startRefinement,
+  startSectionRefinement,
+  stopRefinement,
+  type RefinementSettingsItem,
+  type RefinementSettingsResponse,
+} from "../../../services/refinementService";
+
+function normalizeError(err: unknown) {
+  return err instanceof Error ? err : new Error(String(err || "Unknown error"));
+}
+
+function getItemTitle(item: RefinementSettingsItem) {
+  return String(item.book_title || item.book_id || "").trim() || "未命名教材";
+}
+
+function getStatusText(value: unknown) {
+  return String(value || "").trim() || "未开始";
+}
+
+function getJobStatusSummary(item: RefinementSettingsItem) {
+  const statuses = [
+    ["粗/精读", item.job_status],
+    ["分节", item.section_job_status],
+  ]
+    .map(([label, value]) => {
+      const text = String(value || "").trim();
+      return text ? `${label}: ${text}` : "";
+    })
+    .filter(Boolean);
+  return statuses.length > 0 ? statuses.join(" · ") : "未开始";
+}
 
 export function RefinementQueueScreen() {
+  const { username } = useSession();
+  const [settings, setSettings] = useState<RefinementSettingsResponse | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<Error | null>(null);
+  const [operationError, setOperationError] = useState<Error | null>(null);
+  const [activeAction, setActiveAction] = useState<string | null>(null);
+
+  const loadSettings = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    setOperationError(null);
+    try {
+      setSettings(await getRefinementSettings());
+    } catch (err) {
+      setSettings(null);
+      setError(normalizeError(err));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadSettings();
+  }, [loadSettings]);
+
+  const runAction = useCallback(
+    async (
+      key: string,
+      item: RefinementSettingsItem,
+      action: (lectureId: string, bookId: string) => Promise<unknown>,
+    ) => {
+      const lectureId = String(item.lecture_id || "").trim();
+      const bookId = String(item.book_id || "").trim();
+      if (!lectureId || !bookId || activeAction) {
+        return;
+      }
+      setActiveAction(key);
+      setOperationError(null);
+      try {
+        await action(lectureId, bookId);
+        await loadSettings();
+      } catch (err) {
+        setOperationError(normalizeError(err));
+      } finally {
+        setActiveAction(null);
+      }
+    },
+    [activeAction, loadSettings],
+  );
+
+  if (loading) {
+    return (
+      <Screen>
+        <StateView title="正在加载提炼队列" message="正在读取教材提炼状态..." loading />
+      </Screen>
+    );
+  }
+
+  if (error) {
+    return (
+      <Screen>
+        <StateView
+          title="提炼队列加载失败"
+          message={error.message}
+          actionLabel="重试"
+          onAction={() => void loadSettings()}
+        />
+      </Screen>
+    );
+  }
+
+  const items = Array.isArray(settings?.items) ? settings.items : [];
+
   return (
     <Screen scroll>
-      <AppText variant="title">提炼队列</AppText>
-      <AppCard>
-        <AppText tone="secondary">后续通过 `refinementService.getRefinementQueue()` 轮询队列。</AppText>
-      </AppCard>
+      <View style={styles.header}>
+        <View style={styles.titleBlock}>
+          <AppText variant="title">提炼队列</AppText>
+          <AppText tone="secondary">
+            共 {items.length} 本教材，运行中 {settings?.queue?.running_count ?? 0} 项。
+          </AppText>
+        </View>
+        <AppButton title="刷新" variant="ghost" onPress={() => void loadSettings()} />
+      </View>
+
+      {operationError ? (
+        <AppCard style={styles.errorCard}>
+          <AppText tone="danger">{operationError.message}</AppText>
+        </AppCard>
+      ) : null}
+
+      {items.length === 0 ? (
+        <StateView
+          title="暂无待提炼教材"
+          message="当前没有可触发提炼的教材。"
+          actionLabel="刷新"
+          onAction={() => void loadSettings()}
+        />
+      ) : (
+        items.map((item) => {
+          const lectureId = String(item.lecture_id || "").trim();
+          const bookId = String(item.book_id || "").trim();
+          const itemKey = `${lectureId}:${bookId}`;
+          return (
+            <AppCard key={itemKey || getItemTitle(item)} style={styles.itemCard}>
+              <View style={styles.itemHeader}>
+                <View style={styles.titleBlock}>
+                  <AppText variant="heading">{getItemTitle(item)}</AppText>
+                  <AppText variant="caption" tone="secondary">
+                    {String(item.lecture_title || "").trim() || "未命名课程"}
+                  </AppText>
+                </View>
+                <AppText variant="caption" tone="secondary">
+                  {getJobStatusSummary(item)}
+                </AppText>
+              </View>
+
+              <View style={styles.statusGrid}>
+                <StatusCell label="粗读" value={item.coarse_status} error={item.coarse_error} />
+                <StatusCell label="精读" value={item.intensive_status} error={item.intensive_error} />
+                <StatusCell label="分节" value={item.section_status} error={item.section_error} />
+              </View>
+
+              {item.progress_text ? (
+                <AppText variant="caption" tone="secondary">
+                  {String(item.progress_text)}
+                </AppText>
+              ) : null}
+
+              <View style={styles.actions}>
+                <AppButton
+                  title="粗读"
+                  loading={activeAction === `${itemKey}:coarse`}
+                  onPress={() =>
+                    void runAction(`${itemKey}:coarse`, item, (nextLectureId, nextBookId) =>
+                      startRefinement(nextLectureId, nextBookId, {
+                        actor: username,
+                      }),
+                    )
+                  }
+                  style={styles.actionButton}
+                />
+                <AppButton
+                  title="精读"
+                  variant="secondary"
+                  loading={activeAction === `${itemKey}:intensive`}
+                  onPress={() =>
+                    void runAction(`${itemKey}:intensive`, item, (nextLectureId, nextBookId) =>
+                      startIntensiveRefinement(nextLectureId, nextBookId, {
+                        actor: username,
+                      }),
+                    )
+                  }
+                  style={styles.actionButton}
+                />
+                <AppButton
+                  title="分节"
+                  variant="secondary"
+                  loading={activeAction === `${itemKey}:section`}
+                  onPress={() =>
+                    void runAction(`${itemKey}:section`, item, (nextLectureId, nextBookId) =>
+                      startSectionRefinement(nextLectureId, nextBookId, {
+                        actor: username,
+                      }),
+                    )
+                  }
+                  style={styles.actionButton}
+                />
+                <AppButton
+                  title="停止"
+                  variant="ghost"
+                  loading={activeAction === `${itemKey}:stop`}
+                  onPress={() =>
+                    void runAction(`${itemKey}:stop`, item, (nextLectureId, nextBookId) =>
+                      stopRefinement(nextLectureId, nextBookId, {
+                        actor: username,
+                      }),
+                    )
+                  }
+                  style={styles.actionButton}
+                />
+              </View>
+            </AppCard>
+          );
+        })
+      )}
     </Screen>
   );
 }
+
+function StatusCell({
+  label,
+  value,
+  error,
+}: {
+  label: string;
+  value?: string;
+  error?: string;
+}) {
+  const errorText = String(error || "").trim();
+  return (
+    <View style={styles.statusCell}>
+      <AppText variant="caption" tone="secondary">
+        {label}
+      </AppText>
+      <AppText>{getStatusText(value)}</AppText>
+      {errorText ? (
+        <AppText variant="caption" tone="danger">
+          {errorText}
+        </AppText>
+      ) : null}
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  header: {
+    alignItems: "flex-start",
+    flexDirection: "row",
+    gap: spacing.md,
+  },
+  titleBlock: {
+    flex: 1,
+    gap: spacing.xs,
+  },
+  errorCard: {
+    gap: spacing.sm,
+  },
+  itemCard: {
+    gap: spacing.md,
+  },
+  itemHeader: {
+    alignItems: "flex-start",
+    flexDirection: "row",
+    gap: spacing.md,
+  },
+  statusGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: spacing.md,
+  },
+  statusCell: {
+    flexBasis: "30%",
+    flexGrow: 1,
+    gap: spacing.xs,
+    minWidth: 88,
+  },
+  actions: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: spacing.sm,
+  },
+  actionButton: {
+    minWidth: 88,
+  },
+});

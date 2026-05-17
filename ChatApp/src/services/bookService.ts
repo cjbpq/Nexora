@@ -53,8 +53,22 @@ export function getBookInfo(lectureId: string, bookId: string) {
   );
 }
 
+export function saveBookInfo(lectureId: string, bookId: string, content: string) {
+  return postJson<{ success: boolean; lecture_id: string; book_id: string; content?: string }>(
+    `/api/lectures/${encodeURIComponent(lectureId)}/books/${encodeURIComponent(bookId)}/bookinfo`,
+    { content },
+  );
+}
+
 export function getBookDetail(lectureId: string, bookId: string) {
   return getJson<{ success: boolean; lecture_id: string; book_id: string; content: string }>(
     `/api/lectures/${encodeURIComponent(lectureId)}/books/${encodeURIComponent(bookId)}/bookdetail`,
+  );
+}
+
+export function saveBookDetail(lectureId: string, bookId: string, content: string) {
+  return postJson<{ success: boolean; lecture_id: string; book_id: string; content?: string }>(
+    `/api/lectures/${encodeURIComponent(lectureId)}/books/${encodeURIComponent(bookId)}/bookdetail`,
+    { content },
   );
 }

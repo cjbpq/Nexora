@@ -1,5 +1,11 @@
+import type { NavigatorScreenParams } from "@react-navigation/native";
+
 export type RootStackParamList = {
-  MainTabs: undefined;
+  MainTabs: NavigatorScreenParams<MainTabParamList>;
+  AdminHome: undefined;
+  BookUpload: undefined;
+  RefinementQueue: undefined;
+  Vectorize: undefined;
   CourseDetail: {
     lectureId: string;
     lectureTitle?: string;
@@ -22,7 +28,9 @@ export type RootStackParamList = {
 export type MainTabParamList = {
   Dashboard: undefined;
   Courses: undefined;
+  Feed: undefined;
   Chat: undefined;
+  Admin: undefined;
   Settings: undefined;
 };
 
