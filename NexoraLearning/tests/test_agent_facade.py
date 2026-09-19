@@ -578,6 +578,22 @@ class AgentFacadeTests(unittest.TestCase):
                      "options": ["读未提交", "串行化"], "answer": "B", "source_id": "q3"},
                 ],
             }, ensure_ascii=False), encoding="utf-8")
+            # 云端真实情况：题干不含概念名、题目无 related_concept_id，但章名能对上图谱里的章 → 按章兜底绑定
+            from core.cognition.review_bridge import resolve_concept
+            concept, binding = resolve_concept(
+                cfg, "demo", {"title": "安装介质挂载位置", "content": "安装前要挂载哪个目录的 iso"},
+                question_id="qx", lecture_id=lecture["id"], book_id="b_other", chapter_index=5,
+                chapter_name="任务1 梯度下降安装服务",
+            )
+            self.assertIsNotNone(concept)
+            self.assertEqual(binding, "chapter_name")
+            self.assertIn(concept["name"], {"梯度下降", "学习率"})
+            missing, _ = resolve_concept(
+                cfg, "demo", {"title": "无关", "content": "无关"},
+                question_id="qy", lecture_id=lecture["id"], book_id="b_other", chapter_index=5,
+                chapter_name="完全不相干的章",
+            )
+            self.assertIsNone(missing)
             client = app.test_client()
             headers = {"X-Nexora-Username": "demo"}
             base = {"quiz_id": quiz_id, "lecture_id": lecture["id"], "book_id": book["id"],
@@ -605,7 +621,9 @@ class AgentFacadeTests(unittest.TestCase):
             self.assertTrue(third["completed"])
             self.assertEqual(third["quiz_correct"], 2)
             self.assertEqual(third["quiz_total"], 3)
-            self.assertEqual(third["evidence_written"], 0)  # 无关题绑不到概念，跳过不捏造
+            # q3 题干不含概念名，但章名能对上图谱 → 按章兜底绑定（低置信度），不再静默跳过
+            self.assertEqual(third["evidence_written"], 1)
+            self.assertTrue(third["items"][0]["concept_id"])
             entries = client.get("/api/agent/v1/events", headers=headers).get_json()["data"]["entries"]
             self.assertTrue(any("2/3" in str(item.get("text") or "") for item in entries))
 
@@ -616,8 +634,11 @@ class AgentFacadeTests(unittest.TestCase):
             self.assertEqual(again["quiz_correct"], 2)
 
             rows = CognitiveEvidenceStore(cfg).list("demo")
-            self.assertEqual(len(rows), 2)
+            self.assertEqual(len(rows), 3)
             by_type = {row.evidence_type: row for row in rows}
+            chapter_bound = [row for row in rows if row.metadata.get("binding") == "chapter_name"]
+            self.assertEqual(len(chapter_bound), 1)
+            self.assertEqual(chapter_bound[0].confidence, 0.6)
             self.assertIn("objective_question", by_type)
             self.assertIn("revealed_answer", by_type)
             self.assertEqual(by_type["revealed_answer"].score, 0.0)

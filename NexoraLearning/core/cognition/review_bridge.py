@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 import time
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
@@ -73,6 +74,7 @@ def resolve_concept(
     book_id: str,
     chapter_index: int,
     concepts: Optional[List[Dict[str, Any]]] = None,
+    chapter_name: str = "",
 ) -> Tuple[Optional[Dict[str, Any]], str]:
     """返回 (概念, 绑定方式)。概念为 None 表示无法绑定。"""
     if concepts is None:
@@ -97,7 +99,59 @@ def resolve_concept(
     matched = _match_concepts(title, scoped, -1, book_id) if title.strip() else []
     if matched:
         return matched[0], "title_book"
+    # 模型出的题几乎不含概念名；课程级图谱的概念又只挂在第一本书上。按章名把题归到图谱里的那一章，
+    # 再在该章概念里选与题干词重叠最多的一个（都不重叠就取第一个）。置信度调低，供下游打折。
+    fallback = _chapter_fallback(title, scoped, chapter_name)
+    if fallback is not None:
+        return fallback, "chapter_name"
     return None, ""
+
+
+def _normalize(text: str) -> str:
+    return re.sub(r"\s+", "", str(text or "")).casefold()
+
+
+def _terms(text: str) -> set:
+    normalized = _normalize(text)
+    tokens = set(re.findall(r"[a-z0-9_]+", normalized))
+    for word in re.findall(r"[一-鿿]+", normalized):
+        tokens.update(word[i:i + 2] for i in range(max(1, len(word) - 1)))
+    return tokens
+
+
+def _chapter_similarity(left: str, right: str) -> int:
+    a, b = _normalize(left), _normalize(right)
+    if not a or not b:
+        return 0
+    if a in b or b in a:
+        return min(len(a), len(b))
+    best = 0
+    for i in range(len(a)):
+        for j in range(len(b)):
+            k = 0
+            while i + k < len(a) and j + k < len(b) and a[i + k] == b[j + k]:
+                k += 1
+            best = max(best, k)
+    return best
+
+
+def _chapter_fallback(title: str, concepts: List[Dict[str, Any]], chapter_name: str) -> Optional[Dict[str, Any]]:
+    if not concepts or not str(chapter_name or "").strip():
+        return None
+    by_chapter: Dict[str, List[Dict[str, Any]]] = {}
+    for row in concepts:
+        by_chapter.setdefault(str(row.get("chapter_name") or ""), []).append(row)
+    ranked = sorted(((_chapter_similarity(name, chapter_name), name) for name in by_chapter), reverse=True)
+    if not ranked or ranked[0][0] < 4:
+        return None
+    candidates = by_chapter[ranked[0][1]]
+    question_terms = _terms(title)
+    scored = sorted(
+        candidates,
+        key=lambda row: len(question_terms & _terms(f"{row.get('name') or ''} {row.get('detail') or ''}")),
+        reverse=True,
+    )
+    return scored[0] if scored else None
 
 
 def record_review_evidence(
@@ -124,7 +178,7 @@ def record_review_evidence(
     concept, binding = resolve_concept(
         cfg, username, question,
         question_id=question_id, lecture_id=lecture_id, book_id=book_id,
-        chapter_index=chapter_index, concepts=concepts,
+        chapter_index=chapter_index, concepts=concepts, chapter_name=chapter_name,
     )
     base = {"quiz_id": quiz_id, "question_id": question_id, "user_id": username}
     if concept is None:
@@ -143,7 +197,7 @@ def record_review_evidence(
         "source_id": f"{quiz_id}:{question_id}"[:200],
         "occurred_at": timestamp,
         "score": 1.0 if is_correct else 0.0,
-        "confidence": 0.6 if revealed_without_answer else 1.0,
+        "confidence": 0.6 if (revealed_without_answer or binding == "chapter_name") else 1.0,
         "metadata": {
             "question_id": question_id,
             "chapter_name": str(chapter_name or "")[:160],
