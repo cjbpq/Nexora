@@ -6,6 +6,7 @@ and assessment evidence describes demonstrated knowledge. Keep those distinct.
 from __future__ import annotations
 
 import hashlib
+import json
 import time
 from typing import Any, Dict, Mapping
 
@@ -87,20 +88,41 @@ def learning_observations(cfg: Mapping[str, Any], username: str) -> Dict[str, An
     memories = retrieve_memories(cfg, username, limit=16)
     memory_counts = memory_stats(cfg, username)
     labels = {"goal": "学习目标", "preference": "学习偏好", "difficulty": "你提到的困难",
-              "background": "你介绍的背景", "interest": "学习兴趣", "conversation": "最近交流"}
+              "background": "你介绍的背景", "interest": "学习兴趣", "conversation": "最近交流", "insight": "我的观察"}
     for row in memories:
         at = _observation_timestamp(row.get("occurred_at"))
         latest_at = max(latest_at, at)
+        kind = str(row.get("kind") or "conversation")
+        said = str(row.get("said_on") or "")
+        if kind == "insight":
+            sources = []
+            try:
+                sources = [str(s) for s in json.loads(str(row.get("value") or "[]"))]
+            except (TypeError, ValueError):
+                sources = []
+            facets.append({
+                "id": "memory_" + row["id"], "kind": "insight",
+                "claim": str(row.get("quote") or ""), "confidence": float(row.get("confidence") or 0),
+                "concept": labels["insight"], "conceptId": "",
+                "lectureId": "", "bookId": "",
+                "evidence": [{"label": f"{said} 夜间反思，依据 {len(sources)} 条你的原话", "source": "reflection",
+                              "sourceId": str(row.get("source_id") or ""), "occurredAt": at, "conceptId": ""}]
+                            + [{"label": f"原话记忆 {sid}", "source": "user_message", "sourceId": sid, "occurredAt": 0, "conceptId": ""}
+                               for sid in sources[:4]],
+                "userVerdict": None, "updatedAt": at, "insight": True,
+            })
+            continue
         facets.append({
-            "id": "memory_" + row["id"], "kind": str(row.get("kind") or "conversation"),
+            "id": "memory_" + row["id"], "kind": kind,
             "claim": str(row.get("claim") or row.get("quote") or ""),
             "confidence": float(row.get("confidence") or 0),
-            "concept": labels.get(row.get("kind"), "你的自述"), "conceptId": "",
+            "concept": labels.get(kind, "你的自述"), "conceptId": "",
             "lectureId": str(row.get("lecture_id") or ""), "bookId": str(row.get("book_id") or ""),
-            "evidence": [{"label": f"{time.strftime('%m-%d %H:%M', time.localtime(at)) if at else ''} 你说：{row.get('quote', '')}",
+            "evidence": [{"label": f"{time.strftime('%m-%d %H:%M', time.localtime(at)) if at else ''} 你说：{row.get('quote', '')}"
+                                   + (f"（来源：{row.get('source') or 'app'}）" if row.get("source") else ""),
                           "source": "user_message", "sourceId": str(row.get("source_id") or ""),
                           "occurredAt": at, "conceptId": ""}],
-            "userVerdict": None, "updatedAt": at,
+            "userVerdict": None, "updatedAt": at, "saidOn": said,
         })
     return {
         "facets": facets, "courses": courses,

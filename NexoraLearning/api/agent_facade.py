@@ -1049,6 +1049,12 @@ def agent_ask_in_context():
     from core.cognition.triggers import schedule_confusion_scan
 
     schedule_confusion_scan(_CFG, username, reason="ask_in_context")
+    # 模型抽取记忆（异步）：正则快路径没抓到的自述由模型补召回，结果不进时间线正文。
+    if remembered.get("created") and _PROXY is not None:
+        from core.memory.memory_extract import schedule_extraction
+
+        schedule_extraction(_PROXY, _CFG, username, text=question, answer=answer, source_id=message_id,
+                            lecture_id=lecture_id, book_id=book_id, occurred_at=timestamp, model=model)
     return _response(action=action, data={"answer": answer, "source": answer_source, "entry_source": source,
                                         "lecture_id": lecture_id, "book_id": book_id, "context_chars": len(context_text),
                                         "memory_updated": bool(remembered.get("created")),
@@ -1080,6 +1086,29 @@ def agent_review_plan():
     if isinstance(response_payload, dict):
         _remember_idempotent(cache_key, response_payload)
     return jsonify(response_payload)
+
+
+def _expire_stable_difficulties(username: str, lecture_id: str, book_id: str) -> int:
+    try:
+        from core.cognition.service import CognitionService
+        from core.memory.evidence_memory import expire_difficulties
+
+        overview = CognitionService(_CFG).get_overview(username, lecture_id=lecture_id, book_id=book_id)
+    except Exception:
+        return 0
+    expired = 0
+    for state in overview.get("states") or []:
+        if not isinstance(state, Mapping) or str(state.get("status") or "") != "stable":
+            continue
+        concept = state.get("concept") if isinstance(state.get("concept"), Mapping) else {}
+        try:
+            expired += expire_difficulties(_CFG, username, str(concept.get("name") or ""),
+                                           reason_id=str(concept.get("concept_id") or ""))
+        except Exception:
+            continue
+    if expired:
+        log_event("memory_difficulty_expired", "概念稳定后困难记忆自动失效", payload={"user_id": username, "count": expired})
+    return expired
 
 
 @agent_facade_bp.route("/review/submit", methods=["POST"])
@@ -1212,6 +1241,9 @@ def agent_review_submit():
         from core.cognition.triggers import schedule_confusion_scan
 
         schedule_confusion_scan(_CFG, username, reason="review_submit")
+    if evidence_written:
+        # 时间有效性：概念到 stable 后，提到它的「困难」记忆自动失效（不删，标 superseded）。
+        _expire_stable_difficulties(username, lecture_id, book_id)
     return _response(action=action, data={
         "quiz_id": quiz_id,
         "score": score_text,
@@ -1443,6 +1475,8 @@ def _timeline_entries(records: list[Dict[str, Any]], limit: int = 100) -> list[D
                 # 内部记账事件（裁决回喂、心跳）不上时间线：那是它的账本，不是它的日记。
                 continue
             text = _EVENT_COPY.get(event_name)
+            if event_name == "memory_noted":
+                text = f"我记住了：{str(row.get('quote') or '').strip()[:120]}"
             if text is None:
                 text = f"你完成了章节：{str(row.get('chapter_name') or str(row.get('chapter_index') or '')).strip()}" if event_name == "chapter_completed" else f"我记下了一件事：{_humanize_event(event_name)}。"
             entries.append({

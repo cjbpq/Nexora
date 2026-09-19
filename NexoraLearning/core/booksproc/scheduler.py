@@ -643,6 +643,13 @@ def _loop(cfg: Mapping[str, Any]) -> None:
                 last_check = now
                 if should_run_nightly(cfg, now):
                     run_nightly_pass(cfg, now=now)
+                    # 记忆反思：对近 7 天活跃用户合并情景记忆，产出 ≤ 2 条 insight（每天随夜间备课跑一次）。
+                    try:
+                        from core.memory.reflection import run_reflection_for_active_users
+
+                        run_reflection_for_active_users(cfg, now=now)
+                    except Exception as exc:
+                        log_event("memory_reflection_failed", "夜间反思失败", payload={"error": str(exc)[:200]})
             if now - last_monitor >= monitor_interval:
                 last_monitor = now
                 _complete_batches(cfg, now=now)

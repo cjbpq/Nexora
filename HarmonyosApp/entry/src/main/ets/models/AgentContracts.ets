@@ -252,6 +252,8 @@ export interface MirrorEvidenceRef {
   label: string;
   source: string;
   conceptId: string;
+  sourceId?: string;
+  occurredAt?: number;
 }
 
 export interface MirrorFacet {
@@ -265,6 +267,10 @@ export interface MirrorFacet {
   evidence: MirrorEvidenceRef[];
   userVerdict: string | null;
   kind?: string;
+  /** 记忆 facet：原话的日期（「9月19日」）。 */
+  saidOn?: string;
+  /** 夜间反思结论（排最前）。 */
+  insight?: boolean;
 }
 
 export interface MirrorMasteryCell {

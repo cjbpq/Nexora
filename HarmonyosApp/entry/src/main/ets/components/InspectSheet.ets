@@ -245,6 +245,12 @@ export struct InspectSheet {
   @Builder
   facetRow(facet: MirrorFacet) {
     Column({ space: NxGrid * 2 }) {
+      if (facet.insight === true || (facet.saidOn !== undefined && facet.saidOn.length > 0)) {
+        Text(facet.insight === true ? '我的观察 · 夜间反思' : '你 ' + facet.saidOn + ' 说过')
+          .fontSize(NxFontSize.xs)
+          .fontColor(facet.insight === true ? this.palette().primary : this.palette().text4)
+          .width('100%')
+      }
       Row({ space: NxGrid }) {
         Text(facet.claim)
           .fontSize(NxFontSize.lg)

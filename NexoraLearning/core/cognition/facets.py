@@ -261,7 +261,8 @@ def build_facets(cfg: Mapping[str, Any], username: str) -> Dict[str, Any]:
             note = str(correction.get("note") or "").strip()
             facet["claim"] = f"你不同意我对{facet.get('concept') or '这条记录'}的判断，我会重新核实。" + (f"你说：{note}" if note else "")
             facet["confidence"] = min(facet["confidence"], 0.5)
-    facets.sort(key=lambda row: (row.get("updatedAt", 0), row["confidence"]), reverse=True)
+    # insight（夜间反思结论）排最前，其余按更新时间与置信度。
+    facets.sort(key=lambda row: (bool(row.get("insight")), row.get("updatedAt", 0), row["confidence"]), reverse=True)
     activity = observed["activity"]
     activity["assessed_concepts"] = sum(1 for row in mastery_cells if row["mastery"] is not None)
     activity["observed_concepts"] = sum(1 for row in mastery_cells if row["status"] != "unknown")
