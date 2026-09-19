@@ -212,7 +212,9 @@ def record_user_message(cfg: Mapping[str, Any], user_id: str, *, text: str, sour
             _insert_memory(connection, source_id=event_id, claim=claim, lecture_id=lecture_id,
                            book_id=book_id, occurred_at=timestamp)
         rows = connection.execute(_SELECT + " WHERE m.source_id=?", (event_id,)).fetchall()
-        return {"created": True, "memories": [_public(row) for row in rows]}
+        result = {"created": True, "memories": [_public(row) for row in rows]}
+    _index_rows(cfg, user_id, result["memories"])
+    return result
 
 
 def correct_memory(cfg: Mapping[str, Any], user_id: str, memory_id: str, *, verdict: str,
@@ -258,7 +260,21 @@ def correct_memory(cfg: Mapping[str, Any], user_id: str, memory_id: str, *, verd
                                        (replacement, memory_id))
             connection.execute("INSERT INTO feedback VALUES (?,?,?,?)", (source_id, memory_id, verdict, replacement))
             row = connection.execute(_SELECT + " WHERE m.id=?", (replacement or memory_id,)).fetchone()
-            return {"updated": True, "duplicate": False, "memory": _public(row)}
+            touched = [_public(r) for r in connection.execute(
+                _SELECT + " WHERE m.id IN (?,?)", (memory_id, replacement or memory_id)).fetchall()]
+            result = {"updated": True, "duplicate": False, "memory": _public(row)}
+    _index_rows(cfg, user_id, touched)
+    return result
+
+
+def _index_rows(cfg: Mapping[str, Any], user_id: str, rows: List[Dict[str, Any]]) -> None:
+    """向量索引只是索引：异步、失败静默、未配置则跳过。"""
+    try:
+        from core.memory.memory_index import index_async
+
+        index_async(cfg, user_id, rows)
+    except Exception:
+        pass
 
 
 def _terms(text: str) -> set[str]:
@@ -378,7 +394,10 @@ def apply_model_claims(cfg: Mapping[str, Any], user_id: str, *, source_id: str, 
                 (applied[0], event_id),
             )
         rows = connection.execute(_SELECT + " WHERE m.id IN (%s)" % ",".join("?" * len(applied)), applied).fetchall() if applied else []
-    return {"applied": len(applied), "skipped": skipped, "memories": [_public(row) for row in rows]}
+        superseded_rows = connection.execute(_SELECT + " WHERE m.source_id=? AND m.status!='active'", (event_id,)).fetchall() if applied else []
+    public_rows = [_public(row) for row in rows]
+    _index_rows(cfg, user_id, public_rows + [_public(row) for row in superseded_rows])
+    return {"applied": len(applied), "skipped": skipped, "memories": public_rows}
 
 
 def expire_difficulties(cfg: Mapping[str, Any], user_id: str, concept_name: str, *, reason_id: str) -> int:
@@ -398,7 +417,10 @@ def expire_difficulties(cfg: Mapping[str, Any], user_id: str, concept_name: str,
             for memory_id in expired:
                 connection.execute("UPDATE memories SET status='superseded', superseded_by=? WHERE id=?",
                                    (f"stable:{str(reason_id)[:120]}", memory_id))
-            return len(expired)
+            touched = [_public(r) for r in connection.execute(
+                _SELECT + " WHERE m.id IN (%s)" % ",".join("?" * len(expired)), expired).fetchall()] if expired else []
+    _index_rows(cfg, user_id, touched)
+    return len(expired)
 
 
 def retrieve_memories(cfg: Mapping[str, Any], user_id: str, *, query: str = "",
@@ -415,11 +437,22 @@ def retrieve_memories(cfg: Mapping[str, Any], user_id: str, *, query: str = "",
         rows = [dict(row) for row in connection.execute(sql, params).fetchall()]
     terms = _terms(str(query or ""))
     now = int(time.time())
+    # 语义候选（NexoraDB 索引可用时）：向量 top-20 先于词重叠；无索引退回二元词重叠。
+    semantic_rank: Dict[str, int] = {}
+    if query:
+        try:
+            from core.memory.memory_index import search as semantic_search
+
+            semantic_rank = {memory_id: position for position, memory_id in
+                             enumerate(semantic_search(cfg, user_id, str(query), 20, lecture_id=lecture_id))}
+        except Exception:
+            semantic_rank = {}
 
     def rank(row):
         # 情景记忆（conversation）按 30 天衰减：过期的排在同类之后，但不删除。
         fresh = row["kind"] != "conversation" or now - int(row["occurred_at"] or 0) <= CONVERSATION_DECAY_SECONDS
-        return (len(terms & _terms(row["quote"])), row["kind"] != "conversation", fresh,
+        semantic = (len(semantic_rank) - semantic_rank[row["id"]]) if row["id"] in semantic_rank else 0
+        return (semantic + len(terms & _terms(row["quote"])), row["kind"] != "conversation", fresh,
                 row["occurred_at"], row["recorded_at"], row["source_order"])
 
     rows.sort(key=rank, reverse=True)
