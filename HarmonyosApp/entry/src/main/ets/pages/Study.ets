@@ -270,6 +270,25 @@ export struct StudyView {
     return '读完章节后可以点「读完这章」确认';
   }
 
+  /** 课程有多本教材时，把当前在读那本的覆盖并排写出来（「本课程 1.2% · 本书 3.4%」），三处口径同屏。 */
+  private bookCoverageSuffix(lecture: ContextLecture): string {
+    if (lecture.books.length <= 1) {
+      return '';
+    }
+    let current: ContextBook | null = null;
+    for (const book of lecture.books) {
+      if (lecture.current_book_id !== undefined && book.id === lecture.current_book_id) {
+        current = book;
+      }
+    }
+    if (current === null || current.reading_progress_percent === undefined) {
+      return '';
+    }
+    const value = current.reading_progress_percent;
+    const label = value > 0 && value < 0.1 ? '<0.1' : String(Math.round(value * 10) / 10);
+    return ' · 本书 ' + label + '%';
+  }
+
   @Builder
   courseChip(lecture: ContextLecture) {
     Column({ space: NxGrid }) {
@@ -357,7 +376,7 @@ export struct StudyView {
               .width('100%')
               .height(6)
               .color(this.palette().primary)
-            Text('阅读覆盖 ' + this.coverageLabel(this.selectedLecture()!) + '% · ' + this.completionLabel(this.selectedLecture()!))
+            Text('本课程阅读覆盖 ' + this.coverageLabel(this.selectedLecture()!) + '%' + this.bookCoverageSuffix(this.selectedLecture()!) + ' · ' + this.completionLabel(this.selectedLecture()!))
               .fontSize(NxFontSize.xs)
               .fontColor(this.palette().text3)
               .width('100%')

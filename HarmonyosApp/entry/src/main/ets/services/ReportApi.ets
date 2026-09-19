@@ -31,6 +31,10 @@ export interface ReportSummary {
   reviewed_questions: number;
   correct_questions: number;
   accuracy: number | null;
+  /** 分母口径：本章 / 本书 / 本课程。 */
+  scope_label?: string;
+  /** 课程级阅读覆盖（所有教材汇总），与本书口径同屏显示。 */
+  course_reading_progress_percent?: number;
 }
 
 export interface ReportNote {
@@ -50,6 +54,10 @@ export interface ReportPayload {
 export interface GraphConcept {
   name: string;
   detail: string;
+  concept_id?: string;
+  mastery?: number | null;
+  status?: string;
+  assessed_count?: number;
 }
 
 export interface GraphChapter {
@@ -65,11 +73,16 @@ export interface GraphRelation {
   from: string;
   to: string;
   type: string;
+  label?: string;
 }
 
 export interface GraphBody {
   chapters: GraphChapter[];
   relations: GraphRelation[];
+  reading_progress_percent?: number;
+  book_reading_progress_percent?: number;
+  course_reading_progress_percent?: number;
+  concepts_available?: boolean;
 }
 
 export interface GraphPayload {

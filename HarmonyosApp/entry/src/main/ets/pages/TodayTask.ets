@@ -52,10 +52,12 @@ struct TodayTask {
   @State quizId: string = '';
   @State questions: ReviewQuestion[] = [];
   @State revealed: boolean[] = [];
+  @State settled: boolean[] = [];
   @State picked: string[] = [];
   @State submitting: boolean = false;
   @State submitted: boolean = false;
   @State scoreText: string = '';
+  @State progressText: string = '';
   @State showPickerSheet: boolean = false;
   @State pickerKind: string = '';
   @StorageProp('nxDarkMode') nxDark: boolean = false;
@@ -222,10 +224,12 @@ struct TodayTask {
     this.taskError = '';
     this.questions = [];
     this.revealed = [];
+    this.settled = [];
     this.picked = [];
     this.quizId = '';
     this.submitted = false;
     this.scoreText = '';
+    this.progressText = '';
     try {
       const target: LearnTarget = {
         lecture_id: choice.lectureId,
@@ -267,12 +271,15 @@ struct TodayTask {
           this.quizId = data.task.result.quiz_id;
           this.questions = data.task.result.questions;
           const flags: boolean[] = [];
+          const settledFlags: boolean[] = [];
           const picks: string[] = [];
           for (const question of this.questions) {
             flags.push(false);
+            settledFlags.push(false);
             picks.push('');
           }
           this.revealed = flags;
+          this.settled = settledFlags;
           this.picked = picks;
         }
       } else if (data.task.status === 'failed') {
@@ -332,41 +339,108 @@ struct TodayTask {
     return question.source_id.length > 0 ? question.source_id : ('q' + index);
   }
 
+  private learnTarget(choice: BookChoice): LearnTarget {
+    const target: LearnTarget = {
+      lecture_id: choice.lectureId,
+      lecture_title: choice.lectureTitle,
+      book_id: choice.bookId,
+      book_title: choice.bookTitle,
+      chapter_index: this.chapterIndex,
+      chapter_name: this.chapterLabel(),
+      chapter_range: '',
+    };
+    return target;
+  }
+
+  private settledCount(): number {
+    let count = 0;
+    for (const flag of this.settled) {
+      if (flag) {
+        count++;
+      }
+    }
+    return count;
+  }
+
+  private applySubmitResult(data: ReviewSubmitData, indexes: number[]): void {
+    const nextSettled: boolean[] = [];
+    const nextRevealed: boolean[] = [];
+    for (let i = 0; i < this.questions.length; i++) {
+      const hit = indexes.indexOf(i) >= 0;
+      nextSettled.push(hit ? true : this.settled[i]);
+      nextRevealed.push(hit ? true : this.revealed[i]);
+    }
+    this.settled = nextSettled;
+    this.revealed = nextRevealed;
+    const quizCorrect = data.quiz_correct !== undefined ? data.quiz_correct : data.correct;
+    const quizTotal = data.quiz_total !== undefined ? data.quiz_total : this.questions.length;
+    this.progressText = '已结算 ' + (data.quiz_settled !== undefined ? data.quiz_settled : this.settledCount()) + '/' + quizTotal +
+      ' · 目前对 ' + quizCorrect + ' 题';
+    if (data.completed === true || this.settledCount() >= this.questions.length) {
+      this.scoreText = '这组题你对了 ' + quizCorrect + '/' + quizTotal + '。' +
+        (data.evidence_written !== undefined && data.evidence_written > 0 ? '掌握度已按这几题更新。' : '');
+      this.submitted = true;
+      AppStorage.setOrCreate('nxStudyTick', Date.now());
+    }
+  }
+
+  /**
+   * 逐题结算：翻牌那一刻就把这道题交给后端判（有作答按对错；没作答直接看答案按错误、低权重）。
+   * 之前是纯端侧翻牌 + 三题一起「交给我判」，翻了牌不点交卷后端就零记录，掌握度永远 unknown。
+   */
+  async settleQuestion(index: number): Promise<void> {
+    const choice = this.chosen();
+    if (choice === null || index < 0 || index >= this.questions.length || this.settled[index] || this.submitting) {
+      return;
+    }
+    const answer = this.picked[index] !== undefined ? this.picked[index].trim() : '';
+    const draft: ReviewAnswerDraft = {
+      question_id: this.questionId(this.questions[index], index),
+      answer: answer,
+      revealed_without_answer: answer.length === 0,
+    };
+    this.submitting = true;
+    this.errorText = '';
+    try {
+      const env: AgentEnvelope = await this.api.postReviewSubmit(this.quizId, this.learnTarget(choice), [draft]);
+      this.applySubmitResult(env.data as ReviewSubmitData, [index]);
+    } catch (err) {
+      const e = err as BusinessError;
+      this.errorText = '第 ' + (index + 1) + ' 题没结算上：' + (e.message.length > 0 ? e.message : '网络错误');
+    } finally {
+      this.submitting = false;
+    }
+  }
+
+  /** 全部结算：把还没翻牌的题一次交上去（没作答的按「直接看答案」算）。 */
   async submitReview(): Promise<void> {
     const choice = this.chosen();
     if (choice === null || this.submitting || this.submitted || this.questions.length === 0) {
       return;
     }
-    this.submitting = true;
-    this.errorText = '';
     const payload: ReviewAnswerDraft[] = [];
+    const indexes: number[] = [];
     for (let index = 0; index < this.questions.length; index++) {
+      if (this.settled[index]) {
+        continue;
+      }
+      const answer = this.picked[index] !== undefined ? this.picked[index].trim() : '';
       const draft: ReviewAnswerDraft = {
         question_id: this.questionId(this.questions[index], index),
-        answer: this.picked[index] !== undefined ? this.picked[index].trim() : '',
+        answer: answer,
+        revealed_without_answer: answer.length === 0,
       };
       payload.push(draft);
+      indexes.push(index);
     }
+    if (payload.length === 0) {
+      return;
+    }
+    this.submitting = true;
+    this.errorText = '';
     try {
-      const target: LearnTarget = {
-        lecture_id: choice.lectureId,
-        lecture_title: choice.lectureTitle,
-        book_id: choice.bookId,
-        book_title: choice.bookTitle,
-        chapter_index: this.chapterIndex,
-        chapter_name: this.chapterLabel(),
-        chapter_range: '',
-      };
-      const env: AgentEnvelope = await this.api.postReviewSubmit(this.quizId, target, payload);
-      const data: ReviewSubmitData = env.data as ReviewSubmitData;
-      this.scoreText = data.score;
-      this.submitted = true;
-      AppStorage.setOrCreate('nxStudyTick', Date.now());
-      const flags: boolean[] = [];
-      for (const question of this.questions) {
-        flags.push(true);
-      }
-      this.revealed = flags;
+      const env: AgentEnvelope = await this.api.postReviewSubmit(this.quizId, this.learnTarget(choice), payload);
+      this.applySubmitResult(env.data as ReviewSubmitData, indexes);
     } catch (err) {
       const e = err as BusinessError;
       this.errorText = e.message.length > 0 ? e.message : '这组题我没判上';
@@ -657,19 +731,22 @@ struct TodayTask {
             .fontColor(this.palette().text3)
             .width('100%')
         }
+        if (this.settled[index]) {
+          Text(this.picked[index] !== undefined && this.picked[index].trim().length > 0 ? '这题已按你的作答记下。' : '没作答就看答案，我按没会记下。')
+            .fontSize(NxFontSize.xs)
+            .fontColor(this.palette().text3)
+            .width('100%')
+        }
       } else {
-        Button(this.isChoice(question) ? '看答案' : '先写完，再看参考')
+        Button(this.submitting ? '记录中…' : (this.isChoice(question) ? '看答案（同时结算这题）' : '先写完，再看参考'))
           .width('100%')
           .height(40)
           .fontSize(NxFontSize.md)
           .backgroundColor(this.palette().primarySoft)
           .fontColor(this.palette().primary)
+          .enabled(!this.submitting)
           .onClick(() => {
-            const flags: boolean[] = [];
-            for (let i = 0; i < this.revealed.length; i++) {
-              flags.push(i === index ? true : this.revealed[i]);
-            }
-            this.revealed = flags;
+            this.settleQuestion(index);
           })
       }
     }
@@ -815,16 +892,23 @@ struct TodayTask {
             .borderRadius(NxRadius.sm)
             .backgroundColor(this.palette().cardBg)
           } else {
-            Button(this.submitting ? '我在判…' : '交给我判')
-              .width('100%')
-              .height(44)
-              .fontSize(NxFontSize.lg)
-              .backgroundColor(this.palette().primary)
-              .fontColor(this.palette().onPrimary)
-              .enabled(!this.submitting && this.quizId.length > 0)
-              .onClick(() => {
-                this.submitReview();
-              })
+            Column({ space: NxGrid * 2 }) {
+              Text(this.progressText.length > 0 ? this.progressText : '每翻开一题的答案，我就把那题记下；三题齐了自动出分。')
+                .fontSize(NxFontSize.sm)
+                .fontColor(this.palette().text3)
+                .width('100%')
+              Button(this.submitting ? '我在判…' : '剩下的一起结算')
+                .width('100%')
+                .height(44)
+                .fontSize(NxFontSize.lg)
+                .backgroundColor(this.palette().primary)
+                .fontColor(this.palette().onPrimary)
+                .enabled(!this.submitting && this.quizId.length > 0)
+                .onClick(() => {
+                  this.submitReview();
+                })
+            }
+            .width('100%')
           }
         }
       }

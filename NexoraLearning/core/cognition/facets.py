@@ -265,11 +265,25 @@ def build_facets(cfg: Mapping[str, Any], username: str) -> Dict[str, Any]:
     activity = observed["activity"]
     activity["assessed_concepts"] = sum(1 for row in mastery_cells if row["mastery"] is not None)
     activity["observed_concepts"] = sum(1 for row in mastery_cells if row["status"] != "unknown")
+    # 图谱状态：任一已选课程缺 outline/mindmap 就不是 ready；正在补建则 building。
+    from core.cognition.graph_builder import graph_status
+
+    graph_states = {lecture_id: graph_status(cfg, lecture_id) for lecture_id in selected_ids}
+    if not graph_states:
+        overall = "missing"
+    elif all(state == "ready" for state in graph_states.values()):
+        overall = "ready"
+    elif any(state == "building" for state in graph_states.values()):
+        overall = "building"
+    else:
+        overall = "missing"
     return {
         "mastery": mastery_cells,
         "facets": facets,
         "activity": activity,
         "courses": observed["courses"],
+        "graph_status": overall,
+        "graph_states": graph_states,
         "generated_at": int(time.time()),
     }
 

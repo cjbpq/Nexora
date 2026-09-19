@@ -146,8 +146,20 @@ class AgentFacadeTests(unittest.TestCase):
             self.assertEqual(plan_body["data"]["plan"]["target"]["lecture_id"], lecture["id"])
             self.assertEqual(plan_body["data"]["plan"]["target"]["book_id"], book["id"])
             planned_events = client.get("/api/agent/v1/events", headers={"X-Nexora-Username": "demo"}).get_json()["data"]["entries"]
-            self.assertTrue(any(item["kind"] == "user_msg" and item["text"] == "continue_learning" for item in planned_events))
+            # 按钮值 continue_learning 不是学生原话：不进时间线，也不进记忆。
+            self.assertFalse(any(item["kind"] == "user_msg" for item in planned_events))
             self.assertTrue(any(item["kind"] == "agent_msg" and item["card"]["type"] == "plan" for item in planned_events))
+            from core.memory.evidence_memory import retrieve_memories
+            self.assertEqual(retrieve_memories(cfg, "demo", limit=20), [])
+
+            spoken = client.post(
+                "/api/agent/v1/plan",
+                json={"username": "demo", "intent": "帮我安排今天的学习", "available_minutes": 20},
+            )
+            self.assertEqual(spoken.status_code, 200)
+            spoken_events = client.get("/api/agent/v1/events", headers={"X-Nexora-Username": "demo"}).get_json()["data"]["entries"]
+            self.assertTrue(any(item["kind"] == "user_msg" and item["text"] == "帮我安排今天的学习" for item in spoken_events))
+            self.assertEqual(len(retrieve_memories(cfg, "demo", limit=20)), 1)
 
             opened = client.post(
                 "/api/agent/v1/open-session",
@@ -523,6 +535,99 @@ class AgentFacadeTests(unittest.TestCase):
             self.assertEqual(body["data"]["correct"], 2)
             entries = client.get("/api/agent/v1/events", headers={"X-Nexora-Username": "demo"}).get_json()["data"]["entries"]
             self.assertTrue(any(item["kind"] == "agent_msg" and "2/2" in item["text"] for item in entries))
+
+    def test_review_submit_per_question_writes_cognitive_evidence(self):
+        """逐题结算：翻牌即结算；未作答看答案按错（revealed_answer 低权重）；三题齐后才出总结；重复结算幂等。"""
+        import json
+        import tempfile
+        from pathlib import Path
+
+        from core.cognition.storage import CognitiveEvidenceStore
+
+        with tempfile.TemporaryDirectory() as directory:
+            app, cfg = _app(Path(directory))
+            lecture, book = _seed_course(cfg)
+            solidified = Path(cfg["data_dir"]) / "lectures" / lecture["id"] / "solidified"
+            solidified.mkdir(parents=True, exist_ok=True)
+            (solidified / "outline.json").write_text(json.dumps({
+                "course_title": "机器学习入门",
+                "sections": [
+                    {"id": "sec_001", "title": "第一章 梯度下降", "summary": "", "objectives": [], "key_concepts": ["梯度下降"],
+                     "difficulty": "中等", "estimated_minutes": 30, "prerequisites": [],
+                     "sources": [{"book_id": book["id"], "chapter_name": "第一章 梯度下降"}], "exploration": {}},
+                ],
+            }, ensure_ascii=False), encoding="utf-8")
+            (solidified / "mindmap.json").write_text(json.dumps({
+                "course_title": "机器学习入门",
+                "chapters": [{"section_id": "sec_001", "name": "第一章 梯度下降", "summary": "",
+                              "concepts": [{"name": "梯度下降", "detail": ""}, {"name": "学习率", "detail": ""}]}],
+                "relations": [],
+            }, ensure_ascii=False), encoding="utf-8")
+            quiz_id = "chapter_quiz_review_evidence"
+            quiz_path = Path(cfg["data_dir"]) / "users" / "demo" / "chapter_quizzes" / f"{quiz_id}.json"
+            quiz_path.parent.mkdir(parents=True, exist_ok=True)
+            quiz_path.write_text(json.dumps({
+                "quiz_id": quiz_id, "lecture_id": lecture["id"], "book_id": book["id"],
+                "chapter_index": 0, "chapter_name": "第一章 梯度下降",
+                "questions": [
+                    {"title": "梯度下降的方向", "content": "梯度下降沿什么方向更新", "type": "choice",
+                     "options": ["负梯度", "正梯度"], "answer": "A", "source_id": "q1"},
+                    {"title": "学习率过大会怎样", "content": "学习率过大", "type": "choice",
+                     "options": ["发散", "收敛更快"], "answer": "A", "source_id": "q2"},
+                    {"title": "与本课无关的题", "content": "事务隔离级别", "type": "choice",
+                     "options": ["读未提交", "串行化"], "answer": "B", "source_id": "q3"},
+                ],
+            }, ensure_ascii=False), encoding="utf-8")
+            client = app.test_client()
+            headers = {"X-Nexora-Username": "demo"}
+            base = {"quiz_id": quiz_id, "lecture_id": lecture["id"], "book_id": book["id"],
+                    "chapter_index": 0, "chapter_name": "第一章 梯度下降"}
+
+            first = client.post("/api/agent/v1/review/submit", headers=headers,
+                                json={**base, "answers": [{"question_id": "q1", "answer": "负梯度"}]}).get_json()["data"]
+            self.assertEqual(first["score"], "1/1")
+            self.assertFalse(first["completed"])
+            self.assertEqual(first["quiz_settled"], 1)
+            self.assertEqual(first["evidence_written"], 1)
+
+            second = client.post("/api/agent/v1/review/submit", headers=headers,
+                                 json={**base, "answers": [{"question_id": "q2", "answer": "", "revealed_without_answer": True}]}).get_json()["data"]
+            self.assertEqual(second["score"], "0/1")
+            self.assertFalse(second["completed"])
+            self.assertEqual(second["evidence_written"], 1)
+
+            # 时间线此时不应有总结
+            entries = client.get("/api/agent/v1/events", headers=headers).get_json()["data"]["entries"]
+            self.assertFalse(any("我做完了" in str(item.get("reason") or "") for item in entries))
+
+            third = client.post("/api/agent/v1/review/submit", headers=headers,
+                                json={**base, "answers": [{"question_id": "q3", "answer": "串行化"}]}).get_json()["data"]
+            self.assertTrue(third["completed"])
+            self.assertEqual(third["quiz_correct"], 2)
+            self.assertEqual(third["quiz_total"], 3)
+            self.assertEqual(third["evidence_written"], 0)  # 无关题绑不到概念，跳过不捏造
+            entries = client.get("/api/agent/v1/events", headers=headers).get_json()["data"]["entries"]
+            self.assertTrue(any("2/3" in str(item.get("text") or "") for item in entries))
+
+            # 重复结算 q1：幂等，不再新增 completion / evidence，也不重复总结
+            again = client.post("/api/agent/v1/review/submit", headers=headers,
+                                json={**base, "answers": [{"question_id": "q1", "answer": "正梯度"}]}).get_json()["data"]
+            self.assertTrue(again["items"][0].get("duplicate"))
+            self.assertEqual(again["quiz_correct"], 2)
+
+            rows = CognitiveEvidenceStore(cfg).list("demo")
+            self.assertEqual(len(rows), 2)
+            by_type = {row.evidence_type: row for row in rows}
+            self.assertIn("objective_question", by_type)
+            self.assertIn("revealed_answer", by_type)
+            self.assertEqual(by_type["revealed_answer"].score, 0.0)
+            self.assertTrue(by_type["revealed_answer"].metadata["revealed_without_answer"])
+
+            overview = client.get("/api/agent/v1/cognition/overview", headers=headers).get_json()["data"]
+            self.assertGreaterEqual(overview["activity"]["assessed_concepts"], 1)
+            statuses = {cell["concept"]: cell["status"] for cell in overview["mastery"]}
+            self.assertNotEqual(statuses.get("梯度下降"), "unknown")
+            self.assertNotEqual(statuses.get("学习率"), "unknown")
 
     def test_dialog_keeps_long_answers(self):
         import tempfile

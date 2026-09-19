@@ -22,6 +22,7 @@ class CognitiveStateEngine:
         "lab_explanation": 1.6,
         "transfer_task": 2.0,
         "review": 1.3,
+        "revealed_answer": 0.5,
     }
     _review_threshold = 0.65
 

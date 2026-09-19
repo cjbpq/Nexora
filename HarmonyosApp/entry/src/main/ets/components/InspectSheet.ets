@@ -22,6 +22,7 @@ export struct InspectSheet {
   @State mastery: MirrorMasteryCell[] = [];
   @State activity: MirrorActivity | null = null;
   @State courses: MirrorCourse[] = [];
+  @State graphStatus: string = '';
   @State expandedId: string = '';
   @State rebuttalFacetId: string = '';
   @State rebuttalText: string = '';
@@ -69,6 +70,7 @@ export struct InspectSheet {
       this.mastery = data.mastery;
       this.activity = data.activity !== undefined ? data.activity : null;
       this.courses = data.courses !== undefined ? data.courses : [];
+      this.graphStatus = data.graph_status !== undefined ? data.graph_status : '';
       this.reportLectureId = '';
       this.reportBookId = '';
       if (this.courses.length > 0) {
@@ -411,8 +413,16 @@ export struct InspectSheet {
 
   private assessmentLabel(): string {
     const average = this.averageMastery();
-    return average === null ? '掌握度待验证；我会通过提问和练习，继续确认你的理解。' :
-      '已评估 ' + this.touchedCount() + ' 个概念，平均掌握度 ' + Math.round(average * 100) + '%。';
+    if (average === null) {
+      if (this.graphStatus === 'building') {
+        return '我正在为这门课建知识图谱，掌握度稍后出现。';
+      }
+      if (this.graphStatus === 'missing') {
+        return '这门课还没有知识图谱，掌握度暂时算不出来；阅读和交流照常记录。';
+      }
+      return '掌握度待验证；我会通过提问和练习，继续确认你的理解。';
+    }
+    return '已评估 ' + this.touchedCount() + ' 个概念，平均掌握度 ' + Math.round(average * 100) + '%。';
   }
 
   @Builder

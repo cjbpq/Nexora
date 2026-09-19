@@ -330,4 +330,8 @@ def frontend_learning_session_complete():
             "memory_job": dict(memory_job or {}),
         },
     )
+    # 阅读会话结束是困惑信号最集中的时刻：异步归因一次（节流、幂等）。
+    from core.cognition.triggers import schedule_confusion_scan
+
+    schedule_confusion_scan(_cfg, username, reason="session_complete")
     return jsonify({"success": True, "already_completed": already_completed, "memory_enqueue": memory_job})

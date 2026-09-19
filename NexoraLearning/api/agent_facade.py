@@ -9,6 +9,7 @@ Agent-facing responses short and predictable.
 from __future__ import annotations
 
 import json
+import re
 import threading
 import time
 import uuid
@@ -49,6 +50,16 @@ _SESSION_CLOSE_EVENTS = frozenset({
     "session_closed",
     "learning_session_completed",
 })
+
+
+_MACHINE_TOKEN = re.compile(r"^[a-z][a-z0-9_\-]*$")
+_DEFAULT_PLAN_INTENT = "continue_learning"
+
+
+def _is_machine_token(text: str) -> bool:
+    """按钮动作值（continue_learning / review）不是学生原话，不能进记忆和时间线。"""
+    value = str(text or "").strip()
+    return bool(value) and len(value) <= 64 and bool(_MACHINE_TOKEN.match(value))
 
 
 def _valid_identifier(value: Any, *, max_length: int = 160) -> bool:
@@ -779,19 +790,30 @@ def agent_plan():
         code, message, status = target_error or ("COURSE_NOT_FOUND", "No learning target is available.", 404)
         return _failure(action, code, message, status=status)
     available_minutes = max(5, min(240, _safe_int(data.get("available_minutes"), 30)))
-    intent = str(data.get("intent") or "continue_learning").strip() or "continue_learning"
+    intent = str(data.get("intent") or _DEFAULT_PLAN_INTENT).strip() or _DEFAULT_PLAN_INTENT
     timestamp = int(time.time())
     message_id = f"usr_{uuid.uuid4().hex[:20]}"
-    user_store.append_learning_record(_CFG, username, {
-        "type": "agent_user_msg",
-        "message_id": message_id,
-        "text": intent,
-        "timestamp": timestamp,
-        "source": "app",
-    })
-    record_user_message(_CFG, username, text=intent, source_id=message_id,
-                        lecture_id=str(target.get("lecture_id") or ""), occurred_at=timestamp)
-    remembered = retrieve_memories(_CFG, username, query=intent,
+    if _is_machine_token(intent):
+        # 按钮 / 默认值走过来的 intent 只留痕，不当成学生原话进时间线和记忆。
+        user_store.append_learning_record(_CFG, username, {
+            "type": "agent_event",
+            "event": "plan_requested",
+            "event_id": f"plan_req_{uuid.uuid4().hex[:16]}",
+            "intent": intent,
+            "lecture_id": str(target.get("lecture_id") or ""),
+            "timestamp": timestamp,
+        })
+    else:
+        user_store.append_learning_record(_CFG, username, {
+            "type": "agent_user_msg",
+            "message_id": message_id,
+            "text": intent,
+            "timestamp": timestamp,
+            "source": "app",
+        })
+        record_user_message(_CFG, username, text=intent, source_id=message_id,
+                            lecture_id=str(target.get("lecture_id") or ""), occurred_at=timestamp)
+    remembered = retrieve_memories(_CFG, username, query="" if _is_machine_token(intent) else intent,
                                    lecture_id=str(target.get("lecture_id") or ""), limit=8)
     learner_goals = [row["quote"] for row in remembered if row["kind"] in {"goal", "preference", "difficulty"}]
     plan = {
@@ -927,9 +949,13 @@ def agent_ask_in_context():
         "book_id": book_id,
         "chapter_index": requested_chapter,
     })
-    remembered = record_user_message(_CFG, username, text=question, source_id=message_id,
-                                      source=source, lecture_id=lecture_id, book_id=book_id,
-                                      occurred_at=timestamp)
+    if _is_machine_token(question):
+        # 机器指令值（按钮 / 脚本）不是自述，不进记忆。
+        remembered: Dict[str, Any] = {"created": False, "memories": []}
+    else:
+        remembered = record_user_message(_CFG, username, text=question, source_id=message_id,
+                                          source=source, lecture_id=lecture_id, book_id=book_id,
+                                          occurred_at=timestamp)
     memory_context = build_memory_context(_CFG, username, query=question, lecture_id=lecture_id)
     from core.cognition.learning_observations import learning_observations
 
@@ -1019,6 +1045,10 @@ def agent_ask_in_context():
         "has_photo": bool(photo_text),
         "timestamp": timestamp,
     })
+    # 提问本身是困惑信号：异步归因一次（60 秒节流，幂等）。
+    from core.cognition.triggers import schedule_confusion_scan
+
+    schedule_confusion_scan(_CFG, username, reason="ask_in_context")
     return _response(action=action, data={"answer": answer, "source": answer_source, "entry_source": source,
                                         "lecture_id": lecture_id, "book_id": book_id, "context_chars": len(context_text),
                                         "memory_updated": bool(remembered.get("created")),
@@ -1074,63 +1104,125 @@ def agent_review_submit():
     if not questions:
         return _failure(action, "QUIZ_NOT_FOUND", "review quiz not found.", status=404)
     answer_map: Dict[str, str] = {}
+    revealed_map: Dict[str, bool] = {}
     for item in answers or []:
         if not isinstance(item, Mapping):
             continue
         question_id = str(item.get("question_id") or item.get("source_id") or "").strip()
         if question_id:
             answer_map[question_id] = str(item.get("answer") or "").strip()
+            revealed_map[question_id] = bool(item.get("revealed_without_answer"))
     timestamp = int(time.time())
     lecture_id = str(data.get("lecture_id") or quiz.get("lecture_id") or "").strip()
     book_id = str(data.get("book_id") or quiz.get("book_id") or "").strip()
     chapter_index = _safe_int(data.get("chapter_index"), _safe_int(quiz.get("chapter_index"), 0))
     chapter_name = str(data.get("chapter_name") or quiz.get("chapter_name") or "").strip()
+    # 逐题结算：answers 非空时只结算带来的题；为空则按旧语义整卷结算（未作答按错）。
+    partial = bool(answer_map)
+    from core.cognition.review_bridge import completion_id_for, record_review_evidence
+
+    existing_completions = {
+        str(row.get("completion_id") or "")
+        for row in user_store.list_question_completions(_CFG, username) or []
+        if isinstance(row, Mapping) and str(row.get("quiz_id") or "") == quiz_id
+    }
     scored: list[Dict[str, Any]] = []
     correct = 0
+    evidence_written = 0
     for index, question in enumerate(questions):
         if not isinstance(question, Mapping):
             continue
         question_id = str(question.get("source_id") or question.get("question_id") or f"q{index}").strip()
+        if partial and question_id not in answer_map:
+            continue
         user_answer = answer_map.get(question_id, "")
         is_correct = grade_question(question, user_answer) if user_answer else False
+        revealed_without_answer = (not user_answer) and (revealed_map.get(question_id, False) or not partial)
         if is_correct:
             correct += 1
+        completion_id = completion_id_for(quiz_id, question_id)
+        if completion_id in existing_completions:
+            # 同一题重复结算：第一次作数。
+            scored.append({"question_id": question_id, "is_correct": is_correct, "duplicate": True})
+            continue
+        existing_completions.add(completion_id)
         user_store.append_question_completion(_CFG, username, {
+            "completion_id": completion_id,
+            "quiz_id": quiz_id,
+            "question_id": question_id,
             "lecture_id": lecture_id,
             "book_id": book_id,
             "chapter_index": chapter_index,
             "chapter_name": chapter_name,
             "question_title": str(question.get("title") or question.get("content") or "")[:120],
             "is_correct": is_correct,
+            "revealed_without_answer": revealed_without_answer,
             "timestamp": timestamp,
         })
-        scored.append({"question_id": question_id, "is_correct": is_correct})
+        outcome = record_review_evidence(
+            _CFG, username, quiz_id=quiz_id, question=question, question_id=question_id,
+            lecture_id=lecture_id, book_id=book_id, chapter_index=chapter_index, chapter_name=chapter_name,
+            is_correct=is_correct, revealed_without_answer=revealed_without_answer, occurred_at=timestamp,
+        )
+        if outcome.get("created"):
+            evidence_written += 1
+        scored.append({"question_id": question_id, "is_correct": is_correct,
+                       "evidence": bool(outcome.get("recorded")), "concept_id": str(outcome.get("concept_id") or "")})
     total = len(scored)
     score_text = f"{correct}/{total}" if total else "0/0"
-    user_store.append_learning_record(_CFG, username, {
-        "type": DIALOG_RECORD_TYPE,
-        "dialog_id": f"dlg_{uuid.uuid4().hex[:20]}",
-        "source": "app",
-        "question": f"我做完了「{chapter_name or '这一章'}」的复习题",
-        "answer": f"这组题你对了 {score_text}。" + ("错的几道，回头在原文里再看一眼。" if total and correct < total else "这章你吃得很稳。"),
-        "lecture_id": lecture_id,
-        "book_id": book_id,
-        "timestamp": timestamp,
+    # 整卷累计（逐题结算时每次都回报全卷进度）。
+    quiz_rows = [row for row in user_store.list_question_completions(_CFG, username) or []
+                 if isinstance(row, Mapping) and str(row.get("quiz_id") or "") == quiz_id]
+    settled_ids = {str(row.get("question_id") or "") for row in quiz_rows}
+    quiz_total = sum(1 for q in questions if isinstance(q, Mapping))
+    quiz_correct = sum(1 for row in quiz_rows if row.get("is_correct") is True)
+    quiz_settled = len(settled_ids)
+    completed = quiz_settled >= quiz_total
+    already_summarized = any(
+        isinstance(row, Mapping) and str(row.get("type") or "") == "agent_event"
+        and str(row.get("event") or "") == "quiz_submitted" and str(row.get("quiz_id") or "") == quiz_id
+        for row in user_store.list_learning_records(_CFG, username) or []
+    )
+    if completed and not already_summarized:
+        summary_text = f"{quiz_correct}/{quiz_total}"
+        user_store.append_learning_record(_CFG, username, {
+            "type": DIALOG_RECORD_TYPE,
+            "dialog_id": f"dlg_{uuid.uuid4().hex[:20]}",
+            "source": "app",
+            "question": f"我做完了「{chapter_name or '这一章'}」的复习题",
+            "answer": f"这组题你对了 {summary_text}。" + ("错的几道，回头在原文里再看一眼。" if quiz_correct < quiz_total else "这章你吃得很稳。"),
+            "lecture_id": lecture_id,
+            "book_id": book_id,
+            "timestamp": timestamp,
+        })
+        user_store.append_learning_record(_CFG, username, {
+            "type": "agent_event",
+            "event": "quiz_submitted",
+            "event_id": f"rev_{uuid.uuid4().hex[:16]}",
+            "quiz_id": quiz_id,
+            "chapter_name": chapter_name,
+            "timestamp": timestamp,
+        })
+    log_event("agent_review_submit", "复习结算", payload={
+        "user_id": username, "quiz_id": quiz_id, "score": score_text, "partial": partial,
+        "settled": quiz_settled, "quiz_total": quiz_total, "evidence_written": evidence_written,
     })
-    user_store.append_learning_record(_CFG, username, {
-        "type": "agent_event",
-        "event": "quiz_submitted",
-        "event_id": f"rev_{uuid.uuid4().hex[:16]}",
-        "chapter_name": chapter_name,
-        "timestamp": timestamp,
-    })
-    log_event("agent_review_submit", "复习交卷", payload={"user_id": username, "quiz_id": quiz_id, "score": score_text})
+    if any(not row.get("is_correct") for row in scored):
+        # 做错是困惑信号里权重最高的一类：异步归因一次（节流、幂等）。
+        from core.cognition.triggers import schedule_confusion_scan
+
+        schedule_confusion_scan(_CFG, username, reason="review_submit")
     return _response(action=action, data={
         "quiz_id": quiz_id,
         "score": score_text,
         "correct": correct,
         "total": total,
         "items": scored,
+        "quiz_correct": quiz_correct,
+        "quiz_total": quiz_total,
+        "quiz_settled": quiz_settled,
+        "completed": completed,
+        "evidence_written": evidence_written,
     })
 
 
@@ -1371,7 +1463,7 @@ def _timeline_entries(records: list[Dict[str, Any]], limit: int = 100) -> list[D
 
 
 # 只记账、不上日记的事件。
-_SILENT_EVENTS = frozenset({"facet_verdict", "heartbeat", "telemetry_flush", "form_refresh"})
+_SILENT_EVENTS = frozenset({"facet_verdict", "heartbeat", "telemetry_flush", "form_refresh", "plan_requested"})
 
 _EVENT_COPY = {
     "session_started": "你开始了学习。",

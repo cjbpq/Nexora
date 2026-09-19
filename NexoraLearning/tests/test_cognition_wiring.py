@@ -1,0 +1,204 @@
+"""§2 困惑触发、§4 图谱边/口径、§5 无图谱兜底 的接线测试。"""
+
+from __future__ import annotations
+
+import json
+import tempfile
+import time
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+from flask import Flask
+
+from api.agent_facade import agent_facade_bp, init_agent_facade
+from api.telemetry import ingest_batch, init_telemetry
+from core import user as user_store
+from core.cognition import graph_builder, triggers
+from core.lectures import create_book, create_lecture, save_book_info_xml, save_book_text
+from core.user import set_lecture_selection
+
+
+def _cfg(directory):
+    return {
+        "data_dir": str(Path(directory) / "data"),
+        "runtime_api": {"enabled": True, "api_key": ""},
+        "nexora": {"base_url": "http://127.0.0.1:9", "api_key": ""},
+        "models": {"default_nexora_model": ""},
+    }
+
+
+def _seed(cfg, *, with_graph: bool, username: str = "demo"):
+    lecture = create_lecture(cfg, "机器学习入门", status="published")
+    book = create_book(cfg, lecture["id"], "教材第一册")
+    save_book_text(cfg, lecture["id"], book["id"],
+                   "第一章 数据模型\n数据模型是对现实世界数据特征的抽象。\n\n第二章 傅里叶变换与卷积\n傅里叶变换把时域信号变换到频域，卷积描述线性系统。\n")
+    text = "第一章 数据模型\n数据模型是对现实世界数据特征的抽象。\n\n第二章 傅里叶变换与卷积\n傅里叶变换把时域信号变换到频域，卷积描述线性系统。\n"
+    second = text.index("第二章")
+    save_book_info_xml(
+        cfg, lecture["id"], book["id"],
+        f"<book><chapter><chapter_name>第一章 数据模型</chapter_name><chapter_range>0:{second}</chapter_range></chapter>"
+        f"<chapter><chapter_name>第二章 傅里叶变换与卷积</chapter_name><chapter_range>{second}:{len(text) - second}</chapter_range></chapter></book>",
+    )
+    set_lecture_selection(cfg, username, lecture["id"], selected=True, actor="test")
+    if with_graph:
+        solidified = Path(cfg["data_dir"]) / "lectures" / lecture["id"] / "solidified"
+        solidified.mkdir(parents=True, exist_ok=True)
+        (solidified / "outline.json").write_text(json.dumps({
+            "course_title": "机器学习入门",
+            "sections": [
+                {"id": "sec_001", "title": "第一章 数据模型", "summary": "", "objectives": [], "key_concepts": ["数据模型"],
+                 "difficulty": "中等", "estimated_minutes": 30, "prerequisites": [],
+                 "sources": [{"book_id": book["id"], "chapter_name": "第一章 数据模型"}], "exploration": {}},
+                {"id": "sec_002", "title": "第二章 傅里叶变换与卷积", "summary": "", "objectives": [], "key_concepts": ["傅里叶变换", "卷积"],
+                 "difficulty": "中等", "estimated_minutes": 30, "prerequisites": [],
+                 "sources": [{"book_id": book["id"], "chapter_name": "第二章 傅里叶变换与卷积"}], "exploration": {}},
+            ],
+        }, ensure_ascii=False), encoding="utf-8")
+        # 扁平 v2 结构（nodes/edges），与线上 mindmap.json 同构
+        (solidified / "mindmap.json").write_text(json.dumps({
+            "course_title": "机器学习入门",
+            "nodes": [
+                {"id": "sec_001", "label": "第一章 数据模型", "type": "chapter", "detail": "", "parent": None},
+                {"id": "sec_001_k0", "label": "数据模型", "type": "concept", "detail": "数据抽象", "parent": "sec_001"},
+                {"id": "sec_002", "label": "第二章 傅里叶变换与卷积", "type": "chapter", "detail": "", "parent": None},
+                {"id": "sec_002_k0", "label": "傅里叶变换", "type": "concept", "detail": "时域到频域", "parent": "sec_002"},
+                {"id": "sec_002_k1", "label": "卷积", "type": "concept", "detail": "线性系统输出", "parent": "sec_002"},
+            ],
+            "edges": [
+                {"source": "sec_001", "target": "sec_001_k0", "type": "hierarchy", "label": ""},
+                {"source": "sec_002", "target": "sec_002_k0", "type": "hierarchy", "label": ""},
+                {"source": "sec_002", "target": "sec_002_k1", "type": "hierarchy", "label": ""},
+                {"source": "sec_001_k0", "target": "sec_002_k0", "type": "prerequisite", "label": "先修"},
+                {"source": "sec_002_k1", "target": "sec_002_k0", "type": "related", "label": "相关"},
+            ],
+        }, ensure_ascii=False), encoding="utf-8")
+    return lecture, book
+
+
+class ConfusionTriggerTests(unittest.TestCase):
+    def setUp(self):
+        triggers.reset_throttle()
+
+    def test_trigger_is_throttled_per_user_and_runs_scan(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cfg = _cfg(directory)
+            lecture, book = _seed(cfg, with_graph=True)
+            init_telemetry(cfg)
+            now = int(time.time())
+            ingest_batch("demo", [
+                {"stream": "reading", "event": "selection", "bid": book["id"], "ci": 1, "si": 0, "sel_text": "傅里叶变换", "ts": now - 600},
+                {"stream": "reading", "event": "selection", "bid": book["id"], "ci": 1, "si": 1, "sel_text": "傅里叶变换再划线", "ts": now - 500},
+                {"stream": "reading", "event": "ask", "bid": book["id"], "ci": 1, "si": 0, "sel_text": "傅里叶变换怎么理解？", "ts": now - 400},
+            ])
+            self.assertTrue(triggers.schedule_confusion_scan(cfg, "demo", reason="test", sync=True))
+            # 60 秒内第二次被节流
+            self.assertFalse(triggers.schedule_confusion_scan(cfg, "demo", reason="test", sync=True))
+            # 另一个用户不受影响
+            self.assertTrue(triggers.schedule_confusion_scan(cfg, "other", reason="test", sync=True))
+            records = user_store.list_learning_records(cfg, "demo")
+            cards = [row for row in records if row.get("type") == "agent_decision"
+                     and isinstance(row.get("card"), dict) and row["card"].get("type") == "confusion"]
+            self.assertEqual(len(cards), 1)
+
+    def test_ask_in_context_schedules_scan(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cfg = _cfg(directory)
+            _seed(cfg, with_graph=True)
+            app = Flask(__name__)
+            init_agent_facade(cfg)
+            app.register_blueprint(agent_facade_bp)
+
+            class FakeProxy:
+                def complete_raw(self, **kwargs):
+                    return {"success": True, "payload": {"answer": "傅里叶变换把时域信号变到频域。"}}
+
+                def extract_output_text(self, payload):
+                    return str(payload.get("answer") or "")
+
+            with patch("api.agent_facade._PROXY", FakeProxy()), \
+                    patch("core.cognition.triggers.schedule_confusion_scan") as scheduled:
+                response = app.test_client().post(
+                    "/api/agent/v1/ask-in-context", headers={"X-Nexora-Username": "demo"},
+                    json={"question": "傅里叶变换是什么"},
+                )
+                self.assertEqual(response.status_code, 200)
+                scheduled.assert_called_once()
+                self.assertEqual(scheduled.call_args.kwargs.get("reason"), "ask_in_context")
+
+
+class LearningGraphEdgeTests(unittest.TestCase):
+    def test_edges_come_from_course_mindmap_when_book_graph_has_none(self):
+        from core.cognition.learning_graph import build_learning_graph
+
+        with tempfile.TemporaryDirectory() as directory:
+            cfg = _cfg(directory)
+            lecture, book = _seed(cfg, with_graph=True)
+            result = build_learning_graph(cfg, "demo", lecture["id"], book["id"])
+            graph = result["graph"]
+            relations = graph["relations"]
+            self.assertEqual(len(relations), 2)
+            self.assertEqual({(r["from"], r["to"], r["type"]) for r in relations},
+                             {("数据模型", "傅里叶变换", "prerequisite"), ("卷积", "傅里叶变换", "related")})
+            self.assertIn("book_reading_progress_percent", graph)
+            self.assertIn("course_reading_progress_percent", graph)
+
+
+class GraphBuilderTests(unittest.TestCase):
+    def setUp(self):
+        graph_builder.reset_state()
+
+    def test_status_and_select_triggers_build(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cfg = _cfg(directory)
+            lecture, _ = _seed(cfg, with_graph=False)
+            self.assertEqual(graph_builder.graph_status(cfg, lecture["id"]), "missing")
+            calls = []
+
+            def fake_outline(cfg_, lecture_id, **kwargs):
+                calls.append("outline")
+                solidified = Path(cfg_["data_dir"]) / "lectures" / lecture_id / "solidified"
+                solidified.mkdir(parents=True, exist_ok=True)
+                (solidified / "outline.json").write_text("{}", encoding="utf-8")
+                return {}
+
+            def fake_mindmap(cfg_, lecture_id, **kwargs):
+                calls.append("mindmap")
+                solidified = Path(cfg_["data_dir"]) / "lectures" / lecture_id / "solidified"
+                (solidified / "mindmap.json").write_text("{}", encoding="utf-8")
+                return {}
+
+            with patch("core.booksproc.outline.generate_outline", fake_outline), \
+                    patch("core.booksproc.mindmap.generate_mindmap", fake_mindmap):
+                state = graph_builder.ensure_course_graph(cfg, lecture["id"], user_id="demo", sync=True)
+            self.assertEqual(calls, ["outline", "mindmap"])
+            self.assertEqual(state, "ready")
+            self.assertEqual(graph_builder.ensure_course_graph(cfg, lecture["id"], user_id="demo", sync=True), "ready")
+
+    def test_failure_has_cooldown(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cfg = _cfg(directory)
+            lecture, _ = _seed(cfg, with_graph=False)
+
+            def boom(cfg_, lecture_id, **kwargs):
+                raise RuntimeError("model down")
+
+            with patch("core.booksproc.outline.generate_outline", boom):
+                self.assertEqual(graph_builder.ensure_course_graph(cfg, lecture["id"], sync=True), "missing")
+                # 冷却期内不再重试
+                self.assertEqual(graph_builder.ensure_course_graph(cfg, lecture["id"], sync=True), "missing")
+
+    def test_overview_reports_graph_status(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cfg = _cfg(directory)
+            _seed(cfg, with_graph=False)
+            app = Flask(__name__)
+            init_agent_facade(cfg)
+            app.register_blueprint(agent_facade_bp)
+            data = app.test_client().get("/api/agent/v1/cognition/overview", headers={"X-Nexora-Username": "demo"}).get_json()["data"]
+            self.assertEqual(data["graph_status"], "missing")
+            self.assertEqual(data["mastery"], [])
+
+
+if __name__ == "__main__":
+    unittest.main()

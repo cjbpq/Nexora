@@ -173,19 +173,31 @@ export interface ReviewPlanData {
 export interface ReviewAnswerDraft {
   question_id: string;
   answer: string;
+  /** 未作答直接看答案：后端按错误计，但用低权重的 revealed_answer 证据。 */
+  revealed_without_answer?: boolean;
 }
 
 export interface ReviewSubmitItem {
   question_id: string;
   is_correct: boolean;
+  duplicate?: boolean;
+  evidence?: boolean;
+  concept_id?: string;
 }
 
 export interface ReviewSubmitData {
   quiz_id: string;
+  /** 本次结算的题：对/总。逐题结算时通常是 1/1 或 0/1。 */
   score: string;
   correct: number;
   total: number;
   items: ReviewSubmitItem[];
+  /** 整卷累计（后端按 quiz_id 汇总所有已结算题）。 */
+  quiz_correct?: number;
+  quiz_total?: number;
+  quiz_settled?: number;
+  completed?: boolean;
+  evidence_written?: number;
 }
 
 export interface TaskData {
@@ -269,6 +281,8 @@ export interface MirrorOverviewData {
   generated_at: number;
   activity?: MirrorActivity;
   courses?: MirrorCourse[];
+  /** ready：图谱齐全；building：正在为这门课建图；missing：还没有图谱（掌握度暂时出不来）。 */
+  graph_status?: string;
 }
 
 export interface MirrorActivity {

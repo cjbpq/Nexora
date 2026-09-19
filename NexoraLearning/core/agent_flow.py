@@ -374,6 +374,9 @@ def submit_answers(
     scored: List[Dict[str, Any]] = []
     uncertain: List[Dict[str, Any]] = []
     target = state.get("target") if isinstance(state.get("target"), dict) else {}
+    from core.cognition.review_bridge import completion_id_for, record_review_evidence
+
+    quiz_id = str(quiz.get("quiz_id") or flow_id)
     for index, question in enumerate(questions):
         if not isinstance(question, dict):
             continue
@@ -386,6 +389,9 @@ def submit_answers(
         if is_correct:
             correct += 1
         user_store.append_question_completion(cfg, username, {
+            "completion_id": completion_id_for(quiz_id, question_id),
+            "quiz_id": quiz_id,
+            "question_id": question_id,
             "lecture_id": str(target.get("lecture_id") or ""),
             "book_id": str(target.get("book_id") or ""),
             "chapter_index": target.get("chapter_index"),
@@ -396,7 +402,19 @@ def submit_answers(
         })
         scored.append({"question_id": question_id, "is_correct": is_correct})
         if not user_answer:
+            # 留空的题交给 wrapup 卡裁决（uncertain_verdict 再写证据），这里不按错计。
             uncertain.append({"questionId": question_id, "why": f"第 {index + 1} 题你没有作答，我拿不准。"})
+            continue
+        try:
+            chapter_index = int(target.get("chapter_index") or -1)
+        except (TypeError, ValueError):
+            chapter_index = -1
+        record_review_evidence(
+            cfg, username, quiz_id=quiz_id, question=question, question_id=question_id,
+            lecture_id=str(target.get("lecture_id") or ""), book_id=str(target.get("book_id") or ""),
+            chapter_index=chapter_index, chapter_name=str(target.get("chapter_name") or ""),
+            is_correct=is_correct, occurred_at=current, source_kind="flow",
+        )
     if force_uncertain and not uncertain and scored:
         uncertain.append({"questionId": scored[0]["question_id"], "why": "这道题的判分置信度不高，请你裁决。"})
 

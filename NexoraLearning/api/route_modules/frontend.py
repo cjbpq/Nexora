@@ -576,6 +576,12 @@ def frontend_learning_report():
                           "read_chapters": progress_info["read_chapters"],
                           "read_chars": progress_info["read_chars"]})
     profile = _learning_report_profile_summary(user_id)
+    try:
+        course_reading_progress = _compute_user_lecture_progress(
+            user_id, lecture_id, books, records=learning_records, cfg=_cfg
+        )["reading_progress"] if (book_id or chapter_index >= 0) else progress_info["reading_progress"]
+    except Exception:
+        course_reading_progress = progress_info["reading_progress"]
     weaknesses, recommendations = _learning_report_recommendations(
         progress_info,
         profile,
@@ -610,6 +616,9 @@ def frontend_learning_report():
             "correct_questions": _safe_int(question_stats.get("correct"), 0),
             "accuracy": question_stats.get("accuracy"),
             "profile_completion_rate": profile.get("completion_rate"),
+            # 口径标注：本报告的分母（本书 / 本课程），端上同屏显示避免 1.2% / 3.4% 看不出关系。
+            "scope_label": "本章" if chapter_index >= 0 else ("本书" if book_id else "本课程"),
+            "course_reading_progress_percent": course_reading_progress,
         },
         "progress": progress_info,
         "reading": reading_stats,
@@ -847,6 +856,12 @@ def frontend_select_learning_lecture():
         actor=str(data.get("actor") or "").strip(),
     )
     selected_ids = user_store.list_selected_lecture_ids(_cfg, user_id)
+    graph_state = ""
+    if selected:
+        # 没有 outline / mindmap 的课程认知层会静默为空：选课那一刻就补建（后台、幂等、失败冷却）。
+        from core.cognition.graph_builder import ensure_course_graph
+
+        graph_state = ensure_course_graph(_cfg, lecture_id, user_id=user_id)
     return jsonify(
         {
             "success": True,
@@ -854,5 +869,6 @@ def frontend_select_learning_lecture():
             "lecture": lecture,
             "selected": bool(selected),
             "selected_lecture_ids": selected_ids,
+            "graph_status": graph_state,
         }
     )

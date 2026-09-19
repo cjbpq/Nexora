@@ -18,6 +18,7 @@ import {
   GraphPayload,
   GraphChapter,
   GraphConcept,
+  GraphRelation,
 } from '../services/ReportApi';
 import { SkeletonCard, EmptyState, ErrorState } from '../components/common/States';
 import { nxPalette, NxPalette, NxRadius, NxGrid, NxFontSize, NxShadow } from '../theme/DesignTokens';
@@ -41,7 +42,10 @@ struct Report {
   @State weaknesses: ReportNote[] = [];
   @State recommendations: ReportNote[] = [];
   @State chapters: GraphChapter[] = [];
+  @State relations: GraphRelation[] = [];
   @State relationCount: number = 0;
+  @State bookCoverage: number = -1;
+  @State courseCoverage: number = -1;
   @State tab: number = 0;
   @StorageProp('nxDarkMode') nxDark: boolean = false;
   @StorageProp('nxStudyTick') @Watch('onStudyChanged') studyTick: number = 0;
@@ -168,7 +172,10 @@ struct Report {
       }
       if (payload.graph !== null && payload.graph !== undefined) {
         this.chapters = payload.graph.chapters !== undefined ? payload.graph.chapters : [];
-        this.relationCount = payload.graph.relations !== undefined ? payload.graph.relations.length : 0;
+        this.relations = payload.graph.relations !== undefined ? payload.graph.relations : [];
+        this.relationCount = this.relations.length;
+        this.bookCoverage = payload.graph.book_reading_progress_percent !== undefined ? payload.graph.book_reading_progress_percent : -1;
+        this.courseCoverage = payload.graph.course_reading_progress_percent !== undefined ? payload.graph.course_reading_progress_percent : -1;
       }
     } catch (err) {
       // 图谱未生成时静默：报告仍可看
@@ -191,6 +198,54 @@ struct Report {
       return '0%';
     }
     return this.percentLabel(this.summary.reading_progress_percent !== undefined ? this.summary.reading_progress_percent : this.summary.progress_percent);
+  }
+
+  /** 口径同屏：顶部三格是「本书」，右侧补一句「本课程 x%」，避免与书房的课程级数字看起来矛盾。 */
+  private scopeCaption(): string {
+    if (this.summary === null) {
+      return '';
+    }
+    const scope = this.summary.scope_label !== undefined && this.summary.scope_label.length > 0 ? this.summary.scope_label : '本书';
+    const course = this.summary.course_reading_progress_percent;
+    if (scope !== '本课程' && course !== undefined && course !== null) {
+      return '以上按' + scope + '统计 · 本课程整体阅读覆盖 ' + this.percentLabel(course);
+    }
+    return '以上按' + scope + '统计';
+  }
+
+  private relationLabel(type: string): string {
+    if (type === 'prerequisite') {
+      return '先修';
+    }
+    if (type === 'related') {
+      return '相关';
+    }
+    if (type === 'contrast') {
+      return '对比';
+    }
+    if (type === 'applies') {
+      return '应用';
+    }
+    if (type === 'extends') {
+      return '扩展';
+    }
+    if (type === 'part_of') {
+      return '属于';
+    }
+    return type;
+  }
+
+  private conceptTone(concept: GraphConcept): string {
+    if (concept.status === 'stable') {
+      return this.palette().success;
+    }
+    if (concept.status === 'at_risk') {
+      return this.palette().danger;
+    }
+    if (concept.status === 'developing') {
+      return this.palette().warning;
+    }
+    return this.palette().primary;
   }
 
   private durationLabel(): string {
@@ -312,7 +367,7 @@ struct Report {
           if (this.tab === 0 && this.summary !== null) {
             Column({ space: NxGrid * 3 }) {
               Row() {
-                this.metric('阅读覆盖', this.readingLabel())
+                this.metric('阅读覆盖（' + (this.summary.scope_label !== undefined ? this.summary.scope_label : '本书') + '）', this.readingLabel())
                 this.metric('确认读完', this.summary.completed_chapters + '/' + this.summary.total_chapters + ' 章')
                 this.metric('前台阅读', this.durationLabel())
               }
@@ -323,6 +378,10 @@ struct Report {
                 this.metric('正确率', this.accuracyLabel())
               }
               .width('100%')
+              Text(this.scopeCaption())
+                .fontSize(NxFontSize.xs)
+                .fontColor(this.palette().text3)
+                .width('100%')
             }
             .width('100%')
             .padding(NxGrid * 4)
@@ -348,10 +407,43 @@ struct Report {
               EmptyState({ text: '阅读记录已经单独保存；这本书的概念关系整理好后，会出现在这里。' })
             } else {
               Column({ space: NxGrid * 2 }) {
-                Text('我从这本书里理出 ' + this.chapters.length + ' 章、' + this.relationCount + ' 条概念关系。')
+                Text('我从这本书里理出 ' + this.chapters.length + ' 章、' + this.relationCount + ' 条概念关系。' +
+                  (this.bookCoverage >= 0 ? '本书阅读覆盖 ' + this.percentLabel(this.bookCoverage) : '') +
+                  (this.courseCoverage >= 0 && this.courseCoverage !== this.bookCoverage ? ' · 本课程 ' + this.percentLabel(this.courseCoverage) : ''))
                   .fontSize(NxFontSize.sm)
                   .fontColor(this.palette().text3)
                   .width('100%')
+                if (this.relations.length > 0) {
+                  Column({ space: NxGrid }) {
+                    Text('概念之间的关系')
+                      .fontSize(NxFontSize.md)
+                      .fontWeight(FontWeight.Medium)
+                      .fontColor(this.palette().text1)
+                      .width('100%')
+                    ForEach(this.relations, (rel: GraphRelation, ri: number) => {
+                      Row({ space: NxGrid }) {
+                        Text(rel.from)
+                          .fontSize(NxFontSize.sm)
+                          .fontColor(this.palette().text2)
+                          .maxLines(1)
+                          .textOverflow({ overflow: TextOverflow.Ellipsis })
+                        Text('— ' + this.relationLabel(rel.type) + ' →')
+                          .fontSize(NxFontSize.xs)
+                          .fontColor(this.palette().primary)
+                        Text(rel.to)
+                          .fontSize(NxFontSize.sm)
+                          .fontColor(this.palette().text2)
+                          .maxLines(1)
+                          .textOverflow({ overflow: TextOverflow.Ellipsis })
+                      }
+                      .width('100%')
+                    }, (rel: GraphRelation, ri: number) => rel.from + '_' + rel.to + '_' + ri)
+                  }
+                  .width('100%')
+                  .padding(NxGrid * 3)
+                  .borderRadius(NxRadius.sm)
+                  .backgroundColor(this.palette().cardBg)
+                }
                 ForEach(this.chapters, (chapter: GraphChapter, index: number) => {
                   Column({ space: NxGrid * 2 }) {
                     Text(chapter.name)
@@ -360,7 +452,7 @@ struct Report {
                       .fontColor(this.palette().text1)
                       .width('100%')
                     if (chapter.reading_percent !== undefined) {
-                      Text('阅读覆盖 ' + this.percentLabel(chapter.reading_percent!) + (chapter.completed === true ? ' · 已确认读完' : ' · 尚未确认读完'))
+                      Text('本章阅读覆盖 ' + this.percentLabel(chapter.reading_percent!) + (chapter.completed === true ? ' · 已确认读完' : ' · 尚未确认读完'))
                         .fontSize(NxFontSize.sm)
                         .fontColor(this.palette().text3)
                         .width('100%')
@@ -377,9 +469,9 @@ struct Report {
                     Flex({ wrap: FlexWrap.Wrap }) {
                       ForEach(chapter.concepts !== undefined ? chapter.concepts : [],
                         (concept: GraphConcept, ci: number) => {
-                          Text(concept.name)
+                          Text(concept.name + (concept.mastery !== undefined && concept.mastery !== null ? ' ' + Math.round(concept.mastery * 100) + '%' : ''))
                             .fontSize(NxFontSize.xs)
-                            .fontColor(this.palette().primary)
+                            .fontColor(this.conceptTone(concept))
                             .padding({ left: NxGrid * 2, right: NxGrid * 2, top: NxGrid, bottom: NxGrid })
                             .borderRadius(NxRadius.xs)
                             .backgroundColor(this.palette().primarySoft)
