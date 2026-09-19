@@ -32,7 +32,7 @@ class BookChoice {
   lectureTitle: string = '';
   bookId: string = '';
   bookTitle: string = '';
-  /** 默认复习章节：本地上次读到 > 后端会话 > 最近记录 > 0。 */
+  /** 默认复习章节：本地上次读到 > 后端会话 > 规范当前章节 > 按时间取最近记录 > 0。 */
   chapterIndex: number = 0;
   chapterTitle: string = '';
 }
@@ -125,15 +125,22 @@ struct TodayTask {
           if (position !== null) {
             choice.chapterIndex = position.chapter;
             choice.chapterTitle = position.chapterTitle;
-          } else if (ctx.active_session.book_id === book.id) {
+          } else if (ctx.active_session.lecture_id === lecture.id && ctx.active_session.book_id === book.id &&
+            ctx.active_session.chapter_index >= 0) {
             choice.chapterIndex = ctx.active_session.chapter_index;
             choice.chapterTitle = ctx.active_session.chapter_name;
+          } else if (lecture.current_book_id === book.id && lecture.current_chapter_index !== undefined &&
+            lecture.current_chapter_index !== null && lecture.current_chapter_index >= 0) {
+            choice.chapterIndex = lecture.current_chapter_index;
+            choice.chapterTitle = lecture.current_chapter;
           } else {
+            let latestTimestamp = -1;
             for (const record of ctx.recent_learning_records) {
-              if (record.book_id === book.id) {
+              if (record.lecture_id === lecture.id && record.book_id === book.id &&
+                record.chapter_index >= 0 && record.timestamp > latestTimestamp) {
                 choice.chapterIndex = record.chapter_index;
                 choice.chapterTitle = record.chapter_name;
-                break;
+                latestTimestamp = record.timestamp;
               }
             }
           }
@@ -354,6 +361,7 @@ struct TodayTask {
       const data: ReviewSubmitData = env.data as ReviewSubmitData;
       this.scoreText = data.score;
       this.submitted = true;
+      AppStorage.setOrCreate('nxStudyTick', Date.now());
       const flags: boolean[] = [];
       for (const question of this.questions) {
         flags.push(true);

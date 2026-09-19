@@ -6,14 +6,15 @@
   命中超阈 → 「你在X上卡过 N 次——…」，依据可下钻到具体事件
 - 答题正确率：question_completions 按概念归因（≥3 次作答才出判断，避免小样本噪音）
 
-反驳（「不对」）：写 review 证据（disagree → score 0，CognitiveStateEngine 重算即拉低掌握度，
-即时生效），并留 agent_event 记录。agree → score 1。
+阅读与自述独立呈现，不把尚未测验的概念显示成 0 分。
+反驳写可追溯反馈；赞同或反对判断都不是一道已判分的题目。
 """
 
 from __future__ import annotations
 
 import hashlib
 import time
+import uuid
 from typing import Any, Dict, List, Mapping, Optional
 
 from core import user as user_store
@@ -52,6 +53,14 @@ def _verdict_state(store: CognitiveEvidenceStore, username: str, facet_id: str) 
     return None
 
 
+def _feedback_state(cfg: Mapping[str, Any], username: str) -> Dict[str, Dict[str, Any]]:
+    result = {}
+    for row in user_store.list_learning_records(cfg, username) or []:
+        if row.get("type") == "agent_event" and row.get("event") == "facet_verdict":
+            result[str(row.get("facet_id") or "")] = row
+    return result
+
+
 def _format_time(ts: Optional[int]) -> str:
     if not ts:
         return ""
@@ -63,6 +72,7 @@ def build_facets(cfg: Mapping[str, Any], username: str) -> Dict[str, Any]:
     service, concepts = _load_catalog(cfg, username)
     store = CognitiveEvidenceStore(cfg)
     selected_ids = user_store.list_selected_lecture_ids(cfg, username)
+    feedback = _feedback_state(cfg, username)
 
     mastery_cells: List[Dict[str, Any]] = []
     facets: List[Dict[str, Any]] = []
@@ -75,6 +85,7 @@ def build_facets(cfg: Mapping[str, Any], username: str) -> Dict[str, Any]:
         claim: str,
         confidence: float,
         evidence: List[Dict[str, Any]],
+        assessment: Optional[Dict[str, Any]] = None,
     ) -> None:
         concept_id = str(concept.get("concept_id") or "")
         if not concept_id:
@@ -94,7 +105,8 @@ def build_facets(cfg: Mapping[str, Any], username: str) -> Dict[str, Any]:
             "lectureId": str(concept.get("lecture_id") or ""),
             "bookId": str(concept.get("book_id") or ""),
             "evidence": evidence,
-            "userVerdict": _verdict_state(store, username, facet_id),
+            "userVerdict": feedback.get(facet_id, {}).get("verdict") or _verdict_state(store, username, facet_id),
+            **({"assessment": assessment} if assessment is not None else {}),
         })
 
     # 1) 认知状态 → 掌握度热力图 + 掌握度判断
@@ -114,10 +126,16 @@ def build_facets(cfg: Mapping[str, Any], username: str) -> Dict[str, Any]:
             uncertainty = state.get("uncertainty")
             mastery_cells.append({
                 "concept": str(concept.get("name") or ""),
-                "mastery": float(mastery) if isinstance(mastery, (int, float)) else 0.0,
+                "mastery": float(mastery) if isinstance(mastery, (int, float)) else None,
                 "status": str(state.get("status") or "unknown"),
                 "lectureTitle": lecture_title,
                 "chapterName": str(concept.get("chapter_name") or ""),
+                "conceptId": str(concept.get("concept_id") or ""),
+                "lectureId": lecture_id,
+                "bookId": str(concept.get("book_id") or ""),
+                "chapterIndex": concept.get("chapter_index"),
+                "evidenceCount": int(state.get("evidence_count") or 0),
+                "assessedCount": int(state.get("assessed_count") or 0),
             })
             status = str(state.get("status") or "")
             if status == "at_risk" or (isinstance(mastery, (int, float)) and mastery < _MASTERY_LOW):
@@ -127,6 +145,7 @@ def build_facets(cfg: Mapping[str, Any], username: str) -> Dict[str, Any]:
                     concept=concept,
                     claim=f"你在{concept.get('name')}上掌握度只有 {pct}%，我觉得还没过。",
                     confidence=round(1.0 - float(uncertainty or 1.0), 2) if isinstance(uncertainty, (int, float)) else 0.5,
+                    assessment={"mastery": mastery, "status": status},
                     evidence=[{
                         "label": f"认知状态：{status}，掌握度 {pct}%",
                         "source": "progress",
@@ -140,6 +159,7 @@ def build_facets(cfg: Mapping[str, Any], username: str) -> Dict[str, Any]:
                     concept=concept,
                     claim=f"你在{concept.get('name')}上已经稳了（{pct}%）。",
                     confidence=round(1.0 - float(uncertainty or 1.0), 2) if isinstance(uncertainty, (int, float)) else 0.5,
+                    assessment={"mastery": mastery, "status": status},
                     evidence=[{
                         "label": f"认知状态：{status}，掌握度 {pct}%",
                         "source": "progress",
@@ -193,7 +213,7 @@ def build_facets(cfg: Mapping[str, Any], username: str) -> Dict[str, Any]:
         title = str(row.get("question_title") or "").strip()
         book_id = str(row.get("book_id") or "").strip()
         try:
-            chapter_index = int(row.get("chapter_index") or -1)
+            chapter_index = int(row.get("chapter_index", -1))
         except (TypeError, ValueError):
             chapter_index = -1
         for concept in _match_concepts(title, concepts, chapter_index, book_id):
@@ -213,6 +233,7 @@ def build_facets(cfg: Mapping[str, Any], username: str) -> Dict[str, Any]:
             concept=concept,
             claim=f"你在{concept.get('name')}的题目上正确率 {pct}%（{bucket['correct']}/{bucket['total']}）。",
             confidence=round(0.5 + 0.1 * min(5, bucket["total"]), 2),
+            assessment={"accuracy": rate, "correct": bucket["correct"], "total": bucket["total"]},
             evidence=[{
                 "label": f"答题 {bucket['correct']}/{bucket['total']} 正确",
                 "source": "progress",
@@ -220,10 +241,35 @@ def build_facets(cfg: Mapping[str, Any], username: str) -> Dict[str, Any]:
             }],
         )
 
-    facets.sort(key=lambda row: row["confidence"], reverse=True)
+    from core.cognition.learning_observations import learning_observations
+
+    observed = learning_observations(cfg, username)
+    facets.extend(observed["facets"])
+    read_targets = {
+        (course["lecture_id"], chapter["book_id"], chapter["chapter_index"])
+        for course in observed["courses"] for chapter in course.get("chapters", [])
+        if chapter.get("read_chars", 0) > 0 or chapter.get("completed")
+    }
+    for cell in mastery_cells:
+        if cell["mastery"] is None and (cell["lectureId"], cell["bookId"], cell["chapterIndex"]) in read_targets:
+            cell["status"] = "unverified"
+    for facet in facets:
+        correction = feedback.get(facet["id"], {})
+        if correction.get("verdict"):
+            facet["userVerdict"] = correction["verdict"]
+        if correction.get("verdict") == "disagree" and facet.get("kind") not in {"reading", "conversation"}:
+            note = str(correction.get("note") or "").strip()
+            facet["claim"] = f"你不同意我对{facet.get('concept') or '这条记录'}的判断，我会重新核实。" + (f"你说：{note}" if note else "")
+            facet["confidence"] = min(facet["confidence"], 0.5)
+    facets.sort(key=lambda row: (row.get("updatedAt", 0), row["confidence"]), reverse=True)
+    activity = observed["activity"]
+    activity["assessed_concepts"] = sum(1 for row in mastery_cells if row["mastery"] is not None)
+    activity["observed_concepts"] = sum(1 for row in mastery_cells if row["status"] != "unknown")
     return {
         "mastery": mastery_cells,
         "facets": facets,
+        "activity": activity,
+        "courses": observed["courses"],
         "generated_at": int(time.time()),
     }
 
@@ -237,36 +283,27 @@ def record_verdict(
     lecture_id: str = "",
     book_id: str = "",
     concept_id: str = "",
+    note: str = "",
 ) -> Dict[str, Any]:
-    """反驳回喂：写 review 证据（disagree=0 / agree=1）→ 掌握度即时重算；留事件记录。"""
-    service = CognitionService(cfg)
-    score = 1.0 if verdict == "agree" else 0.0
-    evidence_written = False
-    if lecture_id and concept_id and book_id:
-        digest = hashlib.sha1(f"{username}|{facet_id}|{verdict}".encode("utf-8")).hexdigest()[:16]
-        payload = {
-            "evidence_id": f"verdict_{digest}",
-            "lecture_id": lecture_id,
-            "book_id": book_id,
-            "concept_id": concept_id,
-            "evidence_type": "review",
-            "source_type": "manual",
-            "source_id": f"facet:{facet_id}",
-            "occurred_at": int(time.time()),
-            "score": score,
-            "metadata": {"facet_id": facet_id, "verdict": verdict},
-        }
-        try:
-            outcome = service.record_evidence(username, payload)
-            evidence_written = bool(outcome.get("created") or True)
-        except Exception as exc:
-            log_event("facet_verdict_evidence_failed", "面二回喂证据写入失败", payload={"user_id": username, "facet_id": facet_id, "error": str(exc)})
+    """Persist a correction without creating fabricated assessment evidence."""
+    event_id = "verdict_" + uuid.uuid4().hex[:20]
+    if facet_id.startswith("memory_mem_"):
+        from core.memory.evidence_memory import correct_memory
+
+        corrected = correct_memory(cfg, username, facet_id.removeprefix("memory_"),
+                                   verdict=verdict, note=note, source_id=event_id)
+        if not corrected.get("updated"):
+            return {"updated": False, "facet_id": facet_id, "verdict": verdict, "evidence_written": False}
     user_store.append_learning_record(cfg, username, {
         "type": "agent_event",
         "event": "facet_verdict",
-        "event_id": f"verdict_{facet_id}_{int(time.time())}",
+        "event_id": event_id,
         "facet_id": facet_id,
         "verdict": verdict,
+        "note": note[:1000],
+        "lecture_id": lecture_id,
+        "book_id": book_id,
+        "concept_id": concept_id,
         "source": "mirror",
     })
-    return {"updated": True, "facet_id": facet_id, "verdict": verdict, "evidence_written": evidence_written}
+    return {"updated": True, "facet_id": facet_id, "verdict": verdict, "evidence_written": False}

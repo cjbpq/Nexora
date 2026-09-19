@@ -167,6 +167,15 @@ export interface NxReaderTheme {
   barInkSoft: string;
   /** 操作条上的强调项（问AI）。 */
   barAccent: string;
+  /** 长按选区底色（系统选中高亮，透明橙）；手柄颜色沿用 underline。 */
+  selectBg: string;
+  /** 浮动工具栏上被激活项的底色。 */
+  barItemBg: string;
+  /** 浮动工具栏两行之间的分隔线。 */
+  barDivider: string;
+  /** 「问AI」图标与文字的渐变（起 / 止）。 */
+  aiStart: string;
+  aiEnd: string;
   /** 主题选择圆点的展示色。 */
   swatch: string;
   /** 该主题下的 sheet / 面板走深色还是浅色令牌。 */
@@ -188,6 +197,11 @@ export const NxReaderThemes: NxReaderTheme[] = [
     barInk: '#2A2622',
     barInkSoft: '#7D7A8C',
     barAccent: '#2B2D5C',
+    selectBg: '#38C8641E',
+    barItemBg: '#12000000',
+    barDivider: '#14000000',
+    aiStart: '#5B5FD6',
+    aiEnd: '#D95AA0',
     swatch: '#F7F3EA',
     dark: false,
   },
@@ -205,6 +219,11 @@ export const NxReaderThemes: NxReaderTheme[] = [
     barInk: '#3B2F22',
     barInkSoft: '#8F7B5E',
     barAccent: '#7A3E12',
+    selectBg: '#3DB5541A',
+    barItemBg: '#163B2F22',
+    barDivider: '#183B2F22',
+    aiStart: '#5B5FD6',
+    aiEnd: '#C9508F',
     swatch: '#E9DCC3',
     dark: false,
   },
@@ -222,6 +241,11 @@ export const NxReaderThemes: NxReaderTheme[] = [
     barInk: '#E4E2DC',
     barInkSoft: '#8B889B',
     barAccent: '#9DA0E6',
+    selectBg: '#5CE88A45',
+    barItemBg: '#1FFFFFFF',
+    barDivider: '#1AFFFFFF',
+    aiStart: '#8A8DFF',
+    aiEnd: '#F07AB8',
     swatch: '#1A1A1E',
     dark: true,
   },

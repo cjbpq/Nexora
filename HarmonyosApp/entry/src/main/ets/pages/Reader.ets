@@ -5,7 +5,8 @@
  *   · 章节按屏幕实际尺寸分页（MeasureText 精确排版），左右滑动或点击左右屏翻页，点击中间呼出操作面板；
  *   · 章末再翻 → 自动记「读完这一章」并进入下一章（课程进度由 chapter_completed 记录驱动）；
  *   · 点击左 30% 上一页、右 30% 下一页、中间呼出操作面板（覆盖整页热区，不让正文 Text 吞掉点击）；
- *   · 长按选字 → 系统手柄 + 菜单：问AI / 复制 / 朗读 / 划线；划线后弹出番茄小说式面板（直线 / 波浪 / 荧光笔 + 四色 + 删除）；
+ *   · 长按选字 → 系统手柄 + 自绘浮动工具栏（问AI / 复制 / 朗读 / 划线 / 分享 / 查询），点划线后工具栏展开样式行
+ *     （直线 / 波浪 / 荧光笔 + 四色），选中已划线的句子时显示「删除划线」；点工具栏以外任何地方选区与工具栏一起消失；
  *   · 划线按字范围持久化，同一段可多次划不同句，可改样式/颜色或删除；
  *   · 阅读状态（纸色主题 / 字号 / 章节 / 页）本地持久化，「继续学习」回到上次读到的那一页；
  *   · 原右缘 AI 浮球并入操作面板；AI 问答走底部 sheet（宽屏变右栏）。
@@ -13,8 +14,11 @@
  */
 import { router, window } from '@kit.ArkUI';
 import { MeasureText } from '@kit.ArkUI';
+import { text as graphicsText } from '@kit.ArkGraphics2D';
 import { batteryInfo, pasteboard } from '@kit.BasicServicesKit';
 import { common } from '@kit.AbilityKit';
+import { uniformTypeDescriptor } from '@kit.ArkData';
+import { systemShare } from '@kit.ShareKit';
 import {
   ChapterPayload,
   ChapterParagraph,
@@ -35,7 +39,15 @@ import { SkeletonCard, ErrorState } from '../components/common/States';
 import { sharedTts } from '../capability/tts';
 import { sharedLiveView } from '../capability/liveview';
 import { sharedCache } from '../services/cache/CacheStore';
-import { ReadingPosition, nxReadPosition, nxSavePosition } from '../services/ReadingState';
+import {
+  ReadingPosition,
+  ReadingCheckpoint,
+  ReadingSession,
+  nxReadPosition,
+  nxSavePosition,
+  nxReadingScope,
+  nxCodePointLength,
+} from '../services/ReadingState';
 import {
   nxPalette,
   NxPalette,
@@ -63,6 +75,9 @@ class PageBlock {
   heading: number = 0;
   /** 该块在段落 trim 后正文里的起点。 */
   paraOffset: number = 0;
+  /** 后端 plain 正文的 Unicode 码点坐标，独立于 UI 的 UTF-16 字符偏移。 */
+  readStart: number = 0;
+  readEnd: number = 0;
   /** 块顶相对页面内容区的偏移（vp）与块高（vp），用于定位浮动菜单。 */
   top: number = 0;
   height: number = 0;
@@ -99,12 +114,18 @@ const PAGE_PADDING_BOTTOM: number = 28;
 const PARA_GAP: number = 14;
 const IMAGE_HEIGHT: number = 200;
 const MENU_HEIGHT: number = 44;
+/** 长按工具栏：主行 / 样式行高度、指向选区的小三角尺寸、三角尖端离选区（含手柄圆点）的距离、最大宽度。 */
+const SEL_BAR_MAIN: number = 66;
+const SEL_BAR_STYLE: number = 58;
+const SEL_BAR_CARET: number = 8;
+const SEL_BAR_GAP: number = 18;
+const SEL_BAR_MAX_WIDTH: number = 480;
 const SPLIT_PUNCT: string = '。！？；」”…\n.!?;';
 
 @Entry
 @Component
 struct Reader {
-  @State loading: boolean = false;
+  @State @Watch('onReadingVisibilityChanged') loading: boolean = false;
   @State errorText: string = '';
   @State chapterTitle: string = '';
   @State bookTitle: string = '';
@@ -117,10 +138,14 @@ struct Reader {
   @State pageIndex: number = 0;
   @State marks: ReaderMark[] = [];
   @State selectedPara: number = -1;
-  @State selOffset: number = 0;
   @State selStart: number = 0;
   @State selEnd: number = 0;
   @State selText: string = '';
+  /** 选区在页面 Stack 坐标系里的上下沿，以及最上 / 最下一行选中部分的水平中心（vp），用于摆放浮动工具栏和小三角。 */
+  @State selTop: number = 0;
+  @State selBottom: number = 0;
+  @State selFirstCx: number = 0;
+  @State selLastCx: number = 0;
   @State flashPara: number = -1;
   @State clockText: string = '';
   @State batteryPct: number = -1;
@@ -129,9 +154,9 @@ struct Reader {
   @State ttsPaused: boolean = false;
   @State fontIndex: number = 1;
   @State themeId: string = 'paper';
-  @State panelOpen: boolean = false;
-  @State showToc: boolean = false;
-  @State showAskSheet: boolean = false;
+  @State @Watch('onReadingVisibilityChanged') panelOpen: boolean = false;
+  @State @Watch('onReadingVisibilityChanged') showToc: boolean = false;
+  @State @Watch('onReadingVisibilityChanged') showAskSheet: boolean = false;
   @State askText: string = '';
   @State asking: boolean = false;
   @State answerEntry: TimelineEntry | null = null;
@@ -141,6 +166,7 @@ struct Reader {
   @State areaHeight: number = 0;
   @State completedThisSession: boolean = false;
   @State marking: boolean = false;
+  @State readingFeedback: string = '';
   @State markStyleOpen: boolean = false;
   @State pendingStyle: string = 'solid';
   @State pendingColor: string = 'yellow';
@@ -148,19 +174,30 @@ struct Reader {
   @State snapStart: number = 0;
   @State snapEnd: number = 0;
   @State snapText: string = '';
-  @State selBlockTop: number = 0;
-  @State selBlockHeight: number = 0;
   @State markEpoch: number = 0;
   @StorageProp('nxDarkMode') nxDark: boolean = false;
   private readerApi: ReaderApi = new ReaderApi();
   private agentApi: AgentApi = new AgentApi();
   private swiperController: SwiperController = new SwiperController();
+  /** 每个正文块一个 TextController：取选区矩形、编程清除选区。键 = 块 key（含章 / 字号 / 宽度前缀，跨分页唯一）。 */
+  private textControllers: Map<string, TextController> = new Map<string, TextController>();
+  private blockKeyPrefix: string = '';
+  private selBlockKey: string = '';
   private lectureId: string = '';
   private bookId: string = '';
   private flowId: string = '';
+  private flowChapterIndex: number = -1;
+  private flowReadingConfirmed: boolean = false;
   private resumeRequested: boolean = false;
   private pendingPara: number = -1;
-  private sessionStart: number = Date.now();
+  private pendingParaOffset: number = 0;
+  private readingSession: ReadingSession | null = null;
+  private readingFocused: boolean = false;
+  private readingCoordinateSpace: string = 'plain';
+  private pageVisible: boolean = false;
+  private disposed: boolean = false;
+  private chapterRequestVersion: number = 0;
+  private totalReadMs: number = 0;
   private heartbeatId: number = -1;
   private paginateId: number = -1;
   private chromeId: number = -1;
@@ -168,6 +205,7 @@ struct Reader {
   private hostWindow: window.Window | undefined = undefined;
 
   aboutToAppear(): void {
+    this.disposed = false;
     const context = this.getUIContext().getHostContext();
     if (context !== undefined) {
       sharedCache.init(context);
@@ -175,12 +213,13 @@ struct Reader {
     }
     const params = router.getParams() as Record<string, Object>;
     if (params !== undefined && params !== null) {
-      this.lectureId = params.lecture_id as string;
-      this.bookId = params.book_id as string;
-      this.bookTitle = params.book_title as string;
-      this.chapterIndex = params.chapter_index as number;
+      this.lectureId = params.lecture_id !== undefined ? String(params.lecture_id) : '';
+      this.bookId = params.book_id !== undefined ? String(params.book_id) : '';
+      this.bookTitle = params.book_title !== undefined ? String(params.book_title) : '';
+      this.chapterIndex = params.chapter_index !== undefined ? Number(params.chapter_index) : 0;
       if (params.flow_id !== undefined) {
         this.flowId = params.flow_id as string;
+        this.flowChapterIndex = this.chapterIndex;
       }
       if (params.resume !== undefined) {
         this.resumeRequested = params.resume === true;
@@ -192,6 +231,23 @@ struct Reader {
     this.startChrome();
     this.applyImmersive(true);
     this.load();
+  }
+
+  onPageShow(): void {
+    this.pageVisible = true;
+    this.startChrome();
+    this.applyImmersive(true);
+    this.onReadingVisibilityChanged();
+    this.startHeartbeat();
+    this.readerApi.flushReadingProgress();
+  }
+
+  onPageHide(): void {
+    this.pageVisible = false;
+    this.onReadingVisibilityChanged();
+    this.stopHeartbeat();
+    this.stopChrome();
+    this.savePosition();
   }
 
   private restoreReaderSettings(): void {
@@ -206,6 +262,9 @@ struct Reader {
   }
 
   aboutToDisappear(): void {
+    this.pageVisible = false;
+    this.disposed = true;
+    this.chapterRequestVersion++;
     this.stopHeartbeat();
     this.stopChrome();
     this.applyImmersive(false);
@@ -214,23 +273,17 @@ struct Reader {
     }
     sharedTts.stop();
     this.savePosition();
-    const duration = Date.now() - this.sessionStart;
-    const events: TelemetryEvent[] = [
-      { stream: 'reading', event: 'focus_out', bid: this.bookId, ci: this.chapterIndex, si: this.currentFirstPara(), focus: 'blur' },
-      {
-        stream: 'reading',
-        event: 'session_complete',
-        bid: this.bookId,
-        ci: this.chapterIndex,
-        si: this.currentFirstPara(),
-        extra: { 'duration_ms': String(duration) },
-      },
-    ];
-    this.readerApi.postTelemetry(events);
-    if (this.flowId.length > 0) {
-      this.agentApi.postFlowEvent(this.flowId, 'reading_done');
+    this.finishReadingSession();
+    this.textControllers.clear();
+    if (this.flowId.length > 0 && this.flowReadingConfirmed) {
+      this.agentApi.postFlowEvent(this.flowId, 'reading_done').then((): void => {
+        AppStorage.setOrCreate('nxStudyTick', Date.now());
+      }).catch((err: Error): void => {
+        // 阅读事实已经保存，出题失败不应伪造新的阅读完成记录。
+      });
     }
-    sharedLiveView.stopStudy('读了 ' + Math.max(1, Math.round(duration / 60000)) + ' 分钟' + (this.flowId.length > 0 ? ' · 接下来出题' : ''));
+    const durationText = this.totalReadMs < 60000 ? '读了不到 1 分钟' : '读了 ' + Math.round(this.totalReadMs / 60000) + ' 分钟';
+    sharedLiveView.stopStudy(durationText + (this.flowReadingConfirmed ? ' · 接下来出题' : ''));
     sharedTts.release();
   }
 
@@ -340,11 +393,13 @@ struct Reader {
     if (saved === null) {
       return;
     }
-    if (this.resumeRequested) {
+    if (this.resumeRequested && this.flowId.length === 0) {
       this.chapterIndex = saved.chapter;
       this.pendingPara = saved.para;
+      this.pendingParaOffset = saved.paraOffset !== undefined ? saved.paraOffset : 0;
     } else if (saved.chapter === this.chapterIndex) {
       this.pendingPara = saved.para;
+      this.pendingParaOffset = saved.paraOffset !== undefined ? saved.paraOffset : 0;
     }
   }
 
@@ -356,7 +411,9 @@ struct Reader {
       this.applySavedPosition();
       await this.loadChapter(this.chapterIndex);
       await this.loadToc();
-      this.startHeartbeat();
+      if (this.pageVisible && !this.disposed) {
+        this.startHeartbeat();
+      }
     } catch (err) {
       const e = err as BusinessError;
       this.errorText = e.message.length > 0 ? e.message : '加载章节失败';
@@ -366,6 +423,8 @@ struct Reader {
   }
 
   async loadChapter(index: number): Promise<void> {
+    this.finishReadingSession();
+    const requestVersion = ++this.chapterRequestVersion;
     const cacheKey = 'nx_chapter_' + this.lectureId + '_' + this.bookId + '_' + index;
     let payload: ChapterPayload | null = null;
     this.loading = true;
@@ -387,14 +446,21 @@ struct Reader {
       }
       if (payload === null) {
         this.loading = false;
+        if (this.pages.length > 0 && !this.disposed && requestVersion === this.chapterRequestVersion) {
+          this.beginReadingSession();
+        }
         const e = err as BusinessError;
         throw new Error(e.message.length > 0 ? e.message : '章节不可用');
       }
+    }
+    if (this.disposed || requestVersion !== this.chapterRequestVersion) {
+      return;
     }
     this.chapterIndex = payload.chapter_index;
     this.chapterTitle = payload.chapter_title;
     this.chapterCount = payload.chapter_count;
     this.chapterRange = payload.chapter_range;
+    this.readingCoordinateSpace = payload.coordinate_space;
     this.paragraphs = payload.paragraphs;
     this.selectedPara = -1;
     this.answerEntry = null;
@@ -403,8 +469,28 @@ struct Reader {
     this.loadMarks();
     this.paginate();
     this.loading = false;
+    this.beginReadingSession();
+  }
+
+  private beginReadingSession(): void {
+    const point = new ReadingCheckpoint();
+    point.lecture_id = this.lectureId;
+    point.book_id = this.bookId;
+    point.chapter_index = this.chapterIndex;
+    point.chapter_name = this.chapterTitle;
+    point.chapter_range = this.chapterRange;
+    point.coordinate_space = this.readingCoordinateSpace;
+    point.session_id = 'read_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2);
+    point.started_at_ms = Date.now();
+    this.readingSession = new ReadingSession(point);
+    this.readingFocused = this.canRecordReading();
+    this.readingSession.enterPage(this.pageReadRanges(), this.readingFocused, Date.now());
     this.readerApi.postTelemetry([
-      { stream: 'reading', event: 'focus_in', bid: this.bookId, ci: this.chapterIndex, si: 0, focus: 'reader' },
+      {
+        stream: 'reading', event: this.readingFocused ? 'focus_in' : 'focus_out', bid: this.bookId,
+        ci: this.chapterIndex, si: this.currentFirstPara(), focus: this.readingFocused ? 'reader' : 'blur',
+        extra: { 'session_key': point.session_id, 'active_duration_ms': '0', 'lecture_id': this.lectureId },
+      },
     ]);
   }
 
@@ -422,9 +508,19 @@ struct Reader {
   startHeartbeat(): void {
     this.stopHeartbeat();
     this.heartbeatId = setInterval(() => {
-      const ratio = this.pages.length > 0 ? Math.round((this.pageIndex / this.pages.length) * 100) / 100 : 0;
+      if (!this.canRecordReading()) {
+        return;
+      }
+      const point = this.checkpointReading();
+      if (point === null) {
+        return;
+      }
+      const ratio = this.pages.length > 0 ? (this.pageIndex + 1) / this.pages.length : 0;
       this.readerApi.postTelemetry([
-        { stream: 'reading', event: 'snapshot', bid: this.bookId, ci: this.chapterIndex, si: this.currentFirstPara(), scroll: ratio },
+        {
+          stream: 'reading', event: 'snapshot', bid: this.bookId, ci: this.chapterIndex, si: this.currentFirstPara(), scroll: ratio,
+          extra: { 'session_key': point.session_id, 'active_duration_ms': String(point.active_duration_ms), 'lecture_id': this.lectureId },
+        },
       ]);
     }, 10000);
   }
@@ -433,6 +529,98 @@ struct Reader {
     if (this.heartbeatId >= 0) {
       clearInterval(this.heartbeatId);
       this.heartbeatId = -1;
+    }
+  }
+
+  private canRecordReading(): boolean {
+    return this.pageVisible && !this.disposed && !this.loading && !this.panelOpen && !this.showToc && !this.showAskSheet;
+  }
+
+  private pageReadRanges(): number[][] {
+    const ranges: number[][] = [];
+    if (this.pageIndex >= 0 && this.pageIndex < this.pages.length) {
+      for (const block of this.pages[this.pageIndex].blocks) {
+        if (block.readEnd > block.readStart) {
+          ranges.push([block.readStart, block.readEnd]);
+        }
+      }
+    }
+    return ranges;
+  }
+
+  onReadingVisibilityChanged(): void {
+    if (this.readingSession !== null) {
+      const focused = this.canRecordReading();
+      this.readingSession.setActive(focused, Date.now());
+      const point = this.checkpointReading();
+      if (point !== null && focused !== this.readingFocused) {
+        this.readerApi.postTelemetry([{
+          stream: 'reading', event: focused ? 'focus_in' : 'focus_out', bid: point.book_id,
+          ci: point.chapter_index, si: point.paragraph_index, focus: focused ? 'reader' : 'blur',
+          extra: { 'session_key': point.session_id, 'active_duration_ms': String(point.active_duration_ms), 'lecture_id': point.lecture_id },
+        }]);
+      }
+      this.readingFocused = focused;
+    }
+  }
+
+  private publishReading(point: ReadingCheckpoint): void {
+    if (point.active_duration_ms === 0 && point.read_ranges.length === 0) {
+      return;
+    }
+    this.readerApi.queueReadingProgress(point).then((status: string): void => {
+      if (!this.disposed) {
+        this.readingFeedback = status === 'synced' ? '我已记下读到的位置和阅读时间。' :
+          (status === 'pending' ? '我先把这次阅读保存在设备上，联网后补记。' : '这次阅读还没能保存，我会继续重试。');
+      }
+    });
+  }
+
+  private checkpointReading(): ReadingCheckpoint | null {
+    if (this.readingSession !== null) {
+      const point = this.readingSession.snapshot(this.currentFirstPara(), this.pageIndex, Date.now());
+      this.publishReading(point);
+      return point;
+    }
+    return null;
+  }
+
+  private finishReadingSession(): void {
+    if (this.readingSession === null) {
+      return;
+    }
+    this.readingSession.setActive(false, Date.now());
+    const point = this.readingSession.snapshot(this.currentFirstPara(), this.pageIndex, Date.now());
+    this.publishReading(point);
+    this.totalReadMs += point.active_duration_ms;
+    this.readingSession = null;
+    this.readingFocused = false;
+    const events: TelemetryEvent[] = [
+      {
+        stream: 'reading', event: 'focus_out', bid: point.book_id, ci: point.chapter_index, si: point.paragraph_index, focus: 'blur',
+        extra: { 'session_key': point.session_id, 'active_duration_ms': String(point.active_duration_ms), 'lecture_id': point.lecture_id },
+      },
+      {
+        stream: 'reading', event: 'session_complete', bid: point.book_id, ci: point.chapter_index, si: point.paragraph_index,
+        extra: {
+          'duration_ms': String(point.active_duration_ms), 'active_duration_ms': String(point.active_duration_ms),
+          'lecture_id': point.lecture_id, 'session_key': point.session_id,
+        },
+      },
+    ];
+    this.readerApi.postTelemetry(events);
+  }
+
+  onReaderPageChange(index: number): void {
+    if (index === this.pageIndex || index < 0 || index >= this.pages.length) {
+      return;
+    }
+    this.checkpointReading();
+    this.pageIndex = index;
+    this.clearSelectionState();
+    this.savePosition();
+    if (this.readingSession !== null) {
+      this.readingSession.enterPage(this.pageReadRanges(), this.canRecordReading(), Date.now());
     }
   }
 
@@ -445,6 +633,8 @@ struct Reader {
     const position: ReadingPosition = new ReadingPosition();
     position.chapter = this.chapterIndex;
     position.para = this.currentFirstPara();
+    const blocks = this.pages[this.pageIndex].blocks;
+    position.paraOffset = blocks.length > 0 ? blocks[0].paraOffset : 0;
     position.chapterTitle = this.chapterTitle;
     position.bookTitle = this.bookTitle;
     position.lectureId = this.lectureId;
@@ -454,7 +644,7 @@ struct Reader {
   }
 
   private underlineKey(): string {
-    return 'nx_ul_' + this.lectureId + '_' + this.bookId + '_' + this.chapterIndex;
+    return 'nx_ul_' + nxReadingScope() + '_' + this.lectureId + '_' + this.bookId + '_' + this.chapterIndex;
   }
 
   private loadMarks(): void {
@@ -510,27 +700,152 @@ struct Reader {
     return this.currentPageText();
   }
 
+  // ---------- 长按选区 ----------
+
+  /** 块级 TextController：同一块复用同一个控制器，分页重建（key 变化）时自然换新。 */
+  private textController(key: string): TextController {
+    const existing = this.textControllers.get(key);
+    if (existing !== undefined) {
+      return existing;
+    }
+    const created = new TextController();
+    this.textControllers.set(key, created);
+    return created;
+  }
+
+  private blockNodeId(key: string): string {
+    return 'nx_blk_' + key;
+  }
+
+  /** 选区在 Stack 坐标系里的位置：块在窗口里的位置 + 选中字符在块内的绘制矩形。任何一步拿不到都退回块的估算位置。 */
+  private measureSelection(block: PageBlock, start: number, end: number): void {
+    const ui = this.getUIContext();
+    let blockX = PAGE_PADDING_X;
+    let blockY = PAGE_PADDING_TOP + block.top;
+    try {
+      const utils = ui.getComponentUtils();
+      const node = utils.getRectangleById(this.blockNodeId(block.key));
+      const root = utils.getRectangleById('nx_reader_root');
+      const nodeW = ui.px2vp(node.size.width);
+      if (nodeW > 0) {
+        blockX = ui.px2vp(node.windowOffset.x - root.windowOffset.x);
+        blockY = ui.px2vp(node.windowOffset.y - root.windowOffset.y);
+      }
+    } catch (err) {
+      // 节点尚未挂载：用分页时算好的块位置
+    }
+    let top = blockY;
+    let bottom = blockY + block.height;
+    let firstCx = blockX + (this.areaWidth - PAGE_PADDING_X * 2) / 2;
+    let lastCx = firstCx;
+    try {
+      // 高度取整行（和系统高亮、手柄一致），宽度取字形本身（三角对准真正选中的字）
+      const boxes: graphicsText.TextBox[] = this.textController(block.key).getLayoutManager()
+        .getRectsForRange({ start: start, end: end }, graphicsText.RectWidthStyle.TIGHT, graphicsText.RectHeightStyle.MAX);
+      if (boxes.length > 0) {
+        let minTop = Number.MAX_VALUE;
+        let maxBottom = -Number.MAX_VALUE;
+        let firstBox: graphicsText.TextBox = boxes[0];
+        let lastBox: graphicsText.TextBox = boxes[0];
+        for (const box of boxes) {
+          if (box.rect.top < minTop) {
+            minTop = box.rect.top;
+            firstBox = box;
+          }
+          if (box.rect.bottom > maxBottom) {
+            maxBottom = box.rect.bottom;
+            lastBox = box;
+          }
+        }
+        top = blockY + ui.px2vp(minTop);
+        bottom = blockY + ui.px2vp(maxBottom);
+        firstCx = blockX + ui.px2vp((firstBox.rect.left + firstBox.rect.right) / 2);
+        lastCx = blockX + ui.px2vp((lastBox.rect.left + lastBox.rect.right) / 2);
+      }
+    } catch (err) {
+      // 布局管理器未绑定：退回块的整体范围
+    }
+    this.selTop = top;
+    this.selBottom = bottom;
+    this.selFirstCx = firstCx;
+    this.selLastCx = lastCx;
+  }
+
   rememberSelection(block: PageBlock, start: number, end: number): void {
+    if (end <= start) {
+      if (this.selBlockKey === block.key || this.selBlockKey.length === 0) {
+        this.selectedPara = -1;
+        this.selStart = 0;
+        this.selEnd = 0;
+        this.selText = '';
+        this.selBlockKey = '';
+      }
+      return;
+    }
+    // 同一时刻只允许一个块有选区：换块长按时先清掉上一块的系统高亮
+    if (this.selBlockKey.length > 0 && this.selBlockKey !== block.key) {
+      this.clearNativeSelection(this.selBlockKey);
+    }
+    this.selBlockKey = block.key;
     this.selectedPara = block.paraIndex;
-    this.selOffset = block.paraOffset;
     this.selStart = start;
     this.selEnd = end;
-    this.selBlockTop = block.top;
-    this.selBlockHeight = block.height;
-    if (end > start) {
-      this.selText = block.text.slice(start, end);
-      this.snapPara = block.paraIndex;
-      this.snapStart = block.paraOffset + start;
-      this.snapEnd = block.paraOffset + end;
-      this.snapText = this.selText;
-      this.lastSelAt = Date.now();
-      const existing = this.overlappingMark();
-      if (existing !== null) {
-        this.pendingStyle = existing.style;
-        this.pendingColor = existing.color;
-      }
+    this.selText = block.text.slice(start, end);
+    this.snapPara = block.paraIndex;
+    this.snapStart = block.paraOffset + start;
+    this.snapEnd = block.paraOffset + end;
+    this.snapText = this.selText;
+    this.lastSelAt = Date.now();
+    this.measureSelection(block, start, end);
+    const existing = this.overlappingMark();
+    if (existing !== null) {
+      this.pendingStyle = existing.style;
+      this.pendingColor = existing.color;
+      this.markStyleOpen = true;
     } else {
-      this.selText = '';
+      this.markStyleOpen = false;
+    }
+  }
+
+  /** 工具栏是否可见：有一段真实的系统选区。 */
+  private selectionActive(): boolean {
+    return this.selectedPara >= 0 && this.selEnd > this.selStart && this.selText.length > 0;
+  }
+
+  /** 撤掉正文 Text 上的系统高亮与手柄。API 23+ 的 setTextSelection 起止相同即为不选中。 */
+  private clearNativeSelection(key: string): void {
+    const controller = this.textControllers.get(key);
+    if (controller === undefined) {
+      return;
+    }
+    try {
+      controller.closeSelectionMenu();
+    } catch (err) {
+      // 无菜单时忽略
+    }
+    try {
+      controller.setTextSelection(0, 0, { menuPolicy: MenuPolicy.HIDE });
+    } catch (err) {
+      // 控制器未绑定组件时忽略
+    }
+  }
+
+  /** 收起选区与工具栏；keepSnapshot 时保留「刚选中的句子」给问AI sheet 用。 */
+  private dismissSelection(keepSnapshot: boolean): void {
+    if (this.selBlockKey.length > 0) {
+      this.clearNativeSelection(this.selBlockKey);
+    }
+    this.selBlockKey = '';
+    this.selectedPara = -1;
+    this.selStart = 0;
+    this.selEnd = 0;
+    this.selText = '';
+    this.markStyleOpen = false;
+    if (!keepSnapshot) {
+      this.snapPara = -1;
+      this.snapStart = 0;
+      this.snapEnd = 0;
+      this.snapText = '';
     }
   }
 
@@ -600,18 +915,12 @@ struct Reader {
     this.markEpoch = this.markEpoch + 1;
     this.persistMarks();
     this.markStyleOpen = false;
+    this.pendingStyle = 'solid';
+    this.pendingColor = 'yellow';
   }
 
   private clearSelectionState(): void {
-    this.selectedPara = -1;
-    this.selStart = 0;
-    this.selEnd = 0;
-    this.selText = '';
-    this.snapPara = -1;
-    this.snapStart = 0;
-    this.snapEnd = 0;
-    this.snapText = '';
-    this.markStyleOpen = false;
+    this.dismissSelection(false);
   }
 
   private blockSpans(block: PageBlock): MarkSpan[] {
@@ -721,6 +1030,10 @@ struct Reader {
       if (cut <= 0) {
         cut = Math.max(1, low);
       }
+      if (cut < rest.length && rest.charCodeAt(cut - 1) >= 0xD800 && rest.charCodeAt(cut - 1) <= 0xDBFF &&
+        rest.charCodeAt(cut) >= 0xDC00 && rest.charCodeAt(cut) <= 0xDFFF) {
+        cut = cut > 1 ? cut - 1 : cut + 1;
+      }
       chunks.push(rest.slice(0, cut));
       rest = rest.slice(cut).replace(/^\s+/, '');
     }
@@ -751,10 +1064,18 @@ struct Reader {
     if (this.areaWidth <= 0 || this.areaHeight <= 0 || this.paragraphs.length === 0) {
       return;
     }
+    this.checkpointReading();
+    const currentBlocks: PageBlock[] = this.pageIndex < this.pages.length ? this.pages[this.pageIndex].blocks : [];
     const keepPara = this.pendingPara >= 0 ? this.pendingPara : this.currentFirstPara();
+    const keepOffset = this.pendingPara >= 0 ? this.pendingParaOffset : (currentBlocks.length > 0 ? currentBlocks[0].paraOffset : 0);
     this.pendingPara = -1;
+    this.pendingParaOffset = 0;
     const pageHeight = this.areaHeight - PAGE_PADDING_TOP - PAGE_PADDING_BOTTOM;
     const result: ReaderPage[] = [];
+    // 块 key 带上章 / 字号 / 宽度，分页重建后旧的 TextController 与节点 id 自然失效
+    this.blockKeyPrefix = 'c' + this.chapterIndex + 'f' + this.fontIndex + 'w' + Math.round(this.areaWidth) + '_';
+    this.textControllers.clear();
+    this.selBlockKey = '';
     let current: ReaderPage = new ReaderPage();
     let cursor = 0;
     let blockSeq = 0;
@@ -783,8 +1104,10 @@ struct Reader {
     for (const paragraph of this.paragraphs) {
       if (paragraph.kind === 'image' || paragraph.text.indexOf('{{nxl_image:') === 0) {
         const block = new PageBlock();
-        block.key = 'b' + (blockSeq++);
+        block.key = this.blockKeyPrefix + 'b' + (blockSeq++);
         block.paraIndex = paragraph.index;
+        block.readStart = paragraph.start;
+        block.readEnd = paragraph.end;
         block.isImage = true;
         block.imageUrl = this.parseImage(paragraph.text);
         block.height = Math.min(IMAGE_HEIGHT, pageHeight);
@@ -798,24 +1121,29 @@ struct Reader {
         continue;
       }
       const chunks: string[] = this.splitToFit(text, paragraph.heading_level, pageHeight);
+      const leadingChars = nxCodePointLength(paragraph.text.slice(0, paragraph.text.indexOf(text)));
       let paraCursor = 0;
       for (const chunk of chunks) {
         const block = new PageBlock();
-        block.key = 'b' + (blockSeq++);
+        block.key = this.blockKeyPrefix + 'b' + (blockSeq++);
         block.paraIndex = paragraph.index;
         block.text = chunk;
         block.heading = paragraph.heading_level;
-        block.paraOffset = paraCursor;
+        // splitToFit 会跳过块首空白，坐标必须仍指向原段落中的实际文字。
+        block.paraOffset = Math.max(paraCursor, text.indexOf(chunk, paraCursor));
+        block.readStart = paragraph.start + leadingChars + nxCodePointLength(text.slice(0, block.paraOffset));
+        block.readEnd = Math.min(paragraph.end, block.readStart + nxCodePointLength(chunk));
         block.height = this.measureHeight(chunk, paragraph.heading_level);
         place(block);
-        paraCursor += chunk.length;
+        paraCursor = block.paraOffset + chunk.length;
       }
     }
     flush();
     this.pages = result;
     let target = 0;
     for (let i = 0; i < result.length; i++) {
-      if (result[i].firstPara <= keepPara) {
+      const offset = result[i].blocks.length > 0 ? result[i].blocks[0].paraOffset : 0;
+      if (result[i].firstPara < keepPara || (result[i].firstPara === keepPara && offset <= keepOffset)) {
         target = i;
       } else {
         break;
@@ -823,11 +1151,17 @@ struct Reader {
     }
     this.pageIndex = target;
     this.savePosition();
+    if (this.readingSession !== null) {
+      this.readingSession.enterPage(this.pageReadRanges(), this.canRecordReading(), Date.now());
+    }
   }
 
   // ---------- 翻页 ----------
 
   goNext(): void {
+    if (this.loading || this.marking) {
+      return;
+    }
     if (this.pageIndex < this.pages.length - 1) {
       this.swiperController.showNext();
       return;
@@ -836,6 +1170,9 @@ struct Reader {
   }
 
   goPrev(): void {
+    if (this.loading || this.marking) {
+      return;
+    }
     if (this.pageIndex > 0) {
       this.swiperController.showPrevious();
       return;
@@ -849,7 +1186,7 @@ struct Reader {
   }
 
   jumpChapter(index: number): void {
-    if (index < 0 || index >= this.chapterCount) {
+    if (this.loading || this.marking || index < 0 || index >= this.chapterCount) {
       return;
     }
     this.showToc = false;
@@ -862,7 +1199,10 @@ struct Reader {
 
   /** 章末再翻：先记读完，再进下一章；最后一章则只记读完。 */
   async finishChapterAndAdvance(): Promise<void> {
-    await this.markChapterComplete(false);
+    const completed = await this.markChapterComplete(false);
+    if (!completed) {
+      return;
+    }
     if (this.chapterIndex + 1 < this.chapterCount) {
       this.jumpChapter(this.chapterIndex + 1);
     } else {
@@ -870,25 +1210,31 @@ struct Reader {
     }
   }
 
-  async markChapterComplete(fromButton: boolean): Promise<void> {
-    if (this.marking || this.chapterTitle.length === 0) {
-      return;
+  async markChapterComplete(fromButton: boolean): Promise<boolean> {
+    if (this.loading || this.marking || this.chapterTitle.length === 0) {
+      return false;
     }
     if (this.completedThisSession) {
       if (fromButton) {
         this.toast('这一章已经记为读完。');
       }
-      return;
+      return true;
     }
     this.marking = true;
     try {
-      await this.readerApi.postChapterComplete(this.lectureId, this.bookId, this.chapterTitle, this.chapterRange);
+      this.checkpointReading();
+      await this.readerApi.postChapterComplete(this.lectureId, this.bookId, this.chapterTitle, this.chapterRange, this.chapterIndex);
       this.completedThisSession = true;
+      if (this.flowId.length > 0 && this.chapterIndex === this.flowChapterIndex) {
+        this.flowReadingConfirmed = true;
+      }
       AppStorage.setOrCreate('nxStudyTick', Date.now());
       this.toast('记下了：' + this.chapterTitle + ' 读完。');
+      return true;
     } catch (err) {
       const e = err as BusinessError;
       this.toast('这一章没记上：' + (e.message.length > 0 ? e.message : '网络错误'));
+      return false;
     } finally {
       this.marking = false;
     }
@@ -906,11 +1252,12 @@ struct Reader {
     if (Date.now() - this.lastSelAt < 480) {
       return;
     }
-    if (this.markStyleOpen) {
-      this.markStyleOpen = false;
+    // 有选区时点工具栏以外的任何地方：只收起选区，不翻页、不开面板
+    if (this.selectionActive() || this.selBlockKey.length > 0) {
+      this.dismissSelection(false);
       return;
     }
-    if (this.snapEnd > this.snapStart || this.selectedPara >= 0) {
+    if (this.markStyleOpen || this.snapshotValid()) {
       this.clearSelectionState();
       return;
     }
@@ -944,27 +1291,67 @@ struct Reader {
     if (text.length === 0) {
       return;
     }
+    this.dismissSelection(false);
     const data = pasteboard.createData(pasteboard.MIMETYPE_TEXT_PLAIN, text);
     await pasteboard.getSystemPasteboard().setData(data);
     this.toast('已复制选中的句子。');
   }
 
+  /** 系统分享面板分享选中的句子（带书名 / 章名）；面板拉不起来就退回复制。 */
+  async shareSelected(): Promise<void> {
+    const text = this.selectedExcerpt();
+    if (text.length === 0) {
+      return;
+    }
+    this.dismissSelection(false);
+    const title = this.bookTitle.length > 0 ? this.bookTitle + ' · ' + this.chapterTitle : this.chapterTitle;
+    try {
+      const data: systemShare.SharedData = new systemShare.SharedData({
+        utd: uniformTypeDescriptor.UniformDataType.TEXT,
+        content: text,
+        title: title,
+      });
+      const controller: systemShare.ShareController = new systemShare.ShareController(data);
+      const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
+      await controller.show(context, {
+        selectionMode: systemShare.SelectionMode.SINGLE,
+        previewMode: systemShare.SharePreviewMode.DETAIL,
+      });
+    } catch (err) {
+      const pasted = pasteboard.createData(pasteboard.MIMETYPE_TEXT_PLAIN, text);
+      await pasteboard.getSystemPasteboard().setData(pasted);
+      this.toast('这台设备拉不起分享面板，已复制到剪贴板。');
+    }
+  }
+
   openAskSheet(): void {
+    this.dismissSelection(true);
     this.panelOpen = false;
-    this.markStyleOpen = false;
     this.showAskSheet = true;
     this.askText = '';
   }
 
+  /** 查询：对着选中的词句直接问一句「这是什么意思」，答案落在问AI sheet 里。 */
+  lookupSelected(): void {
+    const text = this.selectedExcerpt().trim();
+    if (text.length === 0) {
+      return;
+    }
+    this.openAskSheet();
+    const brief = text.length > 40 ? text.slice(0, 40) + '…' : text;
+    this.ask('「' + brief + '」在这里是什么意思？用两三句话解释。');
+  }
+
+  /** 划线：没划过就先按当前样式划上，然后在工具栏里展开样式行。 */
   openMarkStyle(): void {
     if (!this.snapshotValid()) {
       return;
     }
     this.panelOpen = false;
-    this.markStyleOpen = true;
     if (this.overlappingMark() === null) {
       this.applyMark(this.pendingStyle, this.pendingColor);
     }
+    this.markStyleOpen = true;
   }
 
   async ask(question: string): Promise<void> {
@@ -973,13 +1360,14 @@ struct Reader {
       return;
     }
     this.asking = true;
+    const anchorPara = this.snapPara >= 0 ? this.snapPara : (this.selectedPara >= 0 ? this.selectedPara : this.currentFirstPara());
     this.readerApi.postTelemetry([
       {
         stream: 'reading',
         event: 'ask',
         bid: this.bookId,
         ci: this.chapterIndex,
-        si: this.selectedPara >= 0 ? this.selectedPara : this.currentFirstPara(),
+        si: anchorPara,
         sel_text: text.slice(0, 200),
         focus: 'chat',
       },
@@ -1017,7 +1405,6 @@ struct Reader {
       if (data === null || data === undefined || typeof data.answer !== 'string' || data.answer.trim().length === 0) {
         throw new Error('这次我没给出答案。');
       }
-      const anchorPara = this.selectedPara >= 0 ? this.selectedPara : this.currentFirstPara();
       const excerpt = selectedText.slice(0, 120);
       const citation: CitationCard = {
         type: 'citation',
@@ -1092,7 +1479,7 @@ struct Reader {
       const page = this.pages[i];
       const last = page.blocks.length > 0 ? page.blocks[page.blocks.length - 1].paraIndex : -1;
       if (index >= page.firstPara && index <= last) {
-        this.pageIndex = i;
+        this.onReaderPageChange(i);
         break;
       }
     }
@@ -1139,6 +1526,7 @@ struct Reader {
     if (text.length === 0) {
       return;
     }
+    this.dismissSelection(false);
     sharedTts.setStateListener((speaking: boolean): void => {
       this.speaking = speaking;
       this.ttsPaused = sharedTts.isPaused();
@@ -1209,11 +1597,12 @@ struct Reader {
         .backgroundColor(this.theme().markBg)
         .margin({ top: block.top > 0 ? PARA_GAP : 0 })
     } else {
-      Text() {
+      Text(undefined, { controller: this.textController(block.key) }) {
         ForEach(this.blockSpans(block), (span: MarkSpan) => {
           this.markSpanView(span, block)
         }, (span: MarkSpan) => span.key + '_' + this.markEpoch)
       }
+      .id(this.blockNodeId(block.key))
       .fontSize(block.heading > 0 ? this.readerFontSize() + 3 : this.readerFontSize())
       .fontWeight(block.heading > 0 ? FontWeight.Bold : FontWeight.Normal)
       .fontColor(this.theme().ink)
@@ -1221,7 +1610,10 @@ struct Reader {
       .width('100%')
       .copyOption(CopyOptions.LocalDevice)
       .draggable(false)
-      .bindSelectionMenu(TextSpanType.TEXT, this.selectMenu, TextResponseType.LONG_PRESS)
+      .caretColor(this.theme().underline)
+      .selectedBackgroundColor(this.theme().selectBg)
+      // 系统选区菜单换成页面自绘的浮动工具栏：这里绑一个空菜单把系统菜单压掉，长按仍走系统手柄选字
+      .bindSelectionMenu(TextSpanType.TEXT, this.emptySelectionMenu, TextResponseType.LONG_PRESS)
       .parallelGesture(
         TapGesture({ count: 2 })
           .onAction(() => {
@@ -1268,41 +1660,117 @@ struct Reader {
     .backgroundColor(this.theme().bg)
   }
 
-  /** 系统选区菜单必须用 Menu/MenuItem，外层 Column 的 onClick 不会被点到。 */
+  /** 绑给 Text 的空选区菜单：只为压掉系统默认菜单，真正的工具栏见 selectionBar()。 */
   @Builder
-  selectMenu() {
-    Menu() {
-      MenuItem({ content: '问AI' })
-        .onClick(() => {
-          this.openAskSheet();
-        })
-      MenuItem({ content: '复制' })
-        .onClick(() => {
-          this.copySelected();
-        })
-      MenuItem({ content: '朗读' })
-        .onClick(() => {
-          this.speakSelected();
-        })
-      MenuItem({ content: '划线' })
-        .onClick(() => {
-          this.openMarkStyle();
-        })
-      if (this.overlappingMark() !== null) {
-        MenuItem({ content: '删除划线' })
-          .onClick(() => {
-            this.removeSnapshotMarks();
-          })
-      }
+  emptySelectionMenu() {
+    Column()
+      .width(0)
+      .height(0)
+  }
+
+  // ---------- 长按浮动工具栏（番茄小说式：图标 + 小字一行，划线后展开样式行） ----------
+
+  private selectionBarWidth(): number {
+    return Math.min(SEL_BAR_MAX_WIDTH, this.areaWidth - NxGrid * 4);
+  }
+
+  private selectionBarHeight(): number {
+    return this.markStyleOpen ? SEL_BAR_MAIN + SEL_BAR_STYLE : SEL_BAR_MAIN;
+  }
+
+  /** 选区下方放得下就放下方（三角朝上指着最后一行），否则放上方（三角朝下指着第一行）。 */
+  private selectionBarBelow(): boolean {
+    const needed = this.selBottom + SEL_BAR_GAP + SEL_BAR_CARET + this.selectionBarHeight();
+    return needed <= this.areaHeight - PAGE_PADDING_BOTTOM;
+  }
+
+  private selectionBarX(): number {
+    return (this.areaWidth - this.selectionBarWidth()) / 2;
+  }
+
+  /** 工具栏（含小三角）整体的顶边。 */
+  private selectionBarY(): number {
+    if (this.selectionBarBelow()) {
+      return this.selBottom + SEL_BAR_GAP;
     }
+    return Math.max(NxGrid * 2, this.selTop - SEL_BAR_GAP - SEL_BAR_CARET - this.selectionBarHeight());
+  }
+
+  /** 小三角在工具栏内的水平偏移：对准最近一行选中文字的中心，夹在圆角以内。 */
+  private selectionCaretX(): number {
+    const cx = this.selectionBarBelow() ? this.selLastCx : this.selFirstCx;
+    const local = cx - this.selectionBarX() - SEL_BAR_CARET;
+    return Math.min(this.selectionBarWidth() - NxRadius.md - SEL_BAR_CARET * 2, Math.max(NxRadius.md, local));
   }
 
   @Builder
-  stylePreview(label: string, style: string) {
-    Column({ space: 2 }) {
+  selectionCaret(pointUp: boolean) {
+    Polygon({ width: SEL_BAR_CARET * 2, height: SEL_BAR_CARET })
+      .points(pointUp
+        ? [[0, SEL_BAR_CARET], [SEL_BAR_CARET, 0], [SEL_BAR_CARET * 2, SEL_BAR_CARET]]
+        : [[0, 0], [SEL_BAR_CARET * 2, 0], [SEL_BAR_CARET, SEL_BAR_CARET]])
+      .fill(this.theme().barBg)
+      .stroke(Color.Transparent)
+      .margin({ left: this.selectionCaretX() })
+  }
+
+  @Builder
+  selectionItem(label: string, icon: Resource, active: boolean, onTap: () => void) {
+    Column({ space: NxGrid + 2 }) {
+      SymbolGlyph(icon)
+        .fontSize(22)
+        .fontColor([active ? this.theme().barAccent : this.theme().barInk])
+      Text(label)
+        .fontSize(NxFontSize.sm)
+        .fontColor(active ? this.theme().barAccent : this.theme().barInk)
+        .maxLines(1)
+    }
+    .layoutWeight(1)
+    .height(SEL_BAR_MAIN - NxGrid * 2)
+    .justifyContent(FlexAlign.Center)
+    .borderRadius(NxRadius.sm)
+    .backgroundColor(active ? this.theme().barItemBg : Color.Transparent)
+    .onClick(() => {
+      onTap();
+    })
+  }
+
+  /** 「问AI」项：图标与文字走紫→粉渐变，对应参考稿里的 AI 入口。 */
+  @Builder
+  selectionAiItem() {
+    Column({ space: NxGrid + 2 }) {
+      SymbolGlyph($r('sys.symbol.wand_and_stars'))
+        .fontSize(22)
+        .fontColor([this.theme().aiStart])
+        .shaderStyle(new LinearGradientStyle({
+          angle: 135,
+          colors: [[this.theme().aiStart, 0.0], [this.theme().aiEnd, 1.0]],
+        }))
+      Text('问AI')
+        .fontSize(NxFontSize.sm)
+        .fontColor(this.theme().aiStart)
+        .maxLines(1)
+        .shaderStyle(new LinearGradientStyle({
+          angle: 90,
+          colors: [[this.theme().aiStart, 0.0], [this.theme().aiEnd, 1.0]],
+        }))
+    }
+    .layoutWeight(1)
+    .height(SEL_BAR_MAIN - NxGrid * 2)
+    .justifyContent(FlexAlign.Center)
+    .onClick(() => {
+      this.openAskSheet();
+    })
+  }
+
+  /** 样式行里的「A」预览：直线 / 波浪 / 荧光笔，用当前待用颜色画。 */
+  @Builder
+  stylePreview(style: string) {
+    Column() {
       Text() {
         Span('A')
-          .fontSize(NxFontSize.xxl)
+          .fontSize(NxFontSize.title)
+          .fontWeight(FontWeight.Medium)
           .fontColor(this.theme().barInk)
           .decoration({
             type: style === 'solid' || style === 'wavy' ? TextDecorationType.Underline : TextDecorationType.None,
@@ -1311,70 +1779,114 @@ struct Reader {
           })
           .textBackgroundStyle({
             color: style === 'mark' ? nxMarkSwatch(this.pendingColor).fill : Color.Transparent,
-            radius: 2,
+            radius: 3,
           })
       }
-      Text(label)
-        .fontSize(NxFontSize.xs)
-        .fontColor(this.pendingStyle === style ? this.theme().barAccent : this.theme().barInkSoft)
+      .padding({ left: 4, right: 4 })
     }
-    .width(64)
-    .height(56)
+    .layoutWeight(1)
+    .height(SEL_BAR_STYLE - NxGrid * 3)
     .justifyContent(FlexAlign.Center)
-    .borderRadius(NxRadius.xs)
-    .backgroundColor(this.pendingStyle === style ? this.theme().markBg : Color.Transparent)
-    .border({
-      width: this.pendingStyle === style ? 1 : 0,
-      color: this.theme().barAccent,
-    })
+    .borderRadius(NxRadius.sm)
+    .backgroundColor(this.pendingStyle === style ? this.theme().barItemBg : Color.Transparent)
     .onClick(() => {
       this.applyMark(style, this.pendingColor);
     })
   }
 
-  /** 番茄小说式第二后面板：直线 / 波浪 / 荧光笔 + 四色 + 删除。 */
+  /** 悬浮在选区旁的工具栏：主行 + 可展开的样式行 + 指向选区的小三角。 */
   @Builder
-  markStylePanel() {
-    Column({ space: NxGrid * 2 }) {
-      Row({ space: NxGrid * 2 }) {
-        this.stylePreview('直线', 'solid')
-        this.stylePreview('波浪', 'wavy')
-        this.stylePreview('荧光笔', 'mark')
-        Blank()
-        if (this.overlappingMark() !== null) {
-          Text('删除划线')
-            .fontSize(NxFontSize.sm)
-            .fontColor(this.theme().barAccent)
-            .padding({ left: NxGrid * 2, right: NxGrid * 2, top: NxGrid * 2, bottom: NxGrid * 2 })
-            .onClick(() => {
+  selectionBar() {
+    Column() {
+      if (this.selectionBarBelow()) {
+        this.selectionCaret(true)
+      }
+      Column() {
+        Row({ space: 2 }) {
+          this.selectionAiItem()
+          this.selectionItem('复制', $r('sys.symbol.rectangle_on_square'), false, (): void => {
+            this.copySelected();
+          })
+          this.selectionItem('朗读', $r('sys.symbol.headphones'), false, (): void => {
+            this.speakSelected();
+          })
+          if (this.overlappingMark() !== null) {
+            this.selectionItem('删除划线', $r('sys.symbol.line_below_character_slash'), this.markStyleOpen, (): void => {
               this.removeSnapshotMarks();
             })
+          } else {
+            this.selectionItem('划线', $r('sys.symbol.line_below_character'), this.markStyleOpen, (): void => {
+              this.openMarkStyle();
+            })
+          }
+          this.selectionItem('分享', $r('sys.symbol.share'), false, (): void => {
+            this.shareSelected();
+          })
+          this.selectionItem('查询', $r('sys.symbol.text_and_magnifyingglass'), false, (): void => {
+            this.lookupSelected();
+          })
+        }
+        .width('100%')
+        .height(SEL_BAR_MAIN)
+        .padding({ left: NxGrid, right: NxGrid })
+        .alignItems(VerticalAlign.Center)
+        if (this.markStyleOpen) {
+          Divider()
+            .strokeWidth(1)
+            .color(this.theme().barDivider)
+          Row({ space: NxGrid }) {
+            this.stylePreview('solid')
+            this.stylePreview('wavy')
+            this.stylePreview('mark')
+            Row({ space: NxGrid * 2 }) {
+              ForEach(NxMarkSwatches, (swatch: NxMarkSwatch) => {
+                Column()
+                  .width(this.pendingColor === swatch.id ? 22 : 18)
+                  .height(this.pendingColor === swatch.id ? 22 : 18)
+                  .borderRadius(11)
+                  .backgroundColor(swatch.line)
+                  .border({
+                    width: this.pendingColor === swatch.id ? 2 : 0,
+                    color: this.theme().barBg,
+                  })
+                  .shadow({
+                    radius: this.pendingColor === swatch.id ? 4 : 0,
+                    color: this.theme().barDivider,
+                    offsetX: 0,
+                    offsetY: 0,
+                  })
+                  .onClick(() => {
+                    this.applyMark(this.pendingStyle, swatch.id);
+                  })
+              }, (swatch: NxMarkSwatch) => swatch.id + '_' + this.pendingColor)
+            }
+            .layoutWeight(1.6)
+            .height(SEL_BAR_STYLE - NxGrid * 3)
+            .justifyContent(FlexAlign.SpaceEvenly)
+            .alignItems(VerticalAlign.Center)
+          }
+          .width('100%')
+          .height(SEL_BAR_STYLE - 1)
+          .padding({ left: NxGrid * 2, right: NxGrid * 2 })
+          .alignItems(VerticalAlign.Center)
         }
       }
-      .width('100%')
-      .alignItems(VerticalAlign.Center)
-      Row({ space: NxGrid * 4 }) {
-        ForEach(NxMarkSwatches, (swatch: NxMarkSwatch) => {
-          Column()
-            .width(28)
-            .height(28)
-            .borderRadius(14)
-            .backgroundColor(swatch.line)
-            .border({
-              width: this.pendingColor === swatch.id ? 2 : 0,
-              color: this.theme().barInk,
-            })
-            .onClick(() => {
-              this.applyMark(this.pendingStyle, swatch.id);
-            })
-        }, (swatch: NxMarkSwatch) => swatch.id)
+      .width(this.selectionBarWidth())
+      .borderRadius(NxRadius.md)
+      .backgroundColor(this.theme().barBg)
+      .shadow({
+        radius: NxShadow.level2.radius,
+        color: NxShadow.level2.color,
+        offsetX: NxShadow.level2.offsetX,
+        offsetY: NxShadow.level2.offsetY,
+      })
+      if (!this.selectionBarBelow()) {
+        this.selectionCaret(false)
       }
-      .width('100%')
     }
-    .width('100%')
-    .padding({ left: NxGrid * 4, right: NxGrid * 4, top: NxGrid * 3, bottom: NxGrid * 6 })
-    .backgroundColor(this.theme().barBg)
-    .borderRadius({ topLeft: NxRadius.md, topRight: NxRadius.md })
+    .alignItems(HorizontalAlign.Start)
+    .position({ x: this.selectionBarX(), y: this.selectionBarY() })
+    .transition(TransitionEffect.OPACITY.animation({ duration: 120 }))
   }
 
   @Builder
@@ -1524,6 +2036,12 @@ struct Reader {
           })
         }
         .width('100%')
+        if (this.readingFeedback.length > 0) {
+          Text(this.readingFeedback)
+            .fontSize(NxFontSize.xs)
+            .fontColor(this.theme().barInkSoft)
+            .width('100%')
+        }
         Row({ space: NxGrid * 2 }) {
           ForEach(NxReaderThemes, (theme: NxReaderTheme) => {
             Column() {
@@ -1737,16 +2255,11 @@ struct Reader {
         .duration(220)
         .curve(Curve.EaseOut)
         .onChange((index: number) => {
-          if (index !== this.pageIndex) {
-            this.pageIndex = index;
-            this.clearSelectionState();
-            this.savePosition();
-          }
+          this.onReaderPageChange(index);
         })
       }
 
-      if (this.pages.length > 0 && !this.panelOpen && !this.showAskSheet && !this.showToc && !this.loading &&
-        (!this.snapshotValid() || this.markStyleOpen)) {
+      if (this.pages.length > 0 && !this.panelOpen && !this.showAskSheet && !this.showToc && !this.loading) {
         this.tapZones()
       }
 
@@ -1795,12 +2308,12 @@ struct Reader {
         this.chrome()
       }
 
-      if ((this.speaking || this.ttsPaused) && !this.showAskSheet && !this.panelOpen && !this.markStyleOpen) {
+      if ((this.speaking || this.ttsPaused) && !this.showAskSheet && !this.panelOpen && !this.selectionActive()) {
         this.ttsBar()
       }
 
-      if (this.markStyleOpen && !this.showAskSheet && !this.panelOpen) {
-        this.markStylePanel()
+      if (this.selectionActive() && !this.showAskSheet && !this.panelOpen && !this.showToc) {
+        this.selectionBar()
       }
 
       if (this.panelOpen && !this.showAskSheet && !this.showToc) {
@@ -1841,6 +2354,7 @@ struct Reader {
     }
     .width('100%')
     .height('100%')
+    .id('nx_reader_root')
     .backgroundColor(this.theme().bg)
     .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
     .onAreaChange((oldArea: Area, newArea: Area) => {

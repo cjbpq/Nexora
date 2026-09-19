@@ -104,15 +104,15 @@ class FacetsPrereqBriefingTests(unittest.TestCase):
             self.assertTrue(len(facet["evidence"]) >= 3)
             self.assertIsNone(facet["userVerdict"])
 
-            # 反驳 → review 证据（score 0）→ userVerdict 即时可见
+            # 反驳即时可见，但赞同/反对都不是已判分的测验。
             verdict = record_verdict(cfg, "demo", facet["id"], "disagree", lecture_id=facet["lectureId"], book_id=facet["bookId"], concept_id=facet["conceptId"])
             self.assertTrue(verdict["updated"])
             overview2 = build_facets(cfg, "demo")
             facet2 = next(row for row in overview2["facets"] if row["id"] == facet["id"])
             self.assertEqual(facet2["userVerdict"], "disagree")
 
-            # disagree 后掌握度被拉低 → 出现 mastery 判断
-            self.assertTrue(any(row["claim"].startswith("你在傅里叶变换上掌握度") for row in overview2["facets"]))
+            self.assertFalse(verdict["evidence_written"])
+            self.assertFalse(any(row.get("kind") == "mastery" for row in overview2["facets"]))
 
     def test_briefing_from_confusion_evidence(self):
         with tempfile.TemporaryDirectory() as directory:

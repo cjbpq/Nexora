@@ -42,6 +42,10 @@ export class StreamClient {
     const headers: Record<string, string> = {
       'Accept': 'text/event-stream',
     };
+    const auth: Record<string, string> = Identity.authHeaders();
+    for (const key of Object.keys(auth)) {
+      headers[key] = auth[key];
+    }
     if (lastEventId.length > 0) {
       headers['Last-Event-ID'] = lastEventId;
     }

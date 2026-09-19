@@ -147,6 +147,21 @@ def main() -> int:
         else:
             results.append(("today", WARN, f"未知 status={st}"))
 
+    # 3b. events(时间线, 鸿蒙端「它的一天」主界面的唯一数据源; 旧版云端只有 POST /events, GET 会 405)
+    status, body = run("events", "GET", f"/api/agent/v1/events?limit=5&username={args.username}")
+    if status in (404, 405):
+        results.append(("events", FAIL, f"HTTP {status}: 云端 learning 是旧版本, 缺少 GET /events, 需要重新部署"))
+    elif _check_envelope("events", status, body, results):
+        data = body.get("data") or {}
+        results.append(("events", PASS, f"count={data.get('count', 0)}"))
+
+    # 3c. judgment/context(只读快照, 与 /decision /cognition 同一批上线)
+    status, body = run("judgment-context", "GET", f"/api/agent/v1/judgment/context?username={args.username}")
+    if status in (404, 405):
+        results.append(("judgment-context", FAIL, f"HTTP {status}: 缺少 /judgment/context, 决策/认知端点未上线"))
+    elif _check_envelope("judgment-context", status, body, results):
+        results.append(("judgment-context", PASS, f"action={body.get('action')}"))
+
     # 4. plan
     status, body = run("plan", "POST", "/api/agent/v1/plan",
                        body={"username": args.username, "intent": "continue_learning", "available_minutes": 30})

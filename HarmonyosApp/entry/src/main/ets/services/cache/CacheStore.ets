@@ -34,6 +34,24 @@ export class CacheStore {
     }
   }
 
+  /** 学习事实不能用 best-effort 缓存语义：读失败必须交给调用方处理。 */
+  getRequired(key: string): string {
+    if (this.store === null) {
+      throw new Error('阅读记录存储尚未就绪');
+    }
+    const value = this.store.getSync(key, '');
+    return value === undefined ? '' : value as string;
+  }
+
+  /** 返回前等 Preferences 落盘；异常不能吞掉，否则调用方会假报保存成功。 */
+  async putDurable(key: string, value: string): Promise<void> {
+    if (this.store === null) {
+      throw new Error('阅读记录存储尚未就绪');
+    }
+    this.store.putSync(key, value);
+    await this.store.flush();
+  }
+
   get(key: string): string {
     if (this.store === null) {
       return '';

@@ -7,6 +7,7 @@
  */
 import { ContextData, ContextLecture, ContextBook, OpenSessionData } from '../models/Index';
 import { AgentApi, AgentEnvelope } from '../services/AgentApi';
+import { ReaderApi } from '../services/ReaderApi';
 import { SkeletonCard, ErrorState } from '../components/common/States';
 import { sharedCache } from '../services/cache/CacheStore';
 import { ReadingPosition, nxReadPosition, nxLastBook } from '../services/ReadingState';
@@ -24,9 +25,12 @@ export struct StudyView {
   @State lastBookLabel: string = '';
   @State positionLabels: Map<string, string> = new Map<string, string>();
   @StorageProp('nxDarkMode') nxDark: boolean = false;
+  @StorageProp('nxReadingSyncStatus') readingSyncStatus: string = '';
   /** 阅读器记完一章 / 页面回到前台时 +1，书房据此刷新进度。 */
   @StorageProp('nxStudyTick') @Watch('onTick') tick: number = 0;
   private api: AgentApi = new AgentApi();
+  private readerApi: ReaderApi = new ReaderApi();
+  private loadVersion: number = 0;
 
   aboutToAppear(): void {
     const context = this.getUIContext().getHostContext();
@@ -54,13 +58,23 @@ export struct StudyView {
   }
 
   async load(): Promise<void> {
+    const version = ++this.loadVersion;
     this.loading = true;
     this.errorText = '';
     try {
+      // 返回书房时先补发阅读记录；旧请求不能把新进度覆盖回去。
+      await this.readerApi.flushReadingProgress();
+      if (version !== this.loadVersion) {
+        return;
+      }
       const env: AgentEnvelope = await this.api.getContext();
+      if (version !== this.loadVersion) {
+        return;
+      }
       const ctx: ContextData = env.data as ContextData;
       this.lectures = ctx.lectures;
       const last: ReadingPosition | null = nxLastBook();
+      this.lastBookLabel = '';
       if (last !== null) {
         this.lastBookLabel = last.bookTitle.length > 0 ? last.bookTitle + ' · ' + last.chapterTitle : last.chapterTitle;
       }
@@ -97,9 +111,13 @@ export struct StudyView {
       this.positionLabels = labels;
     } catch (err) {
       const e = err as BusinessError;
-      this.errorText = '加载学习上下文失败：' + (e.message.length > 0 ? e.message : '网络错误');
+      if (version === this.loadVersion) {
+        this.errorText = '我没取到最新学习记录：' + (e.message.length > 0 ? e.message : '网络错误');
+      }
     } finally {
-      this.loading = false;
+      if (version === this.loadVersion) {
+        this.loading = false;
+      }
     }
   }
 
@@ -188,9 +206,18 @@ export struct StudyView {
 
   openReport(): void {
     const lecture = this.selectedLecture();
+    const last = nxLastBook();
+    let bookId = lecture !== null && lecture.books.length > 0 ? lecture.books[0].id : '';
+    if (lecture !== null && last !== null && last.lectureId === lecture.id) {
+      for (const book of lecture.books) {
+        if (book.id === last.bookId) {
+          bookId = book.id;
+        }
+      }
+    }
     const params: Record<string, Object> = {
       'lecture_id': lecture !== null ? lecture.id : '',
-      'book_id': lecture !== null && lecture.books.length > 0 ? lecture.books[0].id : '',
+      'book_id': bookId,
       'lecture_title': lecture !== null ? lecture.title : '',
     };
     this.pushFromStudy('pages/Report', params);
@@ -227,6 +254,22 @@ export struct StudyView {
     return '';
   }
 
+  private readingCoverage(lecture: ContextLecture): number {
+    return lecture.reading_progress_percent !== undefined ? lecture.reading_progress_percent : lecture.progress_percent;
+  }
+
+  private coverageLabel(lecture: ContextLecture): string {
+    const value = this.readingCoverage(lecture);
+    return value > 0 && value < 0.1 ? '<0.1' : String(Math.round(value * 10) / 10);
+  }
+
+  private completionLabel(lecture: ContextLecture): string {
+    if (lecture.completed_chapters !== undefined && lecture.total_chapters !== undefined) {
+      return '读完 ' + lecture.completed_chapters + '/' + lecture.total_chapters + ' 章';
+    }
+    return '读完章节后可以点「读完这章」确认';
+  }
+
   @Builder
   courseChip(lecture: ContextLecture) {
     Column({ space: NxGrid }) {
@@ -236,7 +279,7 @@ export struct StudyView {
         .fontColor(lecture.id === this.selectedLectureId ? this.palette().onPrimary : this.palette().text2)
         .maxLines(1)
         .textOverflow({ overflow: TextOverflow.Ellipsis })
-      Text(lecture.progress_percent + '%')
+      Text('阅读 ' + this.coverageLabel(lecture) + '%')
         .fontSize(NxFontSize.xs)
         .fontColor(lecture.id === this.selectedLectureId ? this.palette().onPrimarySoft : this.palette().text3)
     }
@@ -272,6 +315,13 @@ export struct StudyView {
           } })
         }
 
+        if (this.readingSyncStatus === 'failed') {
+          Text('有一段阅读还没能保存；设备存储恢复后，回到阅读器继续记录。')
+            .fontSize(NxFontSize.sm)
+            .fontColor(this.palette().warning)
+            .width('100%')
+        }
+
         if (this.lectures.length > 1) {
           Scroll() {
             Row({ space: NxGrid * 2 }) {
@@ -303,11 +353,15 @@ export struct StudyView {
               .fontSize(NxFontSize.sm)
               .fontColor(this.palette().text3)
               .width('100%')
-            Progress({ value: this.selectedLecture()!.progress_percent, total: 100, type: ProgressType.Linear })
+            Progress({ value: this.readingCoverage(this.selectedLecture()!), total: 100, type: ProgressType.Linear })
               .width('100%')
               .height(6)
               .color(this.palette().primary)
-            Text('已读完 ' + this.selectedLecture()!.progress_percent + '% 的章节 · 在阅读器里翻到章末或点「读完这章」会记入进度')
+            Text('阅读覆盖 ' + this.coverageLabel(this.selectedLecture()!) + '% · ' + this.completionLabel(this.selectedLecture()!))
+              .fontSize(NxFontSize.xs)
+              .fontColor(this.palette().text3)
+              .width('100%')
+            Text('我会记下实际阅读的内容；理解得怎样，再用提问和练习一起确认。')
               .fontSize(NxFontSize.xs)
               .fontColor(this.palette().text3)
               .width('100%')

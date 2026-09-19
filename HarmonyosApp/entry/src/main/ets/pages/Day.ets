@@ -26,6 +26,7 @@ import { sharedCalendar } from '../capability/calendar';
 import { sharedForm } from '../capability/form';
 import { sharedDeviceContext } from '../capability/context';
 import { sharedCache } from '../services/cache/CacheStore';
+import { nxReadingScope } from '../services/ReadingState';
 
 interface DayChip {
   key: string;
@@ -77,14 +78,21 @@ export struct DayView {
   @State unreadDays: string[] = [];
   @State keyboardInset: number = 0;
   @StorageProp('nxDarkMode') nxDark: boolean = false;
+  @StorageProp('nxStudyTick') @Watch('onStudyChanged') studyTick: number = 0;
   private api: AgentApi = new AgentApi();
   private scroller: ListScroller = new ListScroller();
   private lastTarget: LearnTarget | null = null;
   private seenDecisionIds: string[] = [];
   private launchDecisionId: string = '';
   private hostWindow: window.Window | undefined = undefined;
+  private attached: boolean = false;
+  private eventsVersion: number = 0;
+  private todayVersion: number = 0;
+  private feedbackRefreshing: boolean = false;
+  private feedbackPending: boolean = false;
 
   aboutToAppear(): void {
+    this.attached = true;
     this.launchDecisionId = AppStorage.get<string>('nxLaunchDecision') || '';
     const route: string = AppStorage.get<string>('nxLaunchRoute') || '';
     if (route === 'study' || route === 'reader') {
@@ -109,6 +117,9 @@ export struct DayView {
   }
 
   aboutToDisappear(): void {
+    this.attached = false;
+    this.eventsVersion++;
+    this.todayVersion++;
     if (this.hostWindow !== undefined) {
       try {
         this.hostWindow.off('avoidAreaChange');
@@ -129,6 +140,29 @@ export struct DayView {
 
   // ---------- 数据 ----------
 
+  onStudyChanged(): void {
+    if (this.attached) {
+      this.refreshLearningFeedback();
+    }
+  }
+
+  private async refreshLearningFeedback(): Promise<void> {
+    if (this.sending || this.feedbackRefreshing) {
+      this.feedbackPending = true;
+      return;
+    }
+    this.feedbackRefreshing = true;
+    try {
+      do {
+        this.feedbackPending = false;
+        await this.loadToday();
+        await this.loadEvents();
+      } while (this.feedbackPending && this.attached && !this.sending);
+    } finally {
+      this.feedbackRefreshing = false;
+    }
+  }
+
   async load(): Promise<void> {
     this.loading = true;
     this.errorText = '';
@@ -145,8 +179,16 @@ export struct DayView {
   }
 
   async loadEvents(): Promise<void> {
+    if (this.sending) {
+      this.feedbackPending = true;
+      return;
+    }
+    const version = ++this.eventsVersion;
     try {
       const env: AgentEnvelope = await this.api.getEvents(120);
+      if (version !== this.eventsVersion || this.sending) {
+        return;
+      }
       const data: EventsData = env.data as EventsData;
       const items: TimelineEntry[] = [];
       for (const raw of data.entries) {
@@ -181,18 +223,24 @@ export struct DayView {
       const context = this.getUIContext().getHostContext();
       if (context !== undefined) {
         sharedCache.init(context);
-        sharedCache.put('nx_events', JSON.stringify(items.slice(-60)));
+        sharedCache.put('nx_events_' + nxReadingScope(), JSON.stringify(items.slice(-60)));
       }
-      if (this.errorText.indexOf('日志') >= 0) {
-        this.errorText = '';
-      }
+      this.errorText = '';
       this.handleProactiveEntries(items);
     } catch (err) {
+      if (version !== this.eventsVersion || this.sending) {
+        return;
+      }
       const e = err as BusinessError;
+      // 服务器能连上但 /events 返回 404 / 405：不是网络问题，是连到了旧版 learning
+      // （只有 /context /plan /ask-in-context 那一代接口，例如 chat.himpqblog.cn 那台机器）。
+      // 这种情况本地缓存救不了，必须说清楚，否则 App 看起来「在线」却只剩普通问答。
+      const staleServer: boolean = /^HTTP (404|405) /.test(e.message);
+      const staleText: string = '连到的 learning 服务是旧版本，没有 /events 这类接口，我读不到自己的日志。检查 config/Env.ets 指向的服务器，或用 tools/deploy_cloud.ps1 更新它。';
       const context = this.getUIContext().getHostContext();
       if (context !== undefined) {
         sharedCache.init(context);
-        const cached = sharedCache.get('nx_events');
+        const cached = sharedCache.get('nx_events_' + nxReadingScope());
         if (cached.length > 0) {
           try {
             const items: TimelineEntry[] = JSON.parse(cached) as TimelineEntry[];
@@ -200,14 +248,14 @@ export struct DayView {
             this.rebuild(items);
             this.deriveStatus(items);
             this.scrollToLatest();
-            this.errorText = '我在离线模式，先给你看上次的日志。';
+            this.errorText = staleServer ? staleText : '';
             return;
           } catch (parseErr) {
             // 缓存损坏则走网络错误提示
           }
         }
       }
-      this.errorText = '日志加载失败：' + (e.message.length > 0 ? e.message : '网络错误');
+      this.errorText = staleServer ? staleText : '云端暂时没接上：' + (e.message.length > 0 ? e.message : '请稍后再试');
     }
   }
 
@@ -267,7 +315,10 @@ export struct DayView {
       }
       const row: DayRow = new DayRow();
       row.isAct = false;
-      row.key = item.id + '_' + (item.status !== undefined ? item.status : '');
+      // TimelineEntryView 用 @State 接收 entry，只在创建时拷贝一次；ForEach 同键复用组件不会再同步。
+      // 所以流式释放期间把文本长度并进键值，每次释放都让这一条重新渲染，否则只能看见第一个字。
+      row.key = item.id + '_' + (item.status !== undefined ? item.status : '')
+        + (item.status === 'streaming' ? '_' + item.text.length : '');
       row.entry = item;
       rows.push(row);
     }
@@ -342,14 +393,17 @@ export struct DayView {
   }
 
   async loadToday(): Promise<void> {
+    const version = ++this.todayVersion;
     try {
       const env: AgentEnvelope = await this.api.getToday();
-      const data: TodayData = env.data as TodayData;
-      if (data.focus !== null && data.focus !== undefined) {
-        this.lastTarget = data.focus;
+      if (version !== this.todayVersion) {
+        return;
       }
+      const data: TodayData = env.data as TodayData;
+      this.lastTarget = data.focus !== undefined ? data.focus : null;
       if (data.status === 'needs_course') {
-        this.todayText = '我还没看到你的课程，去书房选好课我就能陪你学了。';
+        this.todayPercent = 0;
+        this.todayText = '先聊聊你的目标和学习方式；选好课程后，我们再一起安排阅读。';
         return;
       }
       if (data.focus !== null && data.focus !== undefined) {
@@ -371,7 +425,9 @@ export struct DayView {
         this.todayPercent = data.lectures[0].progress_percent;
       }
     } catch (err) {
-      this.todayText = '';
+      if (version === this.todayVersion) {
+        this.todayText = '';
+      }
     }
   }
 
@@ -392,7 +448,7 @@ export struct DayView {
     const context = this.getUIContext().getHostContext();
     if (context !== undefined) {
       sharedCache.init(context);
-      sharedCache.put('nx_events', JSON.stringify(this.entries.slice(-120)));
+      sharedCache.put('nx_events_' + nxReadingScope(), JSON.stringify(this.entries.slice(-120)));
     }
     if (follow) {
       this.selectedDayKey = dayKey;
@@ -622,6 +678,8 @@ export struct DayView {
       return;
     }
     this.sending = true;
+    this.eventsVersion++;
+    let exchanged = false;
     this.appendEntry({ id: 'local_u_' + Date.now(), kind: 'user_msg', ts: Date.now(), text: text, unattended: false });
     this.inputText = '';
     const thinkId: string = 'local_t_' + Date.now();
@@ -638,24 +696,14 @@ export struct DayView {
       // 只有明确的学习/安排指令进入计划；其余自由文本交给模型对话，避免把陈述句误当成“下一章”。
       if (!this.isLearningIntent(text)) {
         const target = await this.questionTarget();
-        if (target === null) {
-          throw new Error('还没有可用的课程上下文，先去书房选一门课。');
-        }
         const env: AgentEnvelope = await this.api.postAskInContext(text, target, '', 'app');
         const data: AskAnswer = env.data as AskAnswer;
         if (data.answer === undefined || data.answer.trim().length === 0) {
           throw new Error('这次我没给出答案。');
         }
-        this.dropEntry(thinkId);
-        this.appendEntry({
-          id: 'local_a_' + Date.now(),
-          kind: 'agent_msg',
-          ts: Date.now(),
-          text: data.answer,
-          reason: data.source === 'textbook_context' ? '结合教材上下文回答。' : '结合学习上下文回答。',
-          unattended: false,
-          channel: 'app',
-        }, false);
+        const reason = (data.source === 'textbook_context' ? '结合教材上下文回答。' : '结合我们的交流回答。') +
+          (data.memory_updated === true ? '这次交流中的学习线索，我已记下。' : '');
+        await this.revealAnswer(thinkId, data.answer, reason);
       } else {
         const env: AgentEnvelope = await this.api.postPlan(text, 30);
         const planData: PlanData = env.data as PlanData;
@@ -682,6 +730,7 @@ export struct DayView {
             });
         }
       }
+      exchanged = true;
     } catch (err) {
       const e = err as BusinessError;
       this.dropEntry(thinkId);
@@ -694,7 +743,48 @@ export struct DayView {
       }, false);
     } finally {
       this.sending = false;
+      if (exchanged) {
+        AppStorage.setOrCreate('nxStudyTick', Date.now());
+      } else if (this.feedbackPending && this.attached) {
+        this.refreshLearningFeedback();
+      }
     }
+  }
+
+  /** 网络响应到达后仍按字符释放，避免长答案瞬间铺满时间线。 */
+  private async revealAnswer(id: string, answer: string, reason: string): Promise<void> {
+    const chars: string[] = answer.split('');
+    let visible: string = '';
+    let i: number = 0;
+    while (i < chars.length) {
+      // 每次释放都会让这一条重建（见 rebuild 的键值），开头逐字，之后按小块释放，兼顾手感与开销。
+      const step: number = i < 10 ? 1 : (chars.length > 400 ? 6 : 3);
+      visible += chars.slice(i, i + step).join('');
+      i += step;
+      for (const item of this.entries) {
+        if (item.id === id) {
+          item.text = visible;
+          item.status = 'streaming';
+          item.reason = reason;
+          item.channel = 'app';
+          break;
+        }
+      }
+      this.entries = this.entries.slice();
+      this.rebuild(this.entries);
+      this.scrollToLatest();
+      await new Promise<void>((resolve: () => void) => {
+        setTimeout(resolve, i < 10 ? 18 : 30);
+      });
+    }
+    for (const item of this.entries) {
+      if (item.id === id) {
+        item.status = undefined;
+      }
+    }
+    this.entries = this.entries.slice();
+    this.rebuild(this.entries);
+    this.scrollToLatest();
   }
 
   async toggleVoice(): Promise<void> {

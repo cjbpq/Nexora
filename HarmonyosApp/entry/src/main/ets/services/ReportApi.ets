@@ -17,6 +17,11 @@ import { Identity } from './Identity';
 
 export interface ReportSummary {
   progress_percent: number;
+  reading_progress_percent?: number;
+  reading_seconds?: number;
+  read_chapters?: number;
+  read_chars?: number;
+  completion_percent?: number;
   completed_chapters: number;
   total_chapters: number;
   completed_sessions: number;
@@ -51,6 +56,9 @@ export interface GraphChapter {
   name: string;
   summary: string;
   concepts: GraphConcept[];
+  reading_percent?: number;
+  completed?: boolean;
+  chapter_index?: number;
 }
 
 export interface GraphRelation {
@@ -78,10 +86,7 @@ export class ReportApi {
     const override: string | undefined = AppStorage.get<string>('nxBaseUrl');
     const base: string = override !== undefined && override.trim().length > 0 ? override.trim() : NxEnv.baseUrl();
     this.root = base.replace(/\/+$/, '');
-    const usernameOverride: string | undefined = AppStorage.get<string>('nxUsername');
-    if (usernameOverride !== undefined && usernameOverride.length > 0) {
-      this.username = usernameOverride;
-    }
+    this.username = Identity.current();
   }
 
   constructor() {
@@ -93,9 +98,7 @@ export class ReportApi {
     this.refreshConfig();
     const client = http.createHttp();
     try {
-      const headers: Record<string, string> = {
-        'X-Nexora-Username': this.username,
-      };
+      const headers: Record<string, string> = Identity.authHeaders();
       const resp: http.HttpResponse = await client.request(this.root + path, {
         method: http.RequestMethod.GET,
         header: headers,

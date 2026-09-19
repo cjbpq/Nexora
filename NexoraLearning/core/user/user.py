@@ -326,10 +326,10 @@ def remove_chapter_learning_records(
         raw_chapter_index = str(row.get("chapter_index") if row.get("chapter_index") is not None else "").strip()
         row_chapter_index = int(raw_chapter_index) if raw_chapter_index.lstrip("-").isdigit() else -1
         same_chapter_index = row_chapter_index == target_chapter_index
-        remove_record = same_book and (
-            (record_type == "chapter_completed" and same_chapter_name)
-            or (record_type == "session_completed" and (same_chapter_name or same_chapter_index))
-        )
+        same_chapter = same_chapter_index if row_chapter_index >= 0 else same_chapter_name
+        remove_record = same_book and same_chapter and record_type in {
+            "chapter_completed", "session_completed",
+        }
 
         if remove_record:
             removed += 1

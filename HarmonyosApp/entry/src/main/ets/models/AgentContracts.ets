@@ -62,6 +62,13 @@ export interface ContextBook {
   refinement_status: string;
   description: string;
   text_chars?: number;
+  reading_progress_percent?: number;
+  completion_percent?: number;
+  read_chapters?: number;
+  completed_chapters?: number;
+  total_chapters?: number;
+  reading_seconds?: number;
+  read_chars?: number;
 }
 
 export interface ContextLecture {
@@ -69,7 +76,16 @@ export interface ContextLecture {
   title: string;
   status: string;
   progress_percent: number;
+  reading_progress_percent?: number;
+  completion_percent?: number;
+  read_chapters?: number;
+  completed_chapters?: number;
+  total_chapters?: number;
+  reading_seconds?: number;
+  read_chars?: number;
   current_chapter: string;
+  current_book_id?: string;
+  current_chapter_index?: number | null;
   next_chapter: string;
   description: string;
   category: string;
@@ -182,6 +198,8 @@ export interface AskAnswer {
   book_id: string;
   lecture_id: string;
   context_chars: number;
+  memory_updated?: boolean;
+  memory_count?: number;
 }
 
 export interface TodayBrief {
@@ -234,11 +252,12 @@ export interface MirrorFacet {
   bookId: string;
   evidence: MirrorEvidenceRef[];
   userVerdict: string | null;
+  kind?: string;
 }
 
 export interface MirrorMasteryCell {
   concept: string;
-  mastery: number;
+  mastery: number | null;
   status: string;
   lectureTitle: string;
   chapterName: string;
@@ -248,6 +267,29 @@ export interface MirrorOverviewData {
   mastery: MirrorMasteryCell[];
   facets: MirrorFacet[];
   generated_at: number;
+  activity?: MirrorActivity;
+  courses?: MirrorCourse[];
+}
+
+export interface MirrorActivity {
+  reading_seconds: number;
+  read_chapters: number;
+  conversation_count: number;
+  memory_count: number;
+  assessed_concepts: number;
+  observed_concepts: number;
+  last_activity_at: number;
+}
+
+export interface MirrorCourse {
+  lecture_id: string;
+  title: string;
+  book_id?: string;
+  reading_progress_percent?: number;
+  completion_percent?: number;
+  completed_chapters?: number;
+  total_chapters?: number;
+  reading_seconds?: number;
 }
 
 export interface VerdictReply {

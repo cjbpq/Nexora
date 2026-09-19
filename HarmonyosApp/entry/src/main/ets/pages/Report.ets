@@ -21,6 +21,9 @@ import {
 } from '../services/ReportApi';
 import { SkeletonCard, EmptyState, ErrorState } from '../components/common/States';
 import { nxPalette, NxPalette, NxRadius, NxGrid, NxFontSize, NxShadow } from '../theme/DesignTokens';
+import { AgentApi, AgentEnvelope, ContextData } from '../services/AgentApi';
+import { ReaderApi } from '../services/ReaderApi';
+import { nxLastBook } from '../services/ReadingState';
 
 class ReportParams {
   lecture_id: string = '';
@@ -41,11 +44,17 @@ struct Report {
   @State relationCount: number = 0;
   @State tab: number = 0;
   @StorageProp('nxDarkMode') nxDark: boolean = false;
+  @StorageProp('nxStudyTick') @Watch('onStudyChanged') studyTick: number = 0;
   private api: ReportApi = new ReportApi();
+  private agentApi: AgentApi = new AgentApi();
+  private readerApi: ReaderApi = new ReaderApi();
   private lectureId: string = '';
   private bookId: string = '';
+  private loadVersion: number = 0;
+  private attached: boolean = false;
 
   aboutToAppear(): void {
+    this.attached = true;
     const params = router.getParams() as ReportParams;
     if (params !== undefined && params !== null) {
       this.lectureId = params.lecture_id !== undefined ? params.lecture_id : '';
@@ -55,19 +64,41 @@ struct Report {
     this.load();
   }
 
+  aboutToDisappear(): void {
+    this.attached = false;
+    this.loadVersion++;
+  }
+
+  onStudyChanged(): void {
+    if (this.attached) {
+      this.load();
+    }
+  }
+
+  onPageShow(): void {
+    if (this.summary !== null) {
+      this.load();
+    }
+  }
+
   private palette(): NxPalette {
     return nxPalette(this.nxDark);
   }
 
   async load(): Promise<void> {
-    if (this.lectureId.length === 0) {
-      this.errorText = '我不知道该给你看哪门课的报告。';
-      return;
-    }
+    const version = ++this.loadVersion;
     this.loading = true;
     this.errorText = '';
     try {
+      await this.readerApi.flushReadingProgress();
+      await this.resolveTarget();
+      if (version !== this.loadVersion) {
+        return;
+      }
       const payload: ReportPayload = await this.api.getReport(this.lectureId, this.bookId);
+      if (version !== this.loadVersion) {
+        return;
+      }
       if (payload.success !== true) {
         throw new Error(payload.error !== undefined ? payload.error : '报告没取回来');
       }
@@ -79,20 +110,62 @@ struct Report {
       }
     } catch (err) {
       const e = err as BusinessError;
-      this.errorText = '报告我没取回来：' + (e.message.length > 0 ? e.message : '网络错误');
+      if (version === this.loadVersion) {
+        this.errorText = '报告我没取回来：' + (e.message.length > 0 ? e.message : '网络错误');
+      }
     } finally {
-      this.loading = false;
+      if (version === this.loadVersion) {
+        this.loading = false;
+      }
     }
-    this.loadGraph();
+    if (version === this.loadVersion) {
+      this.loadGraph(version);
+    }
+  }
+
+  private async resolveTarget(): Promise<void> {
+    if (this.lectureId.length > 0 && this.bookId.length > 0) {
+      return;
+    }
+    const env: AgentEnvelope = await this.agentApi.getContext();
+    const context: ContextData = env.data as ContextData;
+    const last = nxLastBook();
+    const wanted = this.lectureId.length > 0 ? this.lectureId : (last !== null ? last.lectureId : '');
+    for (const lecture of context.lectures) {
+      if (wanted.length > 0 && lecture.id !== wanted) {
+        continue;
+      }
+      this.lectureId = lecture.id;
+      this.lectureTitle = lecture.title;
+      this.bookId = lecture.books.length > 0 ? lecture.books[0].id : '';
+      if (last !== null && last.lectureId === lecture.id) {
+        for (const book of lecture.books) {
+          if (book.id === last.bookId) {
+            this.bookId = book.id;
+          }
+        }
+      }
+      return;
+    }
+    if (this.lectureId.length === 0 && context.lectures.length > 0) {
+      this.lectureId = context.lectures[0].id;
+      this.lectureTitle = context.lectures[0].title;
+      this.bookId = context.lectures[0].books.length > 0 ? context.lectures[0].books[0].id : '';
+      return;
+    }
+    throw new Error('选好一门课程后，我会把阅读和练习记录整理在这里。');
   }
 
   /** 知识图谱是附加信息，取不到不影响报告主线。 */
-  async loadGraph(): Promise<void> {
+  async loadGraph(version: number = this.loadVersion): Promise<void> {
     if (this.bookId.length === 0) {
       return;
     }
     try {
       const payload: GraphPayload = await this.api.getGraph(this.lectureId, this.bookId);
+      if (version !== this.loadVersion) {
+        return;
+      }
       if (payload.graph !== null && payload.graph !== undefined) {
         this.chapters = payload.graph.chapters !== undefined ? payload.graph.chapters : [];
         this.relationCount = payload.graph.relations !== undefined ? payload.graph.relations.length : 0;
@@ -107,6 +180,28 @@ struct Report {
       return '还没有稳定的正确率';
     }
     return Math.round(this.summary.accuracy * 100) + '%';
+  }
+
+  private percentLabel(value: number): string {
+    return value > 0 && value < 0.1 ? '<0.1%' : Math.round(value * 10) / 10 + '%';
+  }
+
+  private readingLabel(): string {
+    if (this.summary === null) {
+      return '0%';
+    }
+    return this.percentLabel(this.summary.reading_progress_percent !== undefined ? this.summary.reading_progress_percent : this.summary.progress_percent);
+  }
+
+  private durationLabel(): string {
+    if (this.summary === null) {
+      return '0 秒';
+    }
+    if (this.summary.reading_seconds === undefined) {
+      return this.summary.study_hours + ' 小时';
+    }
+    const seconds = this.summary.reading_seconds;
+    return seconds < 60 ? Math.round(seconds) + ' 秒' : Math.round(seconds / 6) / 10 + ' 分钟';
   }
 
   @Builder
@@ -217,9 +312,9 @@ struct Report {
           if (this.tab === 0 && this.summary !== null) {
             Column({ space: NxGrid * 3 }) {
               Row() {
-                this.metric('课程进度', this.summary.progress_percent + '%')
-                this.metric('已读章节', this.summary.completed_chapters + '/' + this.summary.total_chapters)
-                this.metric('学习时长', this.summary.study_hours + ' 小时')
+                this.metric('阅读覆盖', this.readingLabel())
+                this.metric('确认读完', this.summary.completed_chapters + '/' + this.summary.total_chapters + ' 章')
+                this.metric('前台阅读', this.durationLabel())
               }
               .width('100%')
               Row() {
@@ -250,7 +345,7 @@ struct Report {
 
           if (this.tab === 1) {
             if (this.chapters.length === 0) {
-              EmptyState({ text: '这本书的知识图谱我还没跑出来，跑完了会出现在这里。' })
+              EmptyState({ text: '阅读记录已经单独保存；这本书的概念关系整理好后，会出现在这里。' })
             } else {
               Column({ space: NxGrid * 2 }) {
                 Text('我从这本书里理出 ' + this.chapters.length + ' 章、' + this.relationCount + ' 条概念关系。')
@@ -264,6 +359,12 @@ struct Report {
                       .fontWeight(FontWeight.Medium)
                       .fontColor(this.palette().text1)
                       .width('100%')
+                    if (chapter.reading_percent !== undefined) {
+                      Text('阅读覆盖 ' + this.percentLabel(chapter.reading_percent!) + (chapter.completed === true ? ' · 已确认读完' : ' · 尚未确认读完'))
+                        .fontSize(NxFontSize.sm)
+                        .fontColor(this.palette().text3)
+                        .width('100%')
+                    }
                     if (chapter.summary !== undefined && chapter.summary.length > 0) {
                       Text(chapter.summary)
                         .fontSize(NxFontSize.sm)

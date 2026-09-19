@@ -4,12 +4,14 @@
  * 意图 / 通知 / 卡片唤醒统一回到这一屏（EntryAbility 写入 nxLaunchRoute / nxLaunchDecision）。
  */
 import { DayView } from './Day';
+import { LoginView } from './Login';
 import { nxPalette, NxPalette } from '../theme/DesignTokens';
 
 @Entry
 @Component
 struct Index {
   @StorageProp('nxDarkMode') nxDark: boolean = false;
+  @StorageProp('nxAuthenticated') authenticated: boolean = false;
 
   private palette(): NxPalette {
     return nxPalette(this.nxDark);
@@ -20,6 +22,12 @@ struct Index {
    * 推页时抽屉会被系统收起，这里据 nxReturnToStudy 重新拉起，并通知书房刷新进度。
    */
   onPageShow(): void {
+    // Re-read the session after Identity.resolve finishes. This also makes a
+    // freshly installed build show LoginView instead of an old cached timeline.
+    const sessionReady: boolean = AppStorage.get<boolean>('nxAuthenticated') === true;
+    if (this.authenticated !== sessionReady) {
+      this.authenticated = sessionReady;
+    }
     const back: boolean = AppStorage.get<boolean>('nxReturnToStudy') === true;
     if (back) {
       AppStorage.setOrCreate('nxReturnToStudy', false);
@@ -34,7 +42,11 @@ struct Index {
 
   build() {
     Column() {
-      DayView()
+      if (this.authenticated) {
+        DayView()
+      } else {
+        LoginView()
+      }
     }
     .width('100%')
     .height('100%')

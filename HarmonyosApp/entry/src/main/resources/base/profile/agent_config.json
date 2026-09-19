@@ -6,7 +6,7 @@
       "description": "住在手机里的学习智能体：夜里替学生读完明天的章节、划重点、出题；白天只在对的时刻出现；能依据学生自己的教材讲解概念，并按掌握度出题。",
       "provider": {
         "organization": "彳亍 · Nexora Learning",
-        "url": "https://chat.himpqblog.cn:5002"
+        "url": "http://123.60.41.184:5002"
       },
       "version": "1.0.0",
       "documentationUrl": "",

@@ -6,7 +6,7 @@
  * 数据：GET /cognition/overview；反驳：POST /cognition/verdict（note → reply）。
  */
 import { TimelineEntry, MirrorFacet, MirrorMasteryCell, MirrorOverviewData, MirrorEvidenceRef, VerdictData,
-  JudgmentSummary, ContextSnapshot } from '../models/Index';
+  JudgmentSummary, ContextSnapshot, MirrorActivity, MirrorCourse, ContextData } from '../models/Index';
 import { AgentApi, AgentEnvelope } from '../services/AgentApi';
 import { SkeletonCard, EmptyState, ErrorState } from './common/States';
 import { nxPalette, NxPalette, NxRadius, NxGrid, NxFontSize, NxFontFamily, nxHeatColor, nxHeatTextColor } from '../theme/DesignTokens';
@@ -20,18 +20,35 @@ export struct InspectSheet {
   @State errorText: string = '';
   @State facets: MirrorFacet[] = [];
   @State mastery: MirrorMasteryCell[] = [];
+  @State activity: MirrorActivity | null = null;
+  @State courses: MirrorCourse[] = [];
   @State expandedId: string = '';
   @State rebuttalFacetId: string = '';
   @State rebuttalText: string = '';
   @State replies: Map<string, string> = new Map<string, string>();
   @State busyFacetId: string = '';
   @StorageProp('nxDarkMode') nxDark: boolean = false;
+  @StorageProp('nxStudyTick') @Watch('onStudyChanged') studyTick: number = 0;
   private api: AgentApi = new AgentApi();
   private reportLectureId: string = '';
   private reportBookId: string = '';
+  private loadVersion: number = 0;
+  private attached: boolean = false;
 
   aboutToAppear(): void {
+    this.attached = true;
     this.load();
+  }
+
+  aboutToDisappear(): void {
+    this.attached = false;
+    this.loadVersion++;
+  }
+
+  onStudyChanged(): void {
+    if (this.attached) {
+      this.load();
+    }
   }
 
   private palette(): NxPalette {
@@ -39,25 +56,54 @@ export struct InspectSheet {
   }
 
   async load(): Promise<void> {
+    const version = ++this.loadVersion;
     this.loading = true;
     this.errorText = '';
     try {
       const env: AgentEnvelope = await this.api.getCognitionOverview();
+      if (version !== this.loadVersion) {
+        return;
+      }
       const data: MirrorOverviewData = env.data as MirrorOverviewData;
       this.facets = data.facets;
       this.mastery = data.mastery;
-      for (let i = 0; i < data.facets.length; i++) {
-        if (data.facets[i].lectureId.length > 0) {
-          this.reportLectureId = data.facets[i].lectureId;
-          this.reportBookId = data.facets[i].bookId;
-          break;
+      this.activity = data.activity !== undefined ? data.activity : null;
+      this.courses = data.courses !== undefined ? data.courses : [];
+      this.reportLectureId = '';
+      this.reportBookId = '';
+      if (this.courses.length > 0) {
+        this.reportLectureId = this.courses[0].lecture_id;
+        this.reportBookId = this.courses[0].book_id !== undefined ? this.courses[0].book_id! : '';
+      } else {
+        for (const facet of data.facets) {
+          if (facet.lectureId.length > 0) {
+            this.reportLectureId = facet.lectureId;
+            this.reportBookId = facet.bookId;
+            break;
+          }
+        }
+      }
+      if (this.reportLectureId.length === 0) {
+        try {
+          const context = await this.api.getContext();
+          const snapshot = context.data as ContextData;
+          if (version === this.loadVersion && snapshot.lectures.length > 0) {
+            this.reportLectureId = snapshot.lectures[0].id;
+            this.reportBookId = snapshot.lectures[0].books.length > 0 ? snapshot.lectures[0].books[0].id : '';
+          }
+        } catch (err) {
+          // 课程入口不可用时仍展示已取得的阅读和交流证据。
         }
       }
     } catch (err) {
       const e = err as BusinessError;
-      this.errorText = '我对你的判断没取到：' + (e.message.length > 0 ? e.message : '网络错误');
+      if (version === this.loadVersion) {
+        this.errorText = '镜像暂时没同步上：' + (e.message.length > 0 ? e.message : '请稍后再试');
+      }
     } finally {
-      this.loading = false;
+      if (version === this.loadVersion) {
+        this.loading = false;
+      }
     }
   }
 
@@ -83,6 +129,7 @@ export struct InspectSheet {
       this.rebuttalFacetId = '';
       this.rebuttalText = '';
       await this.load();
+      AppStorage.setOrCreate('nxStudyTick', Date.now());
     } catch (err) {
       const e = err as BusinessError;
       this.errorText = '回馈失败：' + (e.message.length > 0 ? e.message : '网络错误');
@@ -202,7 +249,7 @@ export struct InspectSheet {
           .fontColor(this.palette().text1)
           .lineHeight(21)
           .layoutWeight(1)
-        Text(Math.round(facet.confidence * 100) + '%')
+        Text('把握 ' + Math.round(facet.confidence * 100) + '%')
           .fontSize(NxFontSize.xs)
           .fontColor(this.palette().text4)
       }
@@ -294,26 +341,149 @@ export struct InspectSheet {
     .backgroundColor(this.palette().surface2)
   }
 
-  /** 热力格只画有信号的概念（掌握度 > 0，按高到低，最多 9 个）；没碰过的用一句话带过。 */
+  private isAssessed(cell: MirrorMasteryCell): boolean {
+    return typeof cell.mastery === 'number' && cell.status !== 'unknown' && cell.status !== 'unverified';
+  }
+
+  /** 未验证不等于零分；真实评估得到的 0 则必须保留。 */
   private heatCells(): MirrorMasteryCell[] {
     const touched: MirrorMasteryCell[] = [];
     for (const cell of this.mastery) {
-      if (cell.mastery > 0) {
+      if (this.isAssessed(cell)) {
         touched.push(cell);
       }
     }
-    touched.sort((a: MirrorMasteryCell, b: MirrorMasteryCell): number => b.mastery - a.mastery);
+    touched.sort((a: MirrorMasteryCell, b: MirrorMasteryCell): number => b.mastery! - a.mastery!);
     return touched.slice(0, 9);
   }
 
   private untouchedCount(): number {
     let count: number = 0;
     for (const cell of this.mastery) {
-      if (cell.mastery <= 0) {
+      if (!this.isAssessed(cell)) {
         count++;
       }
     }
     return count;
+  }
+
+  private touchedCount(): number {
+    let count: number = 0;
+    for (const cell of this.mastery) {
+      if (this.isAssessed(cell)) {
+        count++;
+      }
+    }
+    return count;
+  }
+
+  private averageMastery(): number | null {
+    let total: number = 0;
+    let count: number = 0;
+    for (const cell of this.mastery) {
+      if (this.isAssessed(cell)) {
+        total += cell.mastery!;
+        count++;
+      }
+    }
+    return count > 0 ? total / count : null;
+  }
+
+  private weakestConcept(): string {
+    let weakest: MirrorMasteryCell | null = null;
+    for (const cell of this.mastery) {
+      if (this.isAssessed(cell) && (weakest === null || cell.mastery! < weakest.mastery!)) {
+        weakest = cell;
+      }
+    }
+    return weakest === null ? '' : weakest.concept;
+  }
+
+  private activityLabel(): string {
+    if (this.activity === null) {
+      return '';
+    }
+    const seconds = this.activity.reading_seconds || 0;
+    const duration = seconds < 60 ? Math.round(seconds) + ' 秒' : Math.round(seconds / 60) + ' 分钟';
+    return '前台阅读 ' + duration + ' · 读过 ' + (this.activity.read_chapters || 0) + ' 章 · 交流 ' +
+      (this.activity.conversation_count || 0) + ' 次 · 记下 ' + (this.activity.memory_count || 0) + ' 条长期记忆';
+  }
+
+  private assessmentLabel(): string {
+    const average = this.averageMastery();
+    return average === null ? '掌握度待验证；我会通过提问和练习，继续确认你的理解。' :
+      '已评估 ' + this.touchedCount() + ' 个概念，平均掌握度 ' + Math.round(average * 100) + '%。';
+  }
+
+  @Builder
+  mirrorPulse() {
+    Column({ space: NxGrid * 2 }) {
+      Row() {
+        Text('当前镜像')
+          .fontSize(NxFontSize.sm)
+          .fontColor(this.palette().text3)
+          .letterSpacing(1)
+        Blank()
+        Text(this.facets.length > 0 ? '可反驳' : '正在成形')
+          .fontSize(NxFontSize.xs)
+          .fontColor(this.facets.length > 0 ? this.palette().primary : this.palette().text3)
+      }
+      .width('100%')
+      if (this.activity !== null) {
+        Text(this.activityLabel())
+          .fontSize(NxFontSize.sm)
+          .fontColor(this.palette().text2)
+          .lineHeight(19)
+          .width('100%')
+      }
+      Text(this.assessmentLabel())
+        .fontSize(NxFontSize.sm)
+        .fontColor(this.palette().text3)
+        .lineHeight(19)
+        .width('100%')
+      if (this.facets.length > 0) {
+        Text(this.facets[0].claim)
+          .fontSize(NxFontSize.xl)
+          .fontFamily(NxFontFamily.serif)
+          .fontWeight(FontWeight.Medium)
+          .fontColor(this.palette().text1)
+          .lineHeight(25)
+          .width('100%')
+        Text('这条判断来自 ' + this.facets[0].evidence.length + ' 条学习信号，点“看依据”可以逐条核对。')
+          .fontSize(NxFontSize.sm)
+          .fontColor(this.palette().text3)
+          .lineHeight(18)
+          .width('100%')
+      } else if (this.touchedCount() > 0) {
+        Text('我正在把你的学习轨迹拼成一张地图。')
+          .fontSize(NxFontSize.xl)
+          .fontFamily(NxFontFamily.serif)
+          .fontColor(this.palette().text1)
+          .lineHeight(25)
+          .width('100%')
+        Text('下一步可以再看「' + this.weakestConcept() + '」，看看哪些地方需要换一种讲法。')
+          .fontSize(NxFontSize.sm)
+          .fontColor(this.palette().text3)
+          .lineHeight(18)
+          .width('100%')
+      } else {
+        Text('我正在认识你的学习方式。')
+          .fontSize(NxFontSize.xl)
+          .fontFamily(NxFontFamily.serif)
+          .fontColor(this.palette().text1)
+          .lineHeight(25)
+          .width('100%')
+        Text('阅读和交流会留下线索；关于理解程度的判断，要等更多验证。')
+          .fontSize(NxFontSize.sm)
+          .fontColor(this.palette().text3)
+          .lineHeight(18)
+          .width('100%')
+      }
+    }
+    .width('100%')
+    .padding(NxGrid * 3)
+    .borderRadius(NxRadius.md)
+    .backgroundColor(this.palette().cardBg)
   }
 
   build() {
@@ -325,6 +495,9 @@ export struct InspectSheet {
         }
 
         this.sectionTitle('它眼里的你')
+        if (!this.loading && this.errorText.length === 0) {
+          this.mirrorPulse()
+        }
         if (this.loading) {
           SkeletonCard()
         }
@@ -339,21 +512,21 @@ export struct InspectSheet {
               Column({ space: 2 }) {
                 Text(cell.concept)
                   .fontSize(NxFontSize.xs)
-                  .fontColor(nxHeatTextColor(cell.mastery, this.nxDark))
+                  .fontColor(nxHeatTextColor(cell.mastery!, this.nxDark))
                   .maxLines(2)
                   .textOverflow({ overflow: TextOverflow.Ellipsis })
                   .width('100%')
-                Text(Math.round(cell.mastery * 100) + '%')
+                Text(Math.round(cell.mastery! * 100) + '%')
                   .fontSize(NxFontSize.sm)
                   .fontWeight(FontWeight.Medium)
-                  .fontColor(nxHeatTextColor(cell.mastery, this.nxDark))
+                  .fontColor(nxHeatTextColor(cell.mastery!, this.nxDark))
               }
               .width('30%')
               .height(54)
               .padding(NxGrid * 2)
               .margin({ right: '3%', bottom: NxGrid * 2 })
               .borderRadius(NxRadius.xs)
-              .backgroundColor(nxHeatColor(cell.mastery, this.nxDark))
+              .backgroundColor(nxHeatColor(cell.mastery!, this.nxDark))
               .justifyContent(FlexAlign.SpaceBetween)
               .alignItems(HorizontalAlign.Start)
             }, (cell: MirrorMasteryCell) => cell.concept + '_' + cell.chapterName)
@@ -361,9 +534,7 @@ export struct InspectSheet {
           .width('100%')
         }
         if (!this.loading && this.untouchedCount() > 0) {
-          Text(this.heatCells().length > 0
-            ? '还有 ' + this.untouchedCount() + ' 个概念你还没碰过，我先不下判断。'
-            : '你还没留下学习信号，我先不下判断。')
+          Text('还有 ' + this.untouchedCount() + ' 个概念待验证；阅读记录会保留，掌握程度继续一起确认。')
             .fontSize(NxFontSize.sm)
             .fontColor(this.palette().text3)
             .width('100%')

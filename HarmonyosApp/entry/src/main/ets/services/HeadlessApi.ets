@@ -12,6 +12,7 @@ import { AgentEnvelope, AgentError } from '../models/AgentContracts';
 export class HeadlessApi {
   private root: string = NxEnv.baseUrl();
   private username: string = NxEnv.USE_LOCAL ? NxEnv.LOCAL_USERNAME : '';
+  private sessionCookie: string = '';
 
   constructor(context: common.Context | null) {
     if (context !== null && !NxEnv.USE_LOCAL) {
@@ -19,6 +20,7 @@ export class HeadlessApi {
         const options: preferences.Options = { name: 'nx_identity' };
         const store = preferences.getPreferencesSync(context, options);
         const saved: string = store.getSync('username', '') as string;
+        this.sessionCookie = store.getSync('session_cookie', '') as string;
         if (saved.length > 0) {
           this.username = saved;
         }
@@ -39,6 +41,9 @@ export class HeadlessApi {
         'Content-Type': 'application/json',
         'X-Nexora-Username': this.username,
       };
+      if (this.sessionCookie.length > 0) {
+        headers['Cookie'] = this.sessionCookie;
+      }
       const options: http.HttpRequestOptions = {
         method: method,
         header: headers,

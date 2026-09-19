@@ -33,10 +33,18 @@ devecocli ui screenshot                                 # 截图核对渲染
 ## 后端与环境开关
 
 - 环境集中在 `entry/src/main/ets/config/Env.ets`：`USE_LOCAL = true` 走本地后端（`NexoraLearning/dev_local.ps1` 起在 5001；
-  模拟器必须经宿主机局域网 IP 访问，不能用 127.0.0.1）并直接使用演示账号；**演示 / 云端回归前改回 `false`**，走 `https://chat.himpqblog.cn:5002`。
-- 身份在 `services/Identity.ets`：本地联调账号 → Preferences 持久化身份 → 华为账号静默登录 → 匿名回退。
+  模拟器必须经宿主机局域网 IP 访问，不能用 127.0.0.1）并直接使用演示账号；**演示 / 云端回归前改回 `false`**，走华为云 ECS `http://123.60.41.184:5002`。
+- 身份在 `services/Identity.ets`：本地联调账号 → Preferences 持久化 Nexora session → 云端登录页；云端不再用华为/匿名 ID 伪造用户。
   意图执行器与 A2A 进程没有 AppStorage，走 `services/HeadlessApi.ets`。
 - 演示数据用 `NexoraLearning/tools/seed_demo.py --reset` 重灌（账号 `demo_student`）。
+
+## 云端接入与后续开发
+
+- 云端只有一台机器：华为云 ECS `123.60.41.184`（见仓库根 `DEPLOY.md`）。账号系统 ChatDBServer 经 nginx `:80 → 127.0.0.1:5000`，learning 经 nginx `:5002 → 127.0.0.1:5001 → /opt/NexoraLearning/main.py`；learning 的模型调用由同一台机器的 ChatDBServer 代理，不要把 5000/5001 写进客户端。**`chat.himpqblog.cn` 解析到另一台机器（154.37.212.129，Himpq 主站）**，那上面的 learning 是只有 `/context /plan /ask-in-context` 的旧版本，App 指过去会退化成普通问答（2026-09-14 排查结论）。
+- 账号登录固定请求 `NxEnv.NEXORA_AUTH_BASE_URL + /login`（当前 `http://123.60.41.184/login`，账号 `ots20oug` 在这台机器上存在）。成功后鸿蒙端保存 Flask session cookie，并把它与 `X-Nexora-Username` 一起带到 learning、Agent、阅读、报告和 SSE 请求；不要在页面或 API 类里重新实现登录。learning 只认 `X-Nexora-Username`，不校验 cookie。
+- ECS 的 443 是自签证书（SAN=IP），鸿蒙 `http` 默认不信任，所以两个基址目前都是明文 HTTP（账号密码会明文过公网）。要上 HTTPS：把 `/etc/nginx/ssl/nexora.crt` 随包分发，六个客户端（AgentApi / ReaderApi / ReportApi / StreamClient / HeadlessApi / Identity）的请求带 `caPath`，或给 ECS 配一个有公信证书的域名。
+- 更新 learning：`NexoraLearning/tools/deploy_cloud.ps1`（本地 pytest → 打包不含 data/ → scp → 远端整目录备份到 `/opt/NexoraLearning.bak_<时间戳>` → 只替换代码目录 → `systemctl restart nexora-learning.service` → `tools/agent_smoke.py` 回归）。教材和运行数据在远端 `/opt/NexoraLearning/data`，不要用代码同步覆盖它。
+- 远端目录不是 git checkout，发布前必须保留备份和变更记录。`:32591/91d80a12` 是宝塔面板入口，不是 learning 代码仓库或 API。SSH 与面板凭据只用于服务器维护，不写入仓库或 App。
 
 ## 工程结构
 

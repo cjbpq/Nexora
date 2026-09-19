@@ -1,20 +1,23 @@
 /**
  * 身份层：所有 API 客户端从这里取用户名，不再各自写死。
- * 解析顺序：
- *   1. 本地联调开关（NxEnv.USE_LOCAL → LOCAL_USERNAME）
- *   2. 本机持久化身份（Preferences 'nx_identity'）
- *   3. 华为账号静默登录 → 'hw_' + openID 前 16 位，并持久化
- *   4. 生成本机匿名身份 'dev_' + 随机串，并持久化（保证演示永远有身份）
+ * 解析顺序：本地联调演示账号 → Nexora 会话 cookie + 用户名；云端没有
+ * 有效会话时保持未登录，交给 LoginView 建立真正的用户系统会话。
  * 结果写入 AppStorage('nxUsername') 与 ('nxBaseUrl')，供 AgentApi / ReaderApi / ReportApi / 卡片进程读取。
  */
 import { preferences } from '@kit.ArkData';
 import { common } from '@kit.AbilityKit';
-import { util } from '@kit.ArkTS';
+import { http } from '@kit.NetworkKit';
 import { NxEnv } from '../config/Env';
-import { sharedAccount } from '../capability/account';
 
 const PREF_NAME: string = 'nx_identity';
 const KEY_USERNAME: string = 'username';
+const KEY_SESSION_COOKIE: string = 'session_cookie';
+
+export interface LoginResponse {
+  success: boolean;
+  message?: string;
+  role?: string;
+}
 
 export class Identity {
   private static readyPromise: Promise<string> = Promise.resolve('');
@@ -22,6 +25,27 @@ export class Identity {
   static current(): string {
     const stored: string | undefined = AppStorage.get<string>('nxUsername');
     return stored !== undefined ? stored : '';
+  }
+
+  static isAuthenticated(): boolean {
+    if (NxEnv.USE_LOCAL) {
+      return true;
+    }
+    return AppStorage.get<boolean>('nxAuthenticated') === true;
+  }
+
+  /** Headers shared by learning, report, reader and stream requests. */
+  static authHeaders(): Record<string, string> {
+    const headers: Record<string, string> = {};
+    const username: string = Identity.current();
+    const cookie: string | undefined = AppStorage.get<string>('nxSessionCookie');
+    if (username.length > 0) {
+      headers['X-Nexora-Username'] = username;
+    }
+    if (cookie !== undefined && cookie.length > 0) {
+      headers['Cookie'] = cookie;
+    }
+    return headers;
   }
 
   static baseUrl(): string {
@@ -42,8 +66,10 @@ export class Identity {
 
   private static async resolveInternal(context: common.Context): Promise<string> {
     AppStorage.setOrCreate('nxBaseUrl', NxEnv.baseUrl());
+    AppStorage.setOrCreate('nxAuthenticated', false);
     if (NxEnv.USE_LOCAL) {
       AppStorage.setOrCreate('nxUsername', NxEnv.LOCAL_USERNAME);
+      AppStorage.setOrCreate('nxAuthenticated', true);
       return NxEnv.LOCAL_USERNAME;
     }
     let store: preferences.Preferences | null = null;
@@ -51,29 +77,98 @@ export class Identity {
       const options: preferences.Options = { name: PREF_NAME };
       store = preferences.getPreferencesSync(context, options);
       const saved: string = store.getSync(KEY_USERNAME, '') as string;
-      if (saved.length > 0) {
+      const cookie: string = store.getSync(KEY_SESSION_COOKIE, '') as string;
+      if (saved.length > 0 && cookie.length > 0) {
         AppStorage.setOrCreate('nxUsername', saved);
+        AppStorage.setOrCreate('nxSessionCookie', cookie);
+        AppStorage.setOrCreate('nxAuthenticated', true);
         return saved;
       }
     } catch (err) {
       store = null;
     }
-    let username: string = '';
-    const openId: string = await sharedAccount.silentOpenId(context);
-    if (openId.length > 0) {
-      username = 'hw_' + openId.slice(0, 16);
-    } else {
-      username = 'dev_' + util.generateRandomUUID().replace(/-/g, '').slice(0, 10);
+    // Cloud mode requires the Nexora account session. Huawei/anonymous IDs are
+    // deliberately not used as a substitute because they cannot authorize the
+    // ChatDBServer user system.
+    AppStorage.setOrCreate('nxUsername', '');
+    return '';
+  }
+
+  static async login(context: common.Context, username: string, password: string): Promise<LoginResponse> {
+    const normalized: string = username.trim();
+    if (normalized.length === 0 || password.length === 0) {
+      throw new Error('请输入账号和密码');
     }
-    AppStorage.setOrCreate('nxUsername', username);
-    if (store !== null) {
-      try {
-        store.putSync(KEY_USERNAME, username);
-        store.flush();
-      } catch (err) {
-        // 持久化失败只影响下次启动是否复用身份
+    const client = http.createHttp();
+    try {
+      const response: http.HttpResponse = await client.request(NxEnv.NEXORA_AUTH_BASE_URL + '/login', {
+        method: http.RequestMethod.POST,
+        header: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+        extraData: JSON.stringify({ username: normalized, password: password }),
+        expectDataType: http.HttpDataType.STRING,
+        connectTimeout: 15000,
+        readTimeout: 30000,
+      });
+      const payload: LoginResponse = JSON.parse(response.result as string) as LoginResponse;
+      if (response.responseCode < 200 || response.responseCode >= 300 || payload.success !== true) {
+        throw new Error(payload.message !== undefined && payload.message.length > 0 ? payload.message : '登录失败');
       }
+      const cookie: string = Identity.extractSessionCookie(response);
+      if (cookie.length === 0) {
+        throw new Error('登录响应缺少会话信息');
+      }
+      AppStorage.setOrCreate('nxUsername', normalized);
+      AppStorage.setOrCreate('nxSessionCookie', cookie);
+      AppStorage.setOrCreate('nxAuthenticated', true);
+      const store = preferences.getPreferencesSync(context, { name: PREF_NAME });
+      store.putSync(KEY_USERNAME, normalized);
+      store.putSync(KEY_SESSION_COOKIE, cookie);
+      store.flush();
+      return payload;
+    } catch (err) {
+      if (err instanceof Error) {
+        throw err;
+      }
+      throw new Error('网络错误，请稍后重试');
+    } finally {
+      client.destroy();
     }
-    return username;
+  }
+
+  static async logout(context: common.Context): Promise<void> {
+    const client = http.createHttp();
+    try {
+      await client.request(NxEnv.NEXORA_AUTH_BASE_URL + '/logout', {
+        method: http.RequestMethod.POST,
+        header: Identity.authHeaders(),
+        expectDataType: http.HttpDataType.STRING,
+        connectTimeout: 10000,
+        readTimeout: 15000,
+      });
+    } catch (err) {
+      // Local state must still be cleared when the server is unreachable.
+    } finally {
+      client.destroy();
+    }
+    AppStorage.setOrCreate('nxUsername', '');
+    AppStorage.setOrCreate('nxSessionCookie', '');
+    AppStorage.setOrCreate('nxAuthenticated', false);
+    try {
+      const store = preferences.getPreferencesSync(context, { name: PREF_NAME });
+      store.deleteSync(KEY_USERNAME);
+      store.deleteSync(KEY_SESSION_COOKIE);
+      store.flush();
+    } catch (err) {
+      // Best effort cleanup.
+    }
+  }
+
+  private static extractSessionCookie(response: http.HttpResponse): string {
+    const headers: Record<string, string> = response.header as Record<string, string>;
+    const raw: string = String(headers['set-cookie'] || headers['Set-Cookie'] || '');
+    if (raw.length === 0) {
+      return '';
+    }
+    return raw.split(',')[0].split(';')[0].trim();
   }
 }

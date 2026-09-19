@@ -31,7 +31,8 @@ from core.lectures import (
 )
 from core.nexora_proxy import NexoraProxy
 from core.runlog import log_event
-from core.user.learning_progress import compute_user_lecture_progress
+from core.user.learning_progress import compute_user_lecture_progress, init_learning_progress, learning_records_with_measured_duration
+from core.memory.evidence_memory import build_memory_context, record_user_message, retrieve_memories, filter_superseded_dialog
 
 
 agent_facade_bp = Blueprint("agent_facade", __name__, url_prefix="/api/agent/v1")
@@ -61,6 +62,7 @@ def init_agent_facade(cfg: Dict[str, Any]) -> None:
     global _CFG, _PROXY
     _CFG = cfg
     _PROXY = NexoraProxy(cfg)
+    init_learning_progress(cfg)
 
 
 def _request_id() -> str:
@@ -163,7 +165,23 @@ def _selected_lecture_ids(username: str) -> set[str]:
 def _lecture_snapshot(username: str, lecture: Mapping[str, Any], records: list[Dict[str, Any]]) -> Dict[str, Any]:
     lecture_id = str(lecture.get("id") or "").strip()
     books = list_books(_CFG, lecture_id)
-    progress = compute_user_lecture_progress(username, lecture_id, books, records=records)
+    progress = compute_user_lecture_progress(username, lecture_id, books, records=records, cfg=_CFG)
+    book_progress = {book["id"]: compute_user_lecture_progress(
+        username, lecture_id, [book], records=records, book_id=book["id"], cfg=_CFG
+    ) for book in books if isinstance(book, Mapping) and book.get("id")}
+
+    def reading_fields(value):
+        total = int(value.get("total_chapters") or 0)
+        completed = int(value.get("completed_chapters") or 0)
+        return {
+            "reading_progress_percent": value.get("reading_progress", value.get("progress", 0)),
+            "completion_percent": round(completed / total * 100, 1) if total else 0,
+            "completed_chapters": completed,
+            "total_chapters": total,
+            "read_chapters": value.get("read_chapters", 0),
+            "reading_seconds": value.get("reading_seconds", 0),
+            "read_chars": value.get("read_chars", 0),
+        }
     return {
         "id": lecture_id,
         "title": str(lecture.get("title") or lecture_id).strip(),
@@ -173,6 +191,9 @@ def _lecture_snapshot(username: str, lecture: Mapping[str, Any], records: list[D
         "progress_percent": max(0, min(100, _safe_int(progress.get("progress"), 0))),
         "current_chapter": str(progress.get("current_chapter") or "").strip(),
         "next_chapter": str(progress.get("next_chapter") or "").strip(),
+        "current_book_id": str(progress.get("current_book_id") or ""),
+        "current_chapter_index": progress.get("current_chapter_index"),
+        **reading_fields(progress),
         "books": [
             {
                 "id": str(book.get("id") or "").strip(),
@@ -181,6 +202,7 @@ def _lecture_snapshot(username: str, lecture: Mapping[str, Any], records: list[D
                 "text_status": str(book.get("text_status") or "").strip(),
                 "refinement_status": str(book.get("refinement_status") or "").strip(),
                 "text_chars": _safe_int(book.get("text_chars"), 0),
+                **reading_fields(book_progress.get(book.get("id"), {})),
             }
             for book in books
             if isinstance(book, Mapping)
@@ -306,7 +328,7 @@ def _today_data(
     current = int(now or time.time())
     start = _today_start_timestamp(current)
     learning_today = [
-        row for row in records
+        row for row in learning_records_with_measured_duration(records)
         if isinstance(row, Mapping) and _record_timestamp(row) >= start
     ]
     questions_today = [
@@ -479,7 +501,8 @@ def _resolve_session_target(
         return None, ("COURSE_NOT_FOUND", "No selected lecture is available for this user.", 404)
     lecture_id = str(lecture.get("id") or "").strip()
     books = lecture.get("books") if isinstance(lecture.get("books"), list) else []
-    book = next((row for row in books if str(row.get("id") or "") == requested_book), None) if requested_book else (books[0] if books else None)
+    preferred_book = requested_book or str(lecture.get("current_book_id") or "")
+    book = next((row for row in books if str(row.get("id") or "") == preferred_book), None) if preferred_book else (books[0] if books else None)
     if not isinstance(book, Mapping):
         return None, ("COURSE_NOT_FOUND", "No textbook is available for the selected lecture.", 404)
     book_id = str(book.get("id") or "").strip()
@@ -499,8 +522,10 @@ def _resolve_session_target(
         if chapter is None:
             return None, ("INVALID_ARGUMENT", "chapter_index is invalid or out of range.", 400)
     else:
+        current_index = lecture.get("current_chapter_index") if str(lecture.get("current_book_id") or "") == book_id else None
         current_name = str(lecture.get("current_chapter") or "").strip()
-        chapter = next((row for row in chapters if str(row.get("title") or "") == current_name), None)
+        chapter = next((row for row in chapters if row.get("chapter_index") == current_index), None) if current_index is not None else None
+        chapter = chapter or next((row for row in chapters if str(row.get("title") or "") == current_name), None)
         chapter = chapter or (chapters[0] if chapters else {"chapter_index": 0, "title": str(book.get("title") or "教材"), "range": ""})
     return {
         "lecture_id": lecture_id,
@@ -756,18 +781,25 @@ def agent_plan():
     available_minutes = max(5, min(240, _safe_int(data.get("available_minutes"), 30)))
     intent = str(data.get("intent") or "continue_learning").strip() or "continue_learning"
     timestamp = int(time.time())
+    message_id = f"usr_{uuid.uuid4().hex[:20]}"
     user_store.append_learning_record(_CFG, username, {
         "type": "agent_user_msg",
-        "message_id": f"usr_{uuid.uuid4().hex[:20]}",
+        "message_id": message_id,
         "text": intent,
         "timestamp": timestamp,
         "source": "app",
     })
+    record_user_message(_CFG, username, text=intent, source_id=message_id,
+                        lecture_id=str(target.get("lecture_id") or ""), occurred_at=timestamp)
+    remembered = retrieve_memories(_CFG, username, query=intent,
+                                   lecture_id=str(target.get("lecture_id") or ""), limit=8)
+    learner_goals = [row["quote"] for row in remembered if row["kind"] in {"goal", "preference", "difficulty"}]
     plan = {
         "status": "ready",
         "intent": intent,
         "available_minutes": available_minutes,
-        "reason": "根据当前课程进度选择尚未完成的下一章节。",
+        "reason": "根据当前阅读位置接着学。" + (f"我会记着你说的：{learner_goals[0][:100]}。" if learner_goals else "读过的内容可以再用一道题确认理解。"),
+        "learner_memory": learner_goals[:3],
         "target": target,
         "estimated_minutes": min(available_minutes, 25),
     }
@@ -883,16 +915,34 @@ def agent_ask_in_context():
     if photo_text:
         context_text = f"学生拍下的教材/题目内容：\n{photo_text}\n\n{context_text}"
     timestamp = int(time.time())
+    message_id = f"usr_{uuid.uuid4().hex[:20]}"
     # 先写用户消息，再调用模型；网络/模型失败也不能丢失用户的输入。
     user_store.append_learning_record(_CFG, username, {
         "type": "agent_user_msg",
-        "message_id": f"usr_{uuid.uuid4().hex[:20]}",
-        "text": question[:400],
+        "message_id": message_id,
+        "text": question[:8000],
         "timestamp": timestamp,
         "source": source,
         "lecture_id": lecture_id,
         "book_id": book_id,
+        "chapter_index": requested_chapter,
     })
+    remembered = record_user_message(_CFG, username, text=question, source_id=message_id,
+                                      source=source, lecture_id=lecture_id, book_id=book_id,
+                                      occurred_at=timestamp)
+    memory_context = build_memory_context(_CFG, username, query=question, lecture_id=lecture_id)
+    from core.cognition.learning_observations import learning_observations
+
+    observations = learning_observations(_CFG, username)
+    reading_context = [{key: course.get(key) for key in (
+        "title", "reading_seconds", "reading_progress", "read_chapters", "completed_chapters", "current_chapter"
+    )} for course in observations["courses"] if not lecture_id or course["lecture_id"] == lecture_id][:4]
+    recent_dialog = [{"student": row.get("question", "")[:500], "assistant": row.get("answer", "")[:800]}
+                     for row in filter_superseded_dialog(_CFG, username, user_store.list_learning_records(_CFG, username))
+                     if row.get("type") == DIALOG_RECORD_TYPE][-4:]
+    learner_context = (f"学生记忆（有来源的原话，不是测验成绩）：\n{memory_context or '还没有明确的个人自述。'}\n\n"
+                       f"实际阅读记录：{json.dumps(reading_context, ensure_ascii=False)}\n\n"
+                       f"最近对话（助手内容仅供理解上下文，不能作为学生事实）：{json.dumps(recent_dialog, ensure_ascii=False)}")
     answer_source = "textbook_context"
     if _PROXY is None:
         answer = _offline_learning_answer(question)
@@ -905,10 +955,13 @@ def agent_ask_in_context():
     intensive = model_cfg.get("intensive_reading") if isinstance(model_cfg.get("intensive_reading"), dict) else {}
     model = str(intensive.get("model_name") or model_cfg.get("default_nexora_model") or "").strip() or None
     prompt = (
-        "你是 Nexora Learning 的教材辅导助手。优先依据教材上下文回答；教材没有覆盖时，"
+        "你是 Nexora，持续陪伴这个学生的学习智能体。结合有来源的记忆、阅读记录和最近对话回答，"
+        "落实学生明确表达的目标和讲解偏好；能据此调整时简短说明依据。没有足够证据就说还需核实，"
+        "不能把浏览时长、提问或学生自述当成已掌握，更不能把未知显示成零分。"
+        "个人评价和学习建议要引用真实记录并给出可执行的下一步。优先依据教材上下文回答；教材没有覆盖时，"
         "允许用可靠的通用知识补充，并明确说出哪些是教材外补充。回答简洁、适合学生继续学习，"
         "不要因为上下文不完整就拒答，也不要编造教材中不存在的具体引用。\n\n"
-        f"教材上下文：\n{context_text[:12000]}\n\n学生问题：{question}"
+        f"{learner_context}\n\n教材上下文：\n{context_text[:12000]}\n\n学生问题：{question}"
     )
     if _PROXY is not None:
         result = _PROXY.complete_raw(
@@ -916,7 +969,8 @@ def agent_ask_in_context():
             model=model,
             username=username,
             api_mode="chat",
-            options={"temperature": 0.2, "max_tokens": 1200},
+            # 默认模型带推理链：不关思考时 1200 会被 reasoning_content 吃光、正文为空（MODEL_EMPTY）。
+            options={"temperature": 0.2, "max_tokens": 2400, "think": False},
             request_timeout=30,
         )
         if not result.get("success"):
@@ -936,14 +990,14 @@ def agent_ask_in_context():
         rescue_prompt = (
             "请直接回答学生问题。教材上下文仅作为参考，若没有覆盖定义，必须使用可靠的通用知识补充；"
             "先给出结论，不要拒答，不要反问。控制在一到三句话，并说明这是通用知识补充。\n\n"
-            f"教材上下文：\n{context_text[:8000]}\n\n学生问题：{question}"
+            f"{learner_context}\n\n教材上下文：\n{context_text[:8000]}\n\n学生问题：{question}"
         )
         rescue = _PROXY.complete_raw(
             messages=[{"role": "user", "content": rescue_prompt}],
             model=model,
             username=username,
             api_mode="chat",
-            options={"temperature": 0.35, "max_tokens": 500},
+            options={"temperature": 0.35, "max_tokens": 900, "think": False},
             request_timeout=30,
         )
         rescue_answer = _PROXY.extract_output_text(rescue.get("payload") if isinstance(rescue.get("payload"), dict) else {}) if rescue.get("success") else ""
@@ -960,10 +1014,15 @@ def agent_ask_in_context():
         "answer": answer[:8000],
         "lecture_id": lecture_id,
         "book_id": book_id,
+        "chapter_index": requested_chapter,
+        "user_message_id": message_id,
         "has_photo": bool(photo_text),
         "timestamp": timestamp,
     })
-    return _response(action=action, data={"answer": answer, "source": answer_source, "entry_source": source, "lecture_id": lecture_id, "book_id": book_id, "context_chars": len(context_text)})
+    return _response(action=action, data={"answer": answer, "source": answer_source, "entry_source": source,
+                                        "lecture_id": lecture_id, "book_id": book_id, "context_chars": len(context_text),
+                                        "memory_updated": bool(remembered.get("created")),
+                                        "memory_count": observations["activity"]["memory_count"]})
 
 
 @agent_facade_bp.route("/review-plan", methods=["POST"])
@@ -1151,6 +1210,51 @@ def _proactive_actions(record: Mapping[str, Any]) -> list[Dict[str, Any]]:
     ]
 
 
+def _reading_timeline_entries(records: list[Dict[str, Any]]) -> list[Dict[str, Any]]:
+    """One evolving reading note per chapter/day, instead of heartbeat spam."""
+    from core.user.reading_progress import merge_read_ranges
+
+    groups = {}
+    for row in learning_records_with_measured_duration(records):
+        if row.get("type") not in {"reading_progress", "chapter_completed"}:
+            continue
+        ts = _record_timestamp(row)
+        key = (time.strftime("%Y-%m-%d", time.localtime(ts)), str(row.get("lecture_id") or ""),
+               str(row.get("book_id") or ""), str(row.get("chapter_index", row.get("chapter_name", ""))))
+        group = groups.setdefault(key, {"seconds": 0.0, "ts": 0, "chapter": "", "completed": False, "ranges": [], "range": ""})
+        group["seconds"] += _record_duration_seconds(row)
+        group["ts"] = max(group["ts"], ts)
+        group["chapter"] = str(row.get("chapter_name") or "这一章")
+        group["completed"] = group["completed"] or row.get("type") == "chapter_completed"
+        group["ranges"].extend(row.get("read_ranges") or [])
+        group["range"] = str(row.get("chapter_range") or group["range"])
+    entries = []
+    for key, group in groups.items():
+        seconds = group["seconds"]
+        if seconds < 2 and not group["completed"]:
+            continue
+        duration = f"{seconds / 60:.1f} 分钟" if seconds >= 60 else f"{seconds:.0f} 秒"
+        coverage = ""
+        try:
+            start, length = (int(value) for value in group["range"].split(":"))
+            ranges = merge_read_ranges(group["ranges"], start, start + length)
+            chars = sum(right - left for left, right in ranges)
+            coverage = f"，覆盖本章 {chars / length * 100:.1f}%" if length and chars else ""
+        except (TypeError, ValueError):
+            pass
+        detail = f"主动阅读 {duration}{coverage}"
+        text = f"我记下了你在《{group['chapter']}》的阅读：{detail}。"
+        text += "你已标记读完，可以用一道小测确认理解。" if group["completed"] else "我会从这里接着陪你学，理解程度还可以用小测确认。"
+        entries.append({
+            "id": "reading_" + uuid.uuid5(uuid.NAMESPACE_URL, "|".join(key)).hex[:20],
+            "kind": "agent_msg", "ts": group["ts"] * 1000, "text": text,
+            "reason": "依据前台阅读计时与实际停留的页面范围。",
+            "evidence": [{"label": detail, "source": "reading"}],
+            "card": None, "actions": [], "unattended": False, "channel": "app", "trigger": "reading_progress",
+        })
+    return entries
+
+
 def _timeline_entries(records: list[Dict[str, Any]], limit: int = 100) -> list[Dict[str, Any]]:
     """把学习记录映射为 §3.1 TimelineEntry 列表（ts 升序，取最近 limit 条）。"""
     entries: list[Dict[str, Any]] = []
@@ -1260,6 +1364,7 @@ def _timeline_entries(records: list[Dict[str, Any]], limit: int = 100) -> list[D
                 "actions": [],
                 "unattended": False,
             })
+    entries.extend(_reading_timeline_entries(records))
     entries.sort(key=lambda item: int(item["ts"] or 0))
     entries = _collapse_repeats(entries)
     return entries[-max(1, min(500, limit)):]
@@ -1646,7 +1751,7 @@ def agent_cognition_overview():
 
 @agent_facade_bp.route("/cognition/verdict", methods=["POST"])
 def agent_cognition_verdict():
-    """面二反驳回喂（§6.3）：agree/disagree 写 review 证据（disagree=0 拉低掌握度，即时生效）。"""
+    """Correct a learner statement or challenge a judgment, without grading it."""
     action = "cognition_verdict"
     auth_error = _auth_error()
     if auth_error is not None:
@@ -1666,15 +1771,18 @@ def agent_cognition_verdict():
     concept_id = str(data.get("concept_id") or "").strip()
     from core.cognition.facets import record_verdict
 
-    result = record_verdict(_CFG, username, facet_id, verdict, lecture_id=lecture_id, book_id=book_id, concept_id=concept_id)
+    note = str(data.get("note") or "").strip()[:1000]
+    result = record_verdict(_CFG, username, facet_id, verdict, lecture_id=lecture_id,
+                            book_id=book_id, concept_id=concept_id, note=note)
+    if not result.get("updated", result.get("recorded", False)):
+        return _failure(action, "NOT_FOUND", "This memory does not belong to the current user or is no longer active.", status=404)
     # 反驳变成对话：带 note 的 disagree 送回模型，由它回应并改写判断；同时留痕为对话上下文。
-    note = str(data.get("note") or "").strip()[:300]
     claim = str(data.get("claim") or "").strip()[:200]
     if note:
         evidence_labels = [str(item) for item in data.get("evidence") or [] if str(item).strip()][:6] if isinstance(data.get("evidence"), list) else []
         reply = rebut(_CFG, claim=claim or facet_id, evidence=evidence_labels, note=note)
         result = dict(result)
-        result["reply"] = reply
+        result["reply"] = reply or {"reply": "我记下了你的纠正，后续会按你现在的说法核实。", "revised_claim": note, "changed": True}
         user_store.append_learning_record(_CFG, username, {
             "type": DIALOG_RECORD_TYPE,
             "dialog_id": f"dlg_{uuid.uuid4().hex[:20]}",
@@ -1684,6 +1792,9 @@ def agent_cognition_verdict():
             "lecture_id": lecture_id,
             "book_id": book_id,
         })
+        if not facet_id.startswith("memory_mem_"):
+            record_user_message(_CFG, username, text=note, source_id="correction_" + uuid.uuid4().hex[:20],
+                                source="rebuttal", lecture_id=lecture_id, book_id=book_id)
     log_event("agent_cognition_verdict", "面二判断已回喂", payload={"user_id": username, "facet_id": facet_id, "verdict": verdict})
     return _response(action=action, data=result)
 

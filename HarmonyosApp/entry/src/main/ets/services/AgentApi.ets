@@ -2,7 +2,7 @@
  * NexoraLearning Agent Facade 客户端（#2 重构版）。
  * 封装 /api/agent/v1：统一信封解析、演示用户鉴权、超时与错误处理。
  * 类型契约见 models/（§3）。
- * 云端基线：https://chat.himpqblog.cn:5002（HTTPS，公开受信证书）。
+ * 云端基线见 config/Env.ets（华为云 ECS :5002；chat.himpqblog.cn 是另一台旧版机器，不要用）。
  * 本地联调可通过 setBaseUrl / AppStorage('nxBaseUrl') 覆盖。
  */
 import { http } from '@kit.NetworkKit';
@@ -51,10 +51,7 @@ export class AgentApi {
     if (this.baseUrl !== expectedBase) {
       this.baseUrl = expectedBase;
     }
-    const usernameOverride: string | undefined = AppStorage.get<string>('nxUsername');
-    if (usernameOverride !== undefined && usernameOverride.length > 0) {
-      this.username = usernameOverride;
-    }
+    this.username = Identity.current();
   }
 
   setAuth(username: string, apiKey: string): void {
@@ -74,8 +71,11 @@ export class AgentApi {
   private buildOptions(method: http.RequestMethod, body: string): http.HttpRequestOptions {
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
-      'X-Nexora-Username': this.username,
     };
+    const auth: Record<string, string> = Identity.authHeaders();
+    for (const key of Object.keys(auth)) {
+      headers[key] = auth[key];
+    }
     if (this.apiKey.length > 0) {
       headers['X-API-Key'] = this.apiKey;
     }
@@ -154,20 +154,22 @@ export class AgentApi {
     return this.request(http.RequestMethod.POST, '/open-session', '{}');
   }
 
-  postAskInContext(question: string, target: LearnTarget, contextText: string = '', source: string = 'app', photoText: string = ''): Promise<AgentEnvelope> {
+  postAskInContext(question: string, target: LearnTarget | null, contextText: string = '', source: string = 'app', photoText: string = ''): Promise<AgentEnvelope> {
     const payload: Record<string, string | number> = {
       'question': question,
-      'lecture_id': target.lecture_id,
-      'book_id': target.book_id,
       'source': source,
     };
+    if (target !== null) {
+      payload['lecture_id'] = target.lecture_id;
+      payload['book_id'] = target.book_id;
+    }
     if (photoText.trim().length > 0) {
       // 拍照进入上下文：端侧 OCR（Core Vision Kit）识别后的文本，随问题一起送入教材辅导。
       payload['photo_text'] = photoText.trim().slice(0, 4000);
     }
     if (contextText.trim().length > 0) {
       payload['context_text'] = contextText.trim().slice(0, 12000);
-    } else if (!/第\s*[0-9一二三四五六七八九十百零两]+\s*章/.test(question)) {
+    } else if (target !== null && !/第\s*[0-9一二三四五六七八九十百零两]+\s*章/.test(question)) {
       payload['chapter_index'] = target.chapter_index;
     }
     return this.request(http.RequestMethod.POST, '/ask-in-context', JSON.stringify(payload));

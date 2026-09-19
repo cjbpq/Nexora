@@ -18,12 +18,24 @@ export class MdBlock {
   text: string = '';
 }
 
+/**
+ * 键值里带上内容指纹：流式释放时同一段落的文字在变而序号不变，
+ * ForEach 只认键，序号键会让最后一段停在第一次渲染的样子。
+ */
+function nxHash(text: string): string {
+  let h: number = 5381;
+  for (let i = 0; i < text.length; i++) {
+    h = ((h << 5) + h + text.charCodeAt(i)) | 0;
+  }
+  return (h >>> 0).toString(36) + text.length.toString(36);
+}
+
 function pushInline(target: MdInline[], kind: string, text: string, seq: number): number {
   if (text.length === 0) {
     return seq;
   }
   const item = new MdInline();
-  item.key = 'i' + seq;
+  item.key = 'i' + seq + '_' + nxHash(text);
   item.kind = kind;
   item.text = text;
   target.push(item);
@@ -208,7 +220,7 @@ export function parseMarkdown(source: string): MdBlock[] {
   let seq = 0;
   const pushBlock = (kind: string, raw: string, inlines: MdInline[]): void => {
     const block = new MdBlock();
-    block.key = 'b' + seq;
+    block.key = 'b' + seq + '_' + nxHash(raw);
     seq++;
     block.kind = kind;
     block.text = raw;
@@ -235,9 +247,9 @@ export function parseMarkdown(source: string): MdBlock[] {
       const close = text.indexOf('$$', index + 2);
       const body = close >= 0 ? text.slice(index + 2, close) : text.slice(index + 2);
       const inline = new MdInline();
-      inline.key = 'm' + seq;
       inline.kind = 'math';
       inline.text = renderLatex(body);
+      inline.key = 'm' + seq + '_' + nxHash(inline.text);
       pushBlock('math', inline.text, [inline]);
       index = close >= 0 ? close + 2 : text.length;
       if (index < text.length && text.charAt(index) === '\n') {
@@ -286,7 +298,8 @@ export function parseMarkdown(source: string): MdBlock[] {
 
 @Component
 export struct MarkdownView {
-  source: string = '';
+  /** @Prop：父组件（如流式释放中的 TimelineEntryView）重渲染时正文要跟着变，普通成员只在创建时赋一次。 */
+  @Prop source: string = '';
   serif: boolean = true;
   bodySize: number = NxFontSize.xl;
   lineH: number = 23;

@@ -23,6 +23,8 @@ export {
   MirrorFacet,
   MirrorMasteryCell,
   MirrorOverviewData,
+  MirrorActivity,
+  MirrorCourse,
   OpenSessionData,
   PlanData,
   PlanInfo,
