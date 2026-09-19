@@ -363,15 +363,34 @@ def _normalize_mindmap(
     *,
     minimum_relations: int = 0,
     minimum_relation_coverage: float = 0.0,
+    expected_section_ids: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """规范化 submit_mindmap 返回数据，拍平为 nodes + edges 图结构。
 
     LLM 仍以 chapters/concepts/children 树形提交（更易生成），
     此函数负责拍平为前端 G6 消费的扁平图格式，并解析 relations。
+    `expected_section_ids` 给出时，chapters 的 section_id 必须与大纲一一对应（缺、多都拒绝），
+    否则概念目录会按编号错配到别的书（2026-09-19 故障）。
     """
     raw_chapters = mindmap_data.get("chapters")
     if not isinstance(raw_chapters, list):
         raise ValueError("模型未返回有效的 chapters 数组")
+
+    if expected_section_ids:
+        submitted = [str((row or {}).get("section_id") or "").strip() for row in raw_chapters if isinstance(row, dict)]
+        expected = [str(x).strip() for x in expected_section_ids if str(x).strip()]
+        missing = [sid for sid in expected if sid not in submitted]
+        unknown = [sid for sid in submitted if sid and sid not in expected]
+        duplicated = sorted({sid for sid in submitted if sid and submitted.count(sid) > 1})
+        if missing or unknown or duplicated:
+            parts = []
+            if missing:
+                parts.append("缺少大纲 section：" + "、".join(missing))
+            if unknown:
+                parts.append("section_id 不在大纲里：" + "、".join(unknown))
+            if duplicated:
+                parts.append("section_id 重复：" + "、".join(duplicated))
+            raise ValueError("chapters 必须与大纲 sections 一一对应。" + "；".join(parts))
 
     nodes: List[Dict[str, Any]] = []
     edges: List[Dict[str, Any]] = []
@@ -527,6 +546,7 @@ def _run_mindmap_agent(
     minimum_relations: int = 0,
     minimum_relation_coverage: float = 0.0,
     cancel_event: Any = None,
+    expected_section_ids: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """思维导图 Agent 的工具调用主循环。
 
@@ -670,6 +690,7 @@ def _run_mindmap_agent(
                         args_obj,
                         minimum_relations=minimum_relations,
                         minimum_relation_coverage=minimum_relation_coverage,
+                        expected_section_ids=expected_section_ids,
                     )
                     mindmap_submitted = True
                     turn_history.append({
@@ -806,12 +827,14 @@ def generate_mindmap(
         minimum_relations=min(12, max(8, len(outline.get("sections") or []))),
         minimum_relation_coverage=0.65,
         cancel_event=cancel_event,
+        expected_section_ids=[str(s.get("id") or "").strip() for s in outline.get("sections") or [] if isinstance(s, dict)],
     )
 
-    # 补充元数据并落盘
+    # 补充元数据并落盘（记录所依据的大纲版本，供 graph_builder 判断是否过期）
     result_mindmap["lecture_id"] = safe_lecture_id
     result_mindmap["lecture_title"] = lecture_title
     result_mindmap["generated_at"] = __import__("time").time()
+    result_mindmap["outline_generated_at"] = int(outline.get("generated_at") or 0)
 
     _save_mindmap(cfg, safe_lecture_id, result_mindmap)
     emit_status("思维导图已生成并保存")

@@ -199,6 +199,98 @@ class GraphBuilderTests(unittest.TestCase):
             self.assertEqual(data["graph_status"], "missing")
             self.assertEqual(data["mastery"], [])
 
+    def test_stale_mindmap_is_detected_and_rebuilt(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cfg = _cfg(directory)
+            lecture, book = _seed(cfg, with_graph=True)
+            solidified = Path(cfg["data_dir"]) / "lectures" / lecture["id"] / "solidified"
+            # 大纲比图谱新，且 section 集合变了（模拟 09-03 重生成大纲、07-29 旧图谱）
+            outline = json.loads((solidified / "outline.json").read_text(encoding="utf-8"))
+            outline["generated_at"] = int(time.time())
+            outline["sections"].append({"id": "sec_003", "title": "第三章 新增", "summary": "", "objectives": [], "key_concepts": ["新增"],
+                                        "difficulty": "中等", "estimated_minutes": 20, "prerequisites": [],
+                                        "sources": [{"book_id": book["id"], "chapter_name": "第一章 数据模型"}], "exploration": {}})
+            (solidified / "outline.json").write_text(json.dumps(outline, ensure_ascii=False), encoding="utf-8")
+            self.assertTrue(graph_builder.mindmap_is_stale(cfg, lecture["id"]))
+            self.assertEqual(graph_builder.graph_status(cfg, lecture["id"]), "stale")
+            calls = []
+
+            def fake_outline(cfg_, lecture_id, **kwargs):
+                calls.append("outline")
+                return {}
+
+            def fake_mindmap(cfg_, lecture_id, **kwargs):
+                calls.append("mindmap")
+                mm = json.loads((solidified / "mindmap.json").read_text(encoding="utf-8"))
+                mm["nodes"].append({"id": "sec_003", "label": "第三章 新增", "type": "chapter", "detail": "", "parent": None})
+                mm["outline_generated_at"] = outline["generated_at"]
+                (solidified / "mindmap.json").write_text(json.dumps(mm, ensure_ascii=False), encoding="utf-8")
+                return mm
+
+            with patch("core.booksproc.outline.generate_outline", fake_outline), \
+                    patch("core.booksproc.mindmap.generate_mindmap", fake_mindmap):
+                state = graph_builder.ensure_course_graph(cfg, lecture["id"], sync=True)
+            self.assertEqual(calls, ["mindmap"])  # stale 只重建图谱，不重跑大纲
+            self.assertEqual(state, "ready")
+
+    def test_overview_ignores_orphan_evidence_after_rebuild(self):
+        from core.cognition.service import CognitionService
+
+        with tempfile.TemporaryDirectory() as directory:
+            cfg = _cfg(directory)
+            lecture, book = _seed(cfg, with_graph=True)
+            service = CognitionService(cfg)
+            concept = service.get_catalog(lecture["id"])["concepts"][0]
+            service.record_evidence("demo", {
+                "evidence_id": "ev_keep", "lecture_id": lecture["id"], "book_id": book["id"],
+                "concept_id": concept["concept_id"], "evidence_type": "objective_question", "source_type": "review",
+                "source_id": "s1", "occurred_at": int(time.time()), "score": 1.0,
+            })
+            # 直接往 evidence.jsonl 追加一条指向已不存在概念的旧证据
+            path = Path(cfg["data_dir"]) / "users" / "demo" / "cognition" / "evidence.jsonl"
+            stale = json.loads(path.read_text(encoding="utf-8").splitlines()[0])
+            stale.update(evidence_id="ev_orphan", concept_id="cx_gone")
+            path.open("a", encoding="utf-8").write(json.dumps(stale, ensure_ascii=False) + "\n")
+            overview = service.get_overview("demo", lecture_id=lecture["id"])
+            self.assertEqual(overview["summary"]["orphan_concept_count"], 1)
+            self.assertEqual(overview["summary"]["evidence_count"], 1)
+
+
+class OutlineAndMindmapGuardTests(unittest.TestCase):
+    def test_outline_coverage_gap_reports_missing_books(self):
+        from core.booksproc.outline import outline_coverage_gap
+
+        books = [{"id": "bA", "summary_status": "done"}, {"id": "bB", "summary_status": "done"}, {"id": "bC", "summary_status": "idle"}]
+        sections = [{"sources": [{"book_id": "bB", "chapter_name": "x"}]}, {"sources": [{"book_id": "bZ", "chapter_name": "y"}]}]
+        gap = outline_coverage_gap(sections, books)
+        self.assertEqual(gap, {"missing": ["bA"], "unknown": ["bZ"]})
+        self.assertEqual(outline_coverage_gap([{"sources": [{"book_id": "bA", "chapter_name": "a"}, {"book_id": "bB", "chapter_name": "b"}]}], books),
+                         {"missing": [], "unknown": []})
+
+    def test_chapter_prompt_keeps_every_book(self):
+        from core.booksproc.outline import _format_chapters_for_prompt
+
+        rows = [{"book_id": "bA", "book_title": "甲", "chapter_name": f"甲{i}", "chapter_summary": "摘" * 400} for i in range(30)]
+        rows += [{"book_id": "bB", "book_title": "乙", "chapter_name": f"乙{i}", "chapter_summary": "摘" * 400} for i in range(6)]
+        text = _format_chapters_for_prompt(rows, limit=6000)
+        self.assertIn("book_id=bA", text)
+        self.assertIn("book_id=bB", text)
+        self.assertIn("乙5", text)
+
+    def test_mindmap_rejects_section_mismatch(self):
+        from core.booksproc.mindmap import _normalize_mindmap
+
+        payload = {"course_title": "c", "chapters": [
+            {"section_id": "sec_001", "name": "一", "concepts": [{"name": "a", "detail": ""}, {"name": "b", "detail": ""}]},
+            {"section_id": "sec_009", "name": "九", "concepts": [{"name": "c", "detail": ""}, {"name": "d", "detail": ""}]},
+        ], "relations": []}
+        with self.assertRaises(ValueError) as ctx:
+            _normalize_mindmap(payload, expected_section_ids=["sec_001", "sec_002"])
+        self.assertIn("sec_002", str(ctx.exception))
+        self.assertIn("sec_009", str(ctx.exception))
+        ok = _normalize_mindmap(payload, expected_section_ids=["sec_001", "sec_009"])
+        self.assertEqual(len([n for n in ok["nodes"] if n["type"] == "chapter"]), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

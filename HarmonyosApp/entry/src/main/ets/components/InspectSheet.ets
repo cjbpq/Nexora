@@ -423,6 +423,9 @@ export struct InspectSheet {
       if (this.graphStatus === 'building') {
         return '我正在为这门课建知识图谱，掌握度稍后出现。';
       }
+      if (this.graphStatus === 'stale') {
+        return '这门课的知识图谱比大纲旧，我会在下次选课时重建；掌握度暂按旧图谱算。';
+      }
       if (this.graphStatus === 'missing') {
         return '这门课还没有知识图谱，掌握度暂时算不出来；阅读和交流照常记录。';
       }

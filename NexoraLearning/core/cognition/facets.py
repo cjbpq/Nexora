@@ -272,8 +272,8 @@ def build_facets(cfg: Mapping[str, Any], username: str) -> Dict[str, Any]:
     graph_states = {lecture_id: graph_status(cfg, lecture_id) for lecture_id in selected_ids}
     if not graph_states:
         overall = "missing"
-    elif all(state == "ready" for state in graph_states.values()):
-        overall = "ready"
+    elif all(state in {"ready", "stale"} for state in graph_states.values()):
+        overall = "stale" if any(state == "stale" for state in graph_states.values()) else "ready"
     elif any(state == "building" for state in graph_states.values()):
         overall = "building"
     else:
