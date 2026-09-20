@@ -578,8 +578,17 @@ class AgentFacadeTests(unittest.TestCase):
                      "options": ["读未提交", "串行化"], "answer": "B", "source_id": "q3"},
                 ],
             }, ensure_ascii=False), encoding="utf-8")
-            # 云端真实情况：题干不含概念名、题目无 related_concept_id，但章名能对上图谱里的章 → 按章兜底绑定
+            # 云端真实情况：题干不含概念名、题目无 related_concept_id。
+            # ① 章名与大纲 sources[].chapter_name 精确对上（同一本书）→ source_ref
             from core.cognition.review_bridge import resolve_concept
+            concept, binding = resolve_concept(
+                cfg, "demo", {"title": "安装介质挂载位置", "content": "安装前要挂载哪个目录的 iso"},
+                question_id="qx", lecture_id=lecture["id"], book_id=book["id"], chapter_index=5,
+                chapter_name="第一章 梯度下降",
+            )
+            self.assertIsNotNone(concept)
+            self.assertEqual(binding, "source_ref")
+            # ② 另一本书、章名只是相似 → 模糊章名兜底
             concept, binding = resolve_concept(
                 cfg, "demo", {"title": "安装介质挂载位置", "content": "安装前要挂载哪个目录的 iso"},
                 question_id="qx", lecture_id=lecture["id"], book_id="b_other", chapter_index=5,
@@ -636,9 +645,10 @@ class AgentFacadeTests(unittest.TestCase):
             rows = CognitiveEvidenceStore(cfg).list("demo")
             self.assertEqual(len(rows), 3)
             by_type = {row.evidence_type: row for row in rows}
-            chapter_bound = [row for row in rows if row.metadata.get("binding") == "chapter_name"]
-            self.assertEqual(len(chapter_bound), 1)
-            self.assertEqual(chapter_bound[0].confidence, 0.6)
+            # q3 题干不含概念名，但 quiz 的章名「第一章 梯度下降」与大纲 sources 精确对上 → source_ref、0.8
+            source_bound = [row for row in rows if row.metadata.get("binding") == "source_ref"]
+            self.assertEqual(len(source_bound), 1)
+            self.assertEqual(source_bound[0].confidence, 0.8)
             self.assertIn("objective_question", by_type)
             self.assertIn("revealed_answer", by_type)
             self.assertEqual(by_type["revealed_answer"].score, 0.0)

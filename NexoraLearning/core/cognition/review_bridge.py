@@ -99,8 +99,12 @@ def resolve_concept(
     matched = _match_concepts(title, scoped, -1, book_id) if title.strip() else []
     if matched:
         return matched[0], "title_book"
-    # 模型出的题几乎不含概念名；课程级图谱的概念又只挂在第一本书上。按章名把题归到图谱里的那一章，
-    # 再在该章概念里选与题干词重叠最多的一个（都不重叠就取第一个）。置信度调低，供下游打折。
+    # 大纲 section 的 sources[].chapter_name 就是教材原章名，概念目录把它带在 source_refs 上：
+    # (book_id, 教材章名) 精确对上 → 章确定，章内按题干词重叠选概念。这是多教材课程最可靠的一级。
+    by_source = _source_ref_candidates(scoped, book_id, chapter_name)
+    if by_source:
+        return _pick_by_terms(title, by_source), "source_ref"
+    # 章名模糊兜底：题目章名与图谱章名最长公共子串 ≥4。置信度调低，供下游打折。
     fallback = _chapter_fallback(title, scoped, chapter_name)
     if fallback is not None:
         return fallback, "chapter_name"
@@ -117,6 +121,37 @@ def _terms(text: str) -> set:
     for word in re.findall(r"[一-鿿]+", normalized):
         tokens.update(word[i:i + 2] for i in range(max(1, len(word) - 1)))
     return tokens
+
+
+def _pick_by_terms(title: str, candidates: List[Dict[str, Any]]) -> Dict[str, Any]:
+    question_terms = _terms(title)
+    return sorted(
+        candidates,
+        key=lambda row: len(question_terms & _terms(f"{row.get('name') or ''} {row.get('detail') or ''}")),
+        reverse=True,
+    )[0]
+
+
+def _source_ref_candidates(concepts: List[Dict[str, Any]], book_id: str, chapter_name: str) -> List[Dict[str, Any]]:
+    wanted = _normalize(chapter_name)
+    if not wanted or not book_id:
+        return []
+    exact: List[Dict[str, Any]] = []
+    loose: List[Dict[str, Any]] = []
+    for row in concepts:
+        for ref in row.get("source_refs") or []:
+            if not isinstance(ref, Mapping) or str(ref.get("book_id") or "") != book_id:
+                continue
+            name = _normalize(ref.get("chapter_name"))
+            if not name:
+                continue
+            if name == wanted:
+                exact.append(row)
+                break
+            if len(wanted) >= 4 and (wanted in name or name in wanted):
+                loose.append(row)
+                break
+    return exact or loose
 
 
 def _chapter_similarity(left: str, right: str) -> int:
@@ -145,13 +180,7 @@ def _chapter_fallback(title: str, concepts: List[Dict[str, Any]], chapter_name: 
     if not ranked or ranked[0][0] < 4:
         return None
     candidates = by_chapter[ranked[0][1]]
-    question_terms = _terms(title)
-    scored = sorted(
-        candidates,
-        key=lambda row: len(question_terms & _terms(f"{row.get('name') or ''} {row.get('detail') or ''}")),
-        reverse=True,
-    )
-    return scored[0] if scored else None
+    return _pick_by_terms(title, candidates) if candidates else None
 
 
 def record_review_evidence(
@@ -197,7 +226,7 @@ def record_review_evidence(
         "source_id": f"{quiz_id}:{question_id}"[:200],
         "occurred_at": timestamp,
         "score": 1.0 if is_correct else 0.0,
-        "confidence": 0.6 if (revealed_without_answer or binding == "chapter_name") else 1.0,
+        "confidence": 0.6 if (revealed_without_answer or binding == "chapter_name") else (0.8 if binding == "source_ref" else 1.0),
         "metadata": {
             "question_id": question_id,
             "chapter_name": str(chapter_name or "")[:160],
