@@ -39,6 +39,7 @@ def main() -> int:
     parser.add_argument("--lecture", required=True)
     parser.add_argument("--mindmap-only", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--rebind-only", action="store_true", help="不生成，只把答题记录重新绑定到当前图谱")
     parser.add_argument("--user", default="system")
     args = parser.parse_args()
 
@@ -48,6 +49,12 @@ def main() -> int:
     from core.runlog import init_run_logger
 
     print("event log:", init_run_logger(cfg))
+    if args.rebind_only:
+        from core.cognition.graph_builder import rebind_evidence_for_lecture
+
+        print("REBIND", json.dumps(rebind_evidence_for_lecture(cfg, args.lecture), ensure_ascii=False))
+        print("AFTER", json.dumps({"catalog": _report(cfg, args.lecture)}, ensure_ascii=False))
+        return 0
     from core.booksproc.outline import generate_outline, load_outline, outline_coverage_gap
     from core.booksproc.mindmap import generate_mindmap
     from core.cognition.graph_builder import mindmap_is_stale
@@ -85,6 +92,9 @@ def main() -> int:
     print("generating mindmap ...")
     mm = generate_mindmap(cfg, lecture_id, user_id=args.user, on_status=lambda m: print("  [mindmap]", m))
     print("mindmap nodes", len(mm.get("nodes") or []), "edges", len(mm.get("edges") or []), f"{time.time() - started:.0f}s")
+    from core.cognition.graph_builder import rebind_evidence_for_lecture
+
+    print("REBIND", json.dumps(rebind_evidence_for_lecture(cfg, lecture_id), ensure_ascii=False))
     after = {"mindmap_stale": mindmap_is_stale(cfg, lecture_id), "catalog": _report(cfg, lecture_id)}
     print("AFTER", json.dumps(after, ensure_ascii=False))
     return 0

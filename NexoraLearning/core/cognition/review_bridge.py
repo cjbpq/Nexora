@@ -25,8 +25,12 @@ from .errors import CognitionConflictError, CognitionError
 _OBJECTIVE_TYPES = {"choice", "single_choice", "multiple_choice", "选择题", "单选题", "多选题"}
 
 
-def review_evidence_id(user_id: str, quiz_id: str, question_id: str) -> str:
+def review_evidence_id(user_id: str, quiz_id: str, question_id: str, concept_id: str = "") -> str:
+    """幂等键 = (user, quiz, question, concept)。带 concept 是为了图谱重建：旧概念 id 失效后，
+    同一题重新绑定到新概念要能写出新行，而旧行作为孤儿被 overview 忽略。"""
     raw = f"{str(user_id or '').strip()}|{str(quiz_id or '').strip()}|{str(question_id or '').strip()}"
+    if concept_id:
+        raw += f"|{str(concept_id).strip()}"
     return "ev_rv_" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
 
 
@@ -217,7 +221,7 @@ def record_review_evidence(
 
     evidence_type = _evidence_type(question, revealed_without_answer=revealed_without_answer)
     payload = {
-        "evidence_id": review_evidence_id(username, quiz_id, question_id),
+        "evidence_id": review_evidence_id(username, quiz_id, question_id, str(concept.get("concept_id") or "")),
         "lecture_id": str(concept.get("lecture_id") or lecture_id),
         "book_id": str(concept.get("book_id") or book_id),
         "concept_id": str(concept.get("concept_id") or ""),
@@ -252,3 +256,57 @@ def record_review_evidence(
         "evidence_type": evidence_type,
         "binding": binding,
     }
+
+
+def rebind_review_evidence(cfg: Mapping[str, Any], username: str, *, lecture_id: str = "") -> Dict[str, Any]:
+    """把已有的答题记录重新绑定到当前图谱（图谱重建后调用；也可用于补写历史遗漏）。
+
+    只处理带 quiz_id/question_id 的 question_completions（09-19 之后的记录）；题目从 chapter_quizzes 里取。
+    幂等：同一 (question, concept) 已有证据则不重复。
+    """
+    from core.booksproc.chapter_quiz import load_quiz_by_id
+
+    completions = [row for row in user_store.list_question_completions(dict(cfg), username) or []
+                   if isinstance(row, Mapping) and row.get("quiz_id") and row.get("question_id")
+                   and (not lecture_id or str(row.get("lecture_id") or "") == lecture_id)]
+    try:
+        _, concepts = _load_catalog(cfg, username)
+    except Exception:
+        concepts = []
+    quizzes: Dict[str, Dict[str, Any]] = {}
+    stats = {"completions": len(completions), "recorded": 0, "created": 0, "skipped": 0, "bindings": {}}
+    for row in completions:
+        quiz_id = str(row.get("quiz_id"))
+        if quiz_id not in quizzes:
+            try:
+                quizzes[quiz_id] = load_quiz_by_id(cfg, username, quiz_id) or {}
+            except Exception:
+                quizzes[quiz_id] = {}
+        questions = quizzes[quiz_id].get("questions") if isinstance(quizzes[quiz_id].get("questions"), list) else []
+        question_id = str(row.get("question_id"))
+        question = next((q for index, q in enumerate(questions) if isinstance(q, Mapping)
+                         and str(q.get("source_id") or q.get("question_id") or f"q{index}") == question_id), None)
+        if question is None:
+            stats["skipped"] += 1
+            continue
+        try:
+            chapter_index = int(row.get("chapter_index") if row.get("chapter_index") is not None else -1)
+        except (TypeError, ValueError):
+            chapter_index = -1
+        outcome = record_review_evidence(
+            cfg, username, quiz_id=quiz_id, question=question, question_id=question_id,
+            lecture_id=str(row.get("lecture_id") or ""), book_id=str(row.get("book_id") or ""),
+            chapter_index=chapter_index, chapter_name=str(row.get("chapter_name") or ""),
+            is_correct=bool(row.get("is_correct")), revealed_without_answer=bool(row.get("revealed_without_answer")),
+            occurred_at=int(row.get("timestamp") or 0) or None, concepts=concepts, source_kind="rebind",
+        )
+        if outcome.get("recorded"):
+            stats["recorded"] += 1
+            if outcome.get("created"):
+                stats["created"] += 1
+            binding = str(outcome.get("binding") or "existing")
+            stats["bindings"][binding] = stats["bindings"].get(binding, 0) + 1
+        else:
+            stats["skipped"] += 1
+    log_event("review_evidence_rebound", "答题记录重新绑定到当前图谱", payload={"user_id": username, "lecture_id": lecture_id, **stats})
+    return stats

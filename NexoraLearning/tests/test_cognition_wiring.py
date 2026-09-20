@@ -257,6 +257,50 @@ class GraphBuilderTests(unittest.TestCase):
 
 
 class OutlineAndMindmapGuardTests(unittest.TestCase):
+    def test_rebind_after_graph_rebuild_restores_assessment(self):
+        """图谱重建 → 旧证据成孤儿 → rebind 把已有答题记录绑到新概念，掌握度恢复。"""
+        from core.cognition.review_bridge import rebind_review_evidence
+        from core.cognition.service import CognitionService
+
+        with tempfile.TemporaryDirectory() as directory:
+            cfg = _cfg(directory)
+            lecture, book = _seed(cfg, with_graph=True)
+            quiz_id = "chapter_quiz_rebind"
+            quiz_path = Path(cfg["data_dir"]) / "users" / "demo" / "chapter_quizzes" / f"{quiz_id}.json"
+            quiz_path.parent.mkdir(parents=True, exist_ok=True)
+            quiz_path.write_text(json.dumps({
+                "quiz_id": quiz_id, "lecture_id": lecture["id"], "book_id": book["id"], "chapter_index": 1,
+                "chapter_name": "第二章 傅里叶变换与卷积",
+                "questions": [{"title": "频域变换", "content": "把信号变到频域的是什么", "type": "choice",
+                               "options": ["傅里叶变换", "卷积"], "answer": "A", "source_id": "q1"}],
+            }, ensure_ascii=False), encoding="utf-8")
+            user_store.append_question_completion(cfg, "demo", {
+                "completion_id": "qc_1", "quiz_id": quiz_id, "question_id": "q1", "lecture_id": lecture["id"],
+                "book_id": book["id"], "chapter_index": 1, "chapter_name": "第二章 傅里叶变换与卷积",
+                "question_title": "频域变换", "is_correct": True, "timestamp": int(time.time()),
+            })
+            first = rebind_review_evidence(cfg, "demo", lecture_id=lecture["id"])
+            self.assertEqual(first["created"], 1)
+            self.assertEqual(rebind_review_evidence(cfg, "demo", lecture_id=lecture["id"])["created"], 0)  # 幂等
+            service = CognitionService(cfg)
+            self.assertEqual(service.get_overview("demo", lecture_id=lecture["id"])["summary"]["evidence_count"], 1)
+
+            # 模拟图谱重建：section_id 变了 → concept_id 全变
+            solidified = Path(cfg["data_dir"]) / "lectures" / lecture["id"] / "solidified"
+            for name in ("outline.json", "mindmap.json"):
+                text = (solidified / name).read_text(encoding="utf-8").replace("sec_002", "sec_202").replace("sec_001", "sec_101")
+                (solidified / name).write_text(text, encoding="utf-8")
+            overview = service.get_overview("demo", lecture_id=lecture["id"])
+            self.assertEqual(overview["summary"]["orphan_concept_count"], 1)
+            self.assertEqual(overview["summary"]["evidence_count"], 0)
+            rebound = rebind_review_evidence(cfg, "demo", lecture_id=lecture["id"])
+            self.assertEqual(rebound["created"], 1)
+            overview = service.get_overview("demo", lecture_id=lecture["id"])
+            self.assertEqual(overview["summary"]["evidence_count"], 1)
+            assessed = [s for s in overview["states"] if s["assessed_count"]]
+            self.assertEqual(len(assessed), 1)
+            self.assertEqual(assessed[0]["concept"]["name"], "傅里叶变换")
+
     def test_outline_coverage_gap_reports_missing_books(self):
         from core.booksproc.outline import outline_coverage_gap
 

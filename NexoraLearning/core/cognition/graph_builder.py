@@ -84,6 +84,33 @@ def is_building(lecture_id: str) -> bool:
         return str(lecture_id or "") in _BUILDING
 
 
+def rebind_evidence_for_lecture(cfg: Mapping[str, Any], lecture_id: str) -> Dict[str, Any]:
+    """图谱重建后 concept_id 全变：把选了这门课的每个用户的答题记录重新绑定到新概念。失败只记事件。"""
+    from core import user as user_store
+    from core.cognition.review_bridge import rebind_review_evidence
+
+    results: Dict[str, Any] = {}
+    try:
+        users = user_store.list_users(dict(cfg)) or []
+    except Exception:
+        users = []
+    for row in users:
+        if not isinstance(row, Mapping):
+            continue
+        username = str(row.get("id") or row.get("username") or "").strip()
+        if not username:
+            continue
+        try:
+            if lecture_id not in set(user_store.list_selected_lecture_ids(dict(cfg), username) or []):
+                continue
+            results[username] = rebind_review_evidence(cfg, username, lecture_id=lecture_id)
+        except Exception as exc:  # noqa: BLE001
+            results[username] = {"error": str(exc)[:200]}
+            log_event("review_evidence_rebind_failed", "图谱重建后重新绑定答题证据失败",
+                      payload={"user_id": username, "lecture_id": lecture_id, "error": str(exc)[:200]})
+    return results
+
+
 def graph_status(cfg: Mapping[str, Any], lecture_id: str) -> str:
     lid = str(lecture_id or "").strip()
     if not lid:
@@ -136,6 +163,7 @@ def ensure_course_graph(cfg: Mapping[str, Any], lecture_id: str, *, user_id: str
                 from core.booksproc.mindmap import generate_mindmap
 
                 generate_mindmap(cfg, lid, user_id=user_id or "auto")
+                rebind_evidence_for_lecture(cfg, lid)
             log_event("course_graph_auto_built", "课程图谱自动补建/重建完成", payload={
                 "lecture_id": lid, "user_id": user_id, "seconds": round(time.time() - started, 1),
                 "outline": need_outline, "mindmap": need_mindmap, "reason": status,
