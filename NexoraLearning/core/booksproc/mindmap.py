@@ -560,7 +560,16 @@ def _run_mindmap_agent(
         stream_timeout = float(settings.get("request_timeout") or 90)
     except Exception:
         stream_timeout = 90.0
-    stream_timeout = max(30.0, min(stream_timeout, 90.0))
+    stream_timeout = max(30.0, min(stream_timeout, 300.0))
+    try:
+        max_tokens = int(settings.get("max_output_tokens") or 6000)
+    except Exception:
+        max_tokens = 6000
+    # 15 章 × 2 概念 + 12 条关系的 JSON 约 3000+ token；再加推理链就更多。
+    # 旧值 min(2800, …) 配合不关 think 的 DeepSeek-V4-Flash 会把预算吃光、四轮都不出工具调用。
+    max_tokens = max(3000, min(max_tokens, 8000))
+    think = settings.get("think")
+    think = False if think is None else bool(think)
 
     messages: List[Dict[str, Any]] = [
         {"role": "system", "content": system_prompt},
@@ -596,7 +605,8 @@ def _run_mindmap_agent(
             model=model_name or None,
             options={
                 "temperature": float(settings.get("temperature") or 0.3),
-                "max_tokens": min(2800, int(settings.get("max_output_tokens") or 2800)),
+                "max_tokens": max_tokens,
+                "think": think,
                 # usst / qwen3.5-27b will not return any stream events when
                 # function tools are attached. The browser SSE still reports
                 # the agent lifecycle and renders the completed tool payload.
@@ -615,7 +625,7 @@ def _run_mindmap_agent(
             if cancel_event is not None and cancel_event.is_set():
                 raise RuntimeError("知识图谱生成已取消")
             if "timed out" in message.lower() or "timeout" in message.lower():
-                raise RuntimeError("模型在 90 秒内未返回数据，请稍后重试。")
+                raise RuntimeError(f"模型在 {int(stream_timeout)} 秒内未返回数据，请稍后重试。")
             raise RuntimeError(f"Nexora API Error: {message}")
 
         payload = response.get("payload") if isinstance(response.get("payload"), dict) else {}

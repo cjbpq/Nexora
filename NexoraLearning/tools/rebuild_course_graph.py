@@ -45,6 +45,9 @@ def main() -> int:
     from main import ensure_bootstrap
 
     cfg = ensure_bootstrap()
+    from core.runlog import init_run_logger
+
+    print("event log:", init_run_logger(cfg))
     from core.booksproc.outline import generate_outline, load_outline, outline_coverage_gap
     from core.booksproc.mindmap import generate_mindmap
     from core.cognition.graph_builder import mindmap_is_stale
