@@ -38,9 +38,14 @@ def save_device_context(cfg: Mapping[str, Any], username: str, payload: Mapping[
     reported_at = int(now or time.time())
     if reported_at > 10_000_000_000:
         reported_at //= 1000
+    # 端侧日历读不到（未授权 / 设备不支持）时上报 calendar_status='unavailable'：
+    # 决策器不能把这种空日历当成「用户今天没有安排」。
+    calendar_status = str(payload.get("calendar_status") or "ok").strip()[:24] or "ok"
     record = {
         "reported_at": reported_at,
         "calendar": events,
+        "calendar_status": calendar_status,
+        "calendar_reason": str(payload.get("calendar_reason") or "").strip()[:24],
         "do_not_disturb": payload.get("do_not_disturb") is True,
         "scene": str(payload.get("scene") or "").strip()[:24],
         "location": str(payload.get("location") or "").strip()[:24],
@@ -81,6 +86,9 @@ def merge_into_signals(cfg: Mapping[str, Any], username: str, signals: Mapping[s
         return merged
     if "calendar" not in merged and stored.get("calendar"):
         merged["calendar"] = stored["calendar"]
+    if str(stored.get("calendar_status") or "ok") != "ok":
+        merged.setdefault("calendar_unavailable", True)
+        merged.setdefault("calendar_unavailable_reason", str(stored.get("calendar_reason") or ""))
     if "do_not_disturb" not in merged and stored.get("do_not_disturb"):
         merged["do_not_disturb"] = True
     for key in ("scene", "location", "device"):

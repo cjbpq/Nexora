@@ -177,6 +177,31 @@ class JudgmentLoopTests(unittest.TestCase):
             self.assertEqual(captured["device"]["scene"], "study")
             snapshot = app.test_client().get("/api/agent/v1/judgment/context", headers=USER).get_json()["data"]["bundle"]
             self.assertEqual(snapshot["calendar"][0]["title"], "线代 期末考")
+            self.assertFalse(snapshot["calendar_unavailable"])
+
+    def test_device_context_marks_calendar_unavailable_when_unauthorized(self):
+        """2026-09-21 审查 F06：端侧日历没权限时上报空日历不能被当成「没有安排」。"""
+        captured = {}
+
+        def fake(bundle):
+            captured.update(bundle)
+            return _judgment("hold")
+
+        set_judge_override(fake)
+        with tempfile.TemporaryDirectory() as directory:
+            app, _ = _app(Path(directory))
+            now = int(time.time())
+            app.test_client().post(
+                "/api/agent/v1/context/device", headers=USER,
+                json={"calendar": [], "calendar_status": "unavailable", "calendar_reason": "blocked",
+                      "do_not_disturb": False, "scene": "normal", "device": "phone"},
+            )
+            _decide(app, trigger="prep_done", target=_target(), now=now)
+            self.assertTrue(captured["calendar_unavailable"])
+            self.assertEqual(captured["calendar"], [])
+            from core.decision.judgment import compact_context
+            compact = compact_context(captured)
+            self.assertIn("日历未授权", compact["calendar"][0])
 
     def test_device_context_dnd_is_hard_block(self):
         set_judge_override(lambda bundle: _judgment("card", "现在开始复习。"))

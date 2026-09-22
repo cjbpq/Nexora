@@ -351,6 +351,8 @@ def build_context_bundle(
         },
         "clock": _clock(now),
         "calendar": _calendar(signals, now),
+        # 端侧日历读不到（未授权 / 不支持）时为 True：模型与规则都不能把空日历当成「今天没安排」。
+        "calendar_unavailable": bool(signals.get("calendar_unavailable")),
         "device": _device(signals),
         "location": _location(signals),
         "dialog": _dialog(filter_superseded_dialog(cfg, username, records), now),
@@ -502,7 +504,8 @@ def compact_context(bundle: Mapping[str, Any]) -> Dict[str, Any]:
     return {
         "time": str(clock.get("local_time") or ""),
         "weekday": str(clock.get("weekday") or ""),
-        "calendar": [f"{row.get('at', '')} {row.get('title', '')}".strip() for row in calendar[:3] if isinstance(row, Mapping)],
+        "calendar": ([f"{row.get('at', '')} {row.get('title', '')}".strip() for row in calendar[:3] if isinstance(row, Mapping)]
+                     if not bundle.get("calendar_unavailable") else ["（日历未授权，读不到）"]),
         "scene": str(device.get("scene") or "unknown"),
         "dnd": bool(device.get("do_not_disturb")),
         "location": str(bundle.get("location") or "unknown"),

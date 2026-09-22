@@ -25,17 +25,23 @@ from .errors import CognitionConflictError, CognitionError
 _OBJECTIVE_TYPES = {"choice", "single_choice", "multiple_choice", "选择题", "单选题", "多选题"}
 
 
-def review_evidence_id(user_id: str, quiz_id: str, question_id: str, concept_id: str = "") -> str:
-    """幂等键 = (user, quiz, question, concept)。带 concept 是为了图谱重建：旧概念 id 失效后，
-    同一题重新绑定到新概念要能写出新行，而旧行作为孤儿被 overview 忽略。"""
+def review_evidence_id(user_id: str, quiz_id: str, question_id: str, concept_id: str = "", attempt_id: str = "") -> str:
+    """幂等键 = (user, quiz, question, concept[, attempt])。带 concept 是为了图谱重建：旧概念 id 失效后，
+    同一题重新绑定到新概念要能写出新行，而旧行作为孤儿被 overview 忽略。
+    带 attempt 是为了「再练一次」：同一题组的新一轮练习是新的证据，不被上一轮的结果挡住。"""
     raw = f"{str(user_id or '').strip()}|{str(quiz_id or '').strip()}|{str(question_id or '').strip()}"
     if concept_id:
         raw += f"|{str(concept_id).strip()}"
+    if attempt_id:
+        raw += f"|{str(attempt_id).strip()}"
     return "ev_rv_" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
 
 
-def completion_id_for(quiz_id: str, question_id: str) -> str:
+def completion_id_for(quiz_id: str, question_id: str, attempt_id: str = "") -> str:
+    """一次练习（attempt）内同一题只作数一次；不同 attempt 各自入账。没有 attempt 的旧调用保持原键。"""
     raw = f"{str(quiz_id or '').strip()}|{str(question_id or '').strip()}"
+    if attempt_id:
+        raw += f"|{str(attempt_id).strip()}"
     return "qc_" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:20]
 
 
@@ -203,8 +209,9 @@ def record_review_evidence(
     occurred_at: Optional[int] = None,
     concepts: Optional[List[Dict[str, Any]]] = None,
     source_kind: str = "review",
+    attempt_id: str = "",
 ) -> Dict[str, Any]:
-    """一题一证据。写不进认知层不影响判分（返回 recorded=False + reason）。"""
+    """一题一证据（按 attempt 区分轮次）。写不进认知层不影响判分（返回 recorded=False + reason）。"""
     from .service import CognitionService
 
     timestamp = int(occurred_at or time.time())
@@ -220,14 +227,15 @@ def record_review_evidence(
         return {"recorded": False, "reason": "concept_unbound"}
 
     evidence_type = _evidence_type(question, revealed_without_answer=revealed_without_answer)
+    attempt = str(attempt_id or "").strip()
     payload = {
-        "evidence_id": review_evidence_id(username, quiz_id, question_id, str(concept.get("concept_id") or "")),
+        "evidence_id": review_evidence_id(username, quiz_id, question_id, str(concept.get("concept_id") or ""), attempt),
         "lecture_id": str(concept.get("lecture_id") or lecture_id),
         "book_id": str(concept.get("book_id") or book_id),
         "concept_id": str(concept.get("concept_id") or ""),
         "evidence_type": evidence_type,
         "source_type": "review",
-        "source_id": f"{quiz_id}:{question_id}"[:200],
+        "source_id": (f"{quiz_id}:{question_id}" + (f":{attempt}" if attempt else ""))[:200],
         "occurred_at": timestamp,
         "score": 1.0 if is_correct else 0.0,
         "confidence": 0.6 if (revealed_without_answer or binding == "chapter_name") else (0.8 if binding == "source_ref" else 1.0),
@@ -238,6 +246,7 @@ def record_review_evidence(
             "revealed_without_answer": bool(revealed_without_answer),
             "binding": binding,
             "source_kind": source_kind,
+            "attempt_id": attempt,
         },
     }
     try:
@@ -299,6 +308,7 @@ def rebind_review_evidence(cfg: Mapping[str, Any], username: str, *, lecture_id:
             chapter_index=chapter_index, chapter_name=str(row.get("chapter_name") or ""),
             is_correct=bool(row.get("is_correct")), revealed_without_answer=bool(row.get("revealed_without_answer")),
             occurred_at=int(row.get("timestamp") or 0) or None, concepts=concepts, source_kind="rebind",
+            attempt_id=str(row.get("attempt_id") or ""),
         )
         if outcome.get("recorded"):
             stats["recorded"] += 1

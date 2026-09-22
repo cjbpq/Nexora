@@ -667,6 +667,9 @@ def _start_review_task(username: str, target: Dict[str, Any], limit: int) -> Dic
                 task["status"] = "completed"
                 task["result"] = {
                     "quiz_id": str(quiz.get("quiz_id") or ""),
+                    # 题组内容（quiz_id）可缓存复用；一次练习（attempt_id）每个任务独立，
+                    # 结算与累计都按 attempt 隔离，「再出一组」不会继承上一轮的完成态与成绩。
+                    "attempt_id": task_id,
                     "lecture_id": target["lecture_id"],
                     "book_id": target["book_id"],
                     "chapter_index": target["chapter_index"],
@@ -1142,18 +1145,31 @@ def agent_review_submit():
             answer_map[question_id] = str(item.get("answer") or "").strip()
             revealed_map[question_id] = bool(item.get("revealed_without_answer"))
     timestamp = int(time.time())
-    lecture_id = str(data.get("lecture_id") or quiz.get("lecture_id") or "").strip()
-    book_id = str(data.get("book_id") or quiz.get("book_id") or "").strip()
-    chapter_index = _safe_int(data.get("chapter_index"), _safe_int(quiz.get("chapter_index"), 0))
-    chapter_name = str(data.get("chapter_name") or quiz.get("chapter_name") or "").strip()
+    # 成绩归属以题组自身的来源为准：题目是按哪本书哪一章出的，就记到哪一章。
+    # 端侧换书/换章后再提交旧题，请求里的 target 只作兜底（旧题组文件缺来源时才用）。
+    lecture_id = str(quiz.get("lecture_id") or data.get("lecture_id") or "").strip()
+    book_id = str(quiz.get("book_id") or data.get("book_id") or "").strip()
+    chapter_index = _safe_int(quiz.get("chapter_index"), _safe_int(data.get("chapter_index"), 0))
+    chapter_name = str(quiz.get("chapter_name") or data.get("chapter_name") or "").strip()
+    # 一次练习：带 attempt_id 时，幂等、累计、完成态都只看这一轮；不带则沿用旧语义（按 quiz_id 累计）。
+    attempt_id = str(data.get("attempt_id") or "").strip()
+    if attempt_id and not _valid_identifier(attempt_id, max_length=80):
+        return _failure(action, "INVALID_ARGUMENT", "attempt_id is invalid.")
     # 逐题结算：answers 非空时只结算带来的题；为空则按旧语义整卷结算（未作答按错）。
     partial = bool(answer_map)
     from core.cognition.review_bridge import completion_id_for, record_review_evidence
 
+    def _in_scope(row: Mapping[str, Any]) -> bool:
+        if str(row.get("quiz_id") or "") != quiz_id:
+            return False
+        if attempt_id:
+            return str(row.get("attempt_id") or "") == attempt_id
+        return True
+
     existing_completions = {
         str(row.get("completion_id") or "")
         for row in user_store.list_question_completions(_CFG, username) or []
-        if isinstance(row, Mapping) and str(row.get("quiz_id") or "") == quiz_id
+        if isinstance(row, Mapping) and _in_scope(row)
     }
     scored: list[Dict[str, Any]] = []
     correct = 0
@@ -1169,15 +1185,16 @@ def agent_review_submit():
         revealed_without_answer = (not user_answer) and (revealed_map.get(question_id, False) or not partial)
         if is_correct:
             correct += 1
-        completion_id = completion_id_for(quiz_id, question_id)
+        completion_id = completion_id_for(quiz_id, question_id, attempt_id)
         if completion_id in existing_completions:
-            # 同一题重复结算：第一次作数。
+            # 同一轮里同一题重复结算：第一次作数。
             scored.append({"question_id": question_id, "is_correct": is_correct, "duplicate": True})
             continue
         existing_completions.add(completion_id)
         user_store.append_question_completion(_CFG, username, {
             "completion_id": completion_id,
             "quiz_id": quiz_id,
+            "attempt_id": attempt_id,
             "question_id": question_id,
             "lecture_id": lecture_id,
             "book_id": book_id,
@@ -1192,6 +1209,7 @@ def agent_review_submit():
             _CFG, username, quiz_id=quiz_id, question=question, question_id=question_id,
             lecture_id=lecture_id, book_id=book_id, chapter_index=chapter_index, chapter_name=chapter_name,
             is_correct=is_correct, revealed_without_answer=revealed_without_answer, occurred_at=timestamp,
+            attempt_id=attempt_id,
         )
         if outcome.get("created"):
             evidence_written += 1
@@ -1199,17 +1217,22 @@ def agent_review_submit():
                        "evidence": bool(outcome.get("recorded")), "concept_id": str(outcome.get("concept_id") or "")})
     total = len(scored)
     score_text = f"{correct}/{total}" if total else "0/0"
-    # 整卷累计（逐题结算时每次都回报全卷进度）。
+    # 整卷累计（逐题结算时每次都回报全卷进度）：只算这一轮、且只算当前题组里存在的题。
+    current_ids = {
+        str(q.get("source_id") or q.get("question_id") or f"q{index}").strip()
+        for index, q in enumerate(questions) if isinstance(q, Mapping)
+    }
     quiz_rows = [row for row in user_store.list_question_completions(_CFG, username) or []
-                 if isinstance(row, Mapping) and str(row.get("quiz_id") or "") == quiz_id]
+                 if isinstance(row, Mapping) and _in_scope(row) and str(row.get("question_id") or "") in current_ids]
     settled_ids = {str(row.get("question_id") or "") for row in quiz_rows}
-    quiz_total = sum(1 for q in questions if isinstance(q, Mapping))
-    quiz_correct = sum(1 for row in quiz_rows if row.get("is_correct") is True)
+    quiz_total = len(current_ids)
+    quiz_correct = sum(1 for row in quiz_rows if row.get("is_correct") is True and str(row.get("question_id") or "") in settled_ids)
     quiz_settled = len(settled_ids)
     completed = quiz_settled >= quiz_total
     already_summarized = any(
         isinstance(row, Mapping) and str(row.get("type") or "") == "agent_event"
         and str(row.get("event") or "") == "quiz_submitted" and str(row.get("quiz_id") or "") == quiz_id
+        and (not attempt_id or str(row.get("attempt_id") or "") == attempt_id)
         for row in user_store.list_learning_records(_CFG, username) or []
     )
     if completed and not already_summarized:
@@ -1229,11 +1252,12 @@ def agent_review_submit():
             "event": "quiz_submitted",
             "event_id": f"rev_{uuid.uuid4().hex[:16]}",
             "quiz_id": quiz_id,
+            "attempt_id": attempt_id,
             "chapter_name": chapter_name,
             "timestamp": timestamp,
         })
     log_event("agent_review_submit", "复习结算", payload={
-        "user_id": username, "quiz_id": quiz_id, "score": score_text, "partial": partial,
+        "user_id": username, "quiz_id": quiz_id, "attempt_id": attempt_id, "score": score_text, "partial": partial,
         "settled": quiz_settled, "quiz_total": quiz_total, "evidence_written": evidence_written,
     })
     if any(not row.get("is_correct") for row in scored):
@@ -1246,6 +1270,7 @@ def agent_review_submit():
         _expire_stable_difficulties(username, lecture_id, book_id)
     return _response(action=action, data={
         "quiz_id": quiz_id,
+        "attempt_id": attempt_id,
         "score": score_text,
         "correct": correct,
         "total": total,
@@ -1253,8 +1278,14 @@ def agent_review_submit():
         "quiz_correct": quiz_correct,
         "quiz_total": quiz_total,
         "quiz_settled": quiz_settled,
+        "settled_ids": sorted(settled_ids),
         "completed": completed,
         "evidence_written": evidence_written,
+        # 成绩实际归到的来源（题组自身），端侧据此显示，不用请求里的当前选择。
+        "lecture_id": lecture_id,
+        "book_id": book_id,
+        "chapter_index": chapter_index,
+        "chapter_name": chapter_name,
     })
 
 
@@ -1451,6 +1482,16 @@ def _timeline_entries(records: list[Dict[str, Any]], limit: int = 100) -> list[D
                     "chapter": str(target.get("chapter_name") or "下一章"),
                     "minutes": int(row.get("estimated_minutes") or 25),
                     "why": str(row.get("reason") or ""),
+                    # 历史计划卡自带目标：「开始学习」打开的必须是卡片上写的那一章，而不是全局最新目标。
+                    "target": {
+                        "lecture_id": str(target.get("lecture_id") or ""),
+                        "lecture_title": str(target.get("lecture_title") or ""),
+                        "book_id": str(target.get("book_id") or ""),
+                        "book_title": str(target.get("book_title") or ""),
+                        "chapter_index": _safe_int(target.get("chapter_index"), -1),
+                        "chapter_name": str(target.get("chapter_name") or ""),
+                        "chapter_range": str(target.get("chapter_range") or ""),
+                    } if target else None,
                 },
                 "actions": [],
                 "unattended": False,

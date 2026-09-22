@@ -660,95 +660,130 @@ def _generate_profile_question_bank_questions(
             "think": generation_options["think"],
         },
     )
-    content = runner.run(
-        request_text,
-        context_payload={
-            "username": user_id,
-            "lecture_id": lecture_id,
-            "lecture_title": _safe_text(lecture.get("title")),
-        },
-        extra_prompt_vars={
-            "lecture_name": _safe_text(lecture.get("title")),
-            "lecture_id": lecture_id,
-            "book_name": _safe_text(book.get("title")),
-            "chapter_name": chapter_name,
-            "chapter_range": chapter_range,
-            "lecture_context_memory": _normalize_markdown(read_lecture_context_memory(dict(cfg or {}), user_id, lecture_id)),
-            "user_memory": _normalize_markdown(read_memory(dict(cfg or {}), user_id, "user")),
-            "chapter_detail_xml": loaded_chapter_detail_xml,
-            "chapter_context": loaded_chapter_context[:12000],
-            "coarse_bookinfo": str(load_book_info_xml(dict(cfg or {}), lecture_id, book_id) or ""),
-            "concept_catalog": concept_catalog,
-        },
-        model_name=model_name or None,
-        username=user_id,
-        api_mode=_safe_text(settings.get("api_mode")) or "chat",
-        request_timeout=request_timeout,
-        options=generation_options,
-        on_delta=on_delta,
-    )
-    rows = _parse_profile_question_blocks(content)
-    candidate_types = [
-        _normalize_question_type(
-            row.get("question_type"),
-            _normalize_options(row.get("question_options")),
+    extra_prompt_vars = {
+        "lecture_name": _safe_text(lecture.get("title")),
+        "lecture_id": lecture_id,
+        "book_name": _safe_text(book.get("title")),
+        "chapter_name": chapter_name,
+        "chapter_range": chapter_range,
+        "lecture_context_memory": _normalize_markdown(read_lecture_context_memory(dict(cfg or {}), user_id, lecture_id)),
+        "user_memory": _normalize_markdown(read_memory(dict(cfg or {}), user_id, "user")),
+        "chapter_detail_xml": loaded_chapter_detail_xml,
+        "chapter_context": loaded_chapter_context[:12000],
+        "coarse_bookinfo": str(load_book_info_xml(dict(cfg or {}), lecture_id, book_id) or ""),
+        "concept_catalog": concept_catalog,
+    }
+    context_payload = {
+        "username": user_id,
+        "lecture_id": lecture_id,
+        "lecture_title": _safe_text(lecture.get("title")),
+    }
+
+    # 结构校验失败不再一次判死：把校验错误原话喂回模型，最多再修一轮；
+    # 仍不合格但候选池已够拼出一组（至少 limit 道、其中 ≥2 道四选项选择题）时降级接受并留痕，
+    # 否则才把可读的中文原因抛给任务。2026-09-20 模拟器两次「候选池仅 3 道选择题」即此路径。
+    max_rounds = 2
+    content = ""
+    rows: List[Dict[str, Any]] = []
+    validation_error = ""
+    concept_validation_error = ""
+    for attempt in range(1, max_rounds + 1):
+        attempt_request = request_text
+        if attempt > 1 and (validation_error or concept_validation_error):
+            attempt_request = (
+                f"{request_text}\n上一次输出未通过校验：{validation_error or concept_validation_error}。"
+                "请严格按要求重新生成全部 6 道题（前 4 道四选项选择题，后 2 道文本题），只输出题目结构。"
+            )
+        content = runner.run(
+            attempt_request,
+            context_payload=context_payload,
+            extra_prompt_vars=extra_prompt_vars,
+            model_name=model_name or None,
+            username=user_id,
+            api_mode=_safe_text(settings.get("api_mode")) or "chat",
+            request_timeout=request_timeout,
+            options=generation_options,
+            on_delta=on_delta if attempt == 1 else None,
         )
-        for row in rows
-    ]
+        rows = _parse_profile_question_blocks(content)
+        candidate_types = [
+            _normalize_question_type(
+                row.get("question_type"),
+                _normalize_options(row.get("question_options")),
+            )
+            for row in rows
+        ]
 
-    log_event(
-        "chapter_quiz_profile_model_done",
-        "章节小测画像模型已返回完整结构化结果",
-        payload={
-            "user_id": user_id,
-            "lecture_id": lecture_id,
-            "book_id": book_id,
-            "chapter_name": chapter_name,
-            "duration_ms": round((time.monotonic() - generation_started_at) * 1000, 2),
-            "content_chars": len(str(content or "")),
-            "question_block_count": len(rows),
-            "choice_candidate_count": candidate_types.count("choice"),
-            "text_candidate_count": candidate_types.count("text"),
-        },
-    )
-    validation_error = validate_question_distribution(
-        rows,
-        expected_count=6,
-        minimum_choice_count=4,
-        maximum_text_count=2,
-    )
-
-    if validation_error:
         log_event(
-            "chapter_quiz_profile_generate_rejected",
-            "章节小测画像题结果未通过结构校验",
+            "chapter_quiz_profile_model_done",
+            "章节小测画像模型已返回完整结构化结果",
             payload={
                 "user_id": user_id,
                 "lecture_id": lecture_id,
                 "book_id": book_id,
                 "chapter_name": chapter_name,
-                "validation_error": validation_error,
+                "attempt": attempt,
+                "duration_ms": round((time.monotonic() - generation_started_at) * 1000, 2),
+                "content_chars": len(str(content or "")),
+                "question_block_count": len(rows),
+                "choice_candidate_count": candidate_types.count("choice"),
+                "text_candidate_count": candidate_types.count("text"),
             },
         )
-        raise ValueError(f"章节小测题目未通过结构校验：{validation_error}")
-
-    # 没有概念目录（课程尚无知识图谱）时，题目不可能绑定 concept_id，跳过绑定校验；
-    # 题目仍按正文生成，只是不进入认知状态统计。
-    concept_validation_error = validate_question_concept_bindings(rows, concept_candidates) if concept_candidates else ""
-
-    if concept_validation_error:
+        validation_error = validate_question_distribution(
+            rows,
+            expected_count=6,
+            minimum_choice_count=4,
+            maximum_text_count=2,
+        )
+        # 没有概念目录（课程尚无知识图谱）时，题目不可能绑定 concept_id，跳过绑定校验；
+        # 题目仍按正文生成，只是不进入认知状态统计。
+        concept_validation_error = (
+            validate_question_concept_bindings(rows, concept_candidates)
+            if concept_candidates and not validation_error else ""
+        )
+        if not validation_error and not concept_validation_error:
+            break
         log_event(
             "chapter_quiz_profile_generate_rejected",
-            "章节小测题目缺少有效知识概念绑定",
+            "章节小测画像题结果未通过结构校验" if validation_error else "章节小测题目缺少有效知识概念绑定",
             payload={
                 "user_id": user_id,
                 "lecture_id": lecture_id,
                 "book_id": book_id,
                 "chapter_name": chapter_name,
-                "validation_error": concept_validation_error,
+                "attempt": attempt,
+                "validation_error": validation_error or concept_validation_error,
+                "will_retry": attempt < max_rounds,
             },
         )
-        raise ValueError(f"章节小测题目未通过概念绑定校验：{concept_validation_error}")
+
+    if validation_error or concept_validation_error:
+        needed = max(1, int(limit or 3))
+        usable_choice = [
+            row for row in rows
+            if _normalize_question_type(row.get("question_type"), _normalize_options(row.get("question_options"))) == "choice"
+            and len(_normalize_options(row.get("question_options"))) == 4
+        ]
+        relaxed_ok = bool(validation_error) and len(rows) >= min(needed, 3) and len(usable_choice) >= min(2, needed)
+        if relaxed_ok:
+            log_event(
+                "chapter_quiz_profile_generate_relaxed",
+                "章节小测结构校验两轮未通过，候选池足够拼出一组，降级接受",
+                payload={
+                    "user_id": user_id,
+                    "lecture_id": lecture_id,
+                    "book_id": book_id,
+                    "chapter_name": chapter_name,
+                    "validation_error": validation_error,
+                    "question_block_count": len(rows),
+                    "usable_choice_count": len(usable_choice),
+                },
+            )
+        elif validation_error:
+            raise ValueError(f"这一章的题我出了两遍都不合格（{validation_error}），换一章或稍后再试。")
+        else:
+            raise ValueError(f"这一章的题没能对上知识图谱里的概念（{concept_validation_error}），换一章或稍后再试。")
 
     selected: List[Dict[str, Any]] = []
     question_group_raw = "|".join(

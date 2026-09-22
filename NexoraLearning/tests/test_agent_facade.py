@@ -693,6 +693,130 @@ class AgentFacadeTests(unittest.TestCase):
             self.assertTrue(any(len(text) > 400 for text in stored))
             self.assertTrue(any(long_answer[:200] in text for text in stored))
 
+    def _write_quiz(self, cfg, lecture, book, quiz_id: str, chapter_index: int = 0, chapter_name: str = "第一章 梯度下降"):
+        import json
+        from pathlib import Path
+
+        quiz_path = Path(cfg["data_dir"]) / "users" / "demo" / "chapter_quizzes" / f"{quiz_id}.json"
+        quiz_path.parent.mkdir(parents=True, exist_ok=True)
+        quiz_path.write_text(json.dumps({
+            "quiz_id": quiz_id, "lecture_id": lecture["id"], "book_id": book["id"],
+            "chapter_index": chapter_index, "chapter_name": chapter_name,
+            "questions": [
+                {"title": "梯度下降的方向", "content": "梯度下降沿什么方向更新", "type": "choice",
+                 "options": ["负梯度", "正梯度"], "answer": "A", "source_id": "q1"},
+                {"title": "学习率过大会怎样", "content": "学习率过大", "type": "choice",
+                 "options": ["发散", "收敛更快"], "answer": "A", "source_id": "q2"},
+            ],
+        }, ensure_ascii=False), encoding="utf-8")
+
+    def test_review_submit_attempts_are_isolated_and_score_uses_quiz_origin(self):
+        """2026-09-21 审查 P1：① 「再出一组」拿到同一 quiz_id 时，新一轮不能继承上一轮的完成态和成绩；
+        ② 端侧换书/换章后提交旧题，成绩归到题组自身的来源，而不是请求里的当前选择。"""
+        import tempfile
+        from pathlib import Path
+
+        from core import user as user_store
+
+        with tempfile.TemporaryDirectory() as directory:
+            app, cfg = _app(Path(directory))
+            lecture, book = _seed_course(cfg)
+            quiz_id = "chapter_quiz_attempts"
+            self._write_quiz(cfg, lecture, book, quiz_id)
+            client = app.test_client()
+            headers = {"X-Nexora-Username": "demo"}
+            base = {"quiz_id": quiz_id, "lecture_id": lecture["id"], "book_id": book["id"],
+                    "chapter_index": 0, "chapter_name": "第一章 梯度下降"}
+
+            # 第一轮：两题都结算，完成，1/2。
+            first = client.post("/api/agent/v1/review/submit", headers=headers, json={
+                **base, "attempt_id": "task_round_one",
+                "answers": [{"question_id": "q1", "answer": "负梯度"}, {"question_id": "q2", "answer": "收敛更快"}],
+            }).get_json()["data"]
+            self.assertTrue(first["completed"])
+            self.assertEqual(first["quiz_correct"], 1)
+            self.assertEqual(first["attempt_id"], "task_round_one")
+
+            # 第二轮：新 attempt 只结算第一题 → 不能因为上一轮已满而 completed，也不能带上一轮的分。
+            second = client.post("/api/agent/v1/review/submit", headers=headers, json={
+                **base, "attempt_id": "task_round_two",
+                "answers": [{"question_id": "q1", "answer": "负梯度"}],
+            }).get_json()["data"]
+            self.assertFalse(second["completed"])
+            self.assertEqual(second["quiz_settled"], 1)
+            self.assertEqual(second["quiz_correct"], 1)
+            self.assertEqual(second["settled_ids"], ["q1"])
+            self.assertFalse(second["items"][0].get("duplicate"))
+
+            # 第二轮把第二题也答对 → 这一轮 2/2，独立于第一轮的 1/2。
+            done = client.post("/api/agent/v1/review/submit", headers=headers, json={
+                **base, "attempt_id": "task_round_two",
+                "answers": [{"question_id": "q2", "answer": "发散"}],
+            }).get_json()["data"]
+            self.assertTrue(done["completed"])
+            self.assertEqual(done["quiz_correct"], 2)
+            # 两轮各自入账。
+            rows = [row for row in user_store.list_question_completions(cfg, "demo") if row.get("quiz_id") == quiz_id]
+            self.assertEqual(len(rows), 4)
+            self.assertEqual({row["attempt_id"] for row in rows}, {"task_round_one", "task_round_two"})
+            # 时间线两轮各出一次总结。
+            entries = client.get("/api/agent/v1/events", headers=headers).get_json()["data"]["entries"]
+            summaries = [item for item in entries if "这组题你对了" in str(item.get("text") or "")]
+            self.assertEqual(len(summaries), 2)
+
+            # 归属：请求里带另一本书另一章，成绩仍记到题组自己的来源。
+            other = client.post("/api/agent/v1/review/submit", headers=headers, json={
+                "quiz_id": quiz_id, "attempt_id": "task_round_three",
+                "lecture_id": lecture["id"], "book_id": "b_someone_else", "chapter_index": 7, "chapter_name": "别的章",
+                "answers": [{"question_id": "q1", "answer": "负梯度"}],
+            }).get_json()["data"]
+            self.assertEqual(other["book_id"], book["id"])
+            self.assertEqual(other["chapter_index"], 0)
+            self.assertEqual(other["chapter_name"], "第一章 梯度下降")
+            latest = [row for row in user_store.list_question_completions(cfg, "demo") if row.get("attempt_id") == "task_round_three"]
+            self.assertEqual(latest[0]["book_id"], book["id"])
+            self.assertEqual(latest[0]["chapter_name"], "第一章 梯度下降")
+
+    def test_review_plan_task_carries_attempt_id_and_plan_card_carries_target(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as directory:
+            app, cfg = _app(Path(directory))
+            lecture, book = _seed_course(cfg)
+            client = app.test_client()
+            headers = {"X-Nexora-Username": "demo"}
+            fake_quiz = {"quiz_id": "chapter_quiz_x", "questions": [{"title": "t", "content": "c", "type": "choice",
+                                                                       "options": ["a", "b"], "answer": "A", "source_id": "q1"}]}
+            with patch("api.agent_facade.load_or_create_chapter_quiz", return_value=fake_quiz):
+                created = client.post("/api/agent/v1/review-plan", headers=headers,
+                                      json={"lecture_id": lecture["id"], "book_id": book["id"], "chapter_index": 0, "limit": 3})
+                task_id = created.get_json()["data"]["task"]["task_id"]
+                deadline = time.time() + 5
+                result = None
+                while time.time() < deadline:
+                    task = client.get(f"/api/agent/v1/tasks/{task_id}", headers=headers).get_json()["data"]["task"]
+                    if task["status"] in {"completed", "failed"}:
+                        result = task
+                        break
+                    time.sleep(0.05)
+            self.assertIsNotNone(result)
+            self.assertEqual(result["status"], "completed")
+            self.assertEqual(result["result"]["attempt_id"], task_id)
+            self.assertEqual(result["result"]["quiz_id"], "chapter_quiz_x")
+
+            # 历史计划卡自带目标。
+            plan = client.post("/api/agent/v1/plan", headers=headers,
+                               json={"intent": "帮我安排今天的学习", "lecture_id": lecture["id"], "book_id": book["id"], "chapter_index": 1})
+            self.assertEqual(plan.status_code, 200)
+            entries = client.get("/api/agent/v1/events", headers=headers).get_json()["data"]["entries"]
+            cards = [item["card"] for item in entries if item.get("card") and item["card"].get("type") == "plan"]
+            self.assertTrue(cards)
+            target = cards[-1]["target"]
+            self.assertEqual(target["book_id"], book["id"])
+            self.assertEqual(target["chapter_index"], 1)
+            self.assertEqual(cards[-1]["chapter"], target["chapter_name"])
+
 
 if __name__ == "__main__":
     unittest.main()

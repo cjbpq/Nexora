@@ -40,6 +40,8 @@ function environment(realCache = false) {
   let baseUrl = 'http://fixture.invalid';
   let connected = true;
   let requestGate = null;
+  let httpHandler = null;
+  let identityGate = null;
   let flushGate = null;
   let flushGateStart = 1;
   let flushCount = 0;
@@ -51,6 +53,7 @@ function environment(realCache = false) {
   const cache = new Map();
   const storage = new Map();
   const requests = [];
+  const httpClients = [];
   let notifyRequest;
   const requestStarted = new Promise(resolve => { notifyRequest = resolve; });
   const telemetry = [];
@@ -80,7 +83,7 @@ function environment(realCache = false) {
   }) };
   const Identity = {
     current: () => username,
-    waitReady: async () => username,
+    waitReady: async () => { if (identityGate) await identityGate; return username; },
     isAuthenticated: () => username.length > 0,
     baseUrl: () => baseUrl,
     authHeaders: () => ({ 'X-Nexora-Username': username }),
@@ -89,23 +92,41 @@ function environment(realCache = false) {
   const http = {
     RequestMethod: { GET: 'GET', POST: 'POST' },
     HttpDataType: { STRING: 0 },
-    createHttp: () => ({
-      async request(url, options) {
-        requests.push({ url, body: JSON.parse(options.extraData || '{}'), headers: options.header });
-        notifyRequest();
-        if (requestGate) await requestGate;
-        if (!connected) throw new Error('fixture offline');
-        return { responseCode: 200, result: JSON.stringify({ success: true }) };
-      },
-      destroy() {},
-    }),
+    createHttp: () => {
+      const client = { destroyed: false, destroyCount: 0, abort: null };
+      httpClients.push(client);
+      return {
+        async request(url, options) {
+          const request = { url, body: JSON.parse(options.extraData || '{}'), headers: options.header, client };
+          requests.push(request);
+          notifyRequest();
+          const interrupted = new Promise((_resolve, reject) => { client.abort = reject; });
+          const response = (async () => {
+            if (httpHandler) return httpHandler(request);
+            if (requestGate) await requestGate;
+            if (!connected) throw new Error('fixture offline');
+            return { responseCode: 200, result: JSON.stringify({ success: true }) };
+          })();
+          try {
+            return await Promise.race([response, interrupted]);
+          } finally {
+            client.abort = null;
+          }
+        },
+        destroy() {
+          client.destroyed = true;
+          client.destroyCount++;
+          if (client.abort) client.abort(new Error('fixture request destroyed'));
+        },
+      };
+    },
   };
   class Clock extends Date {
     constructor(...args) { super(...(args.length ? args : [now])); }
     static now() { return now; }
   }
   const sharedTts = { stop() {}, release() {} };
-  const sharedLiveView = { startStudy() {}, stopStudy() {} };
+  const sharedLiveView = { startStudy() {}, stopStudy() {}, updateStudy() {} };
   const AppStorage = {
     get(key) { return key === 'nxUsername' ? username : (key === 'nxBaseUrl' ? baseUrl : storage.get(key)); },
     setOrCreate(key, value) { storage.set(key, value); },
@@ -120,7 +141,7 @@ function environment(realCache = false) {
       const name = source.match(/\bstruct (\w+)/)[1];
       source = withoutUiMethods(source) + '\nexports.' + name + ' = ' + name + ';';
       source = source.replace(/\bstruct /, 'class ')
-        .replace(/@(?:Entry|Component|State)\b/g, '')
+        .replace(/@(?:Entry|Component|State|Reusable|Prop)\b/g, '')
         .replace(/@(?:StorageProp|StorageLink|Watch)\([^)]*\)/g, '');
     }
     const result = ts.transpileModule(source, {
@@ -135,6 +156,7 @@ function environment(realCache = false) {
       AppStorage,
       SwiperController: class {},
       ListScroller: class {},
+      Scroller: class { scrollEdge() {} isAtEnd() { return true; } currentOffset() { return { xOffset: 0, yOffset: 0 }; } },
       setTimeout(callback, ms) { const id = nextTimer++; timers.set(id, { callback, ms, once: true }); return id; },
       setInterval(callback, ms) { const id = nextTimer++; timers.set(id, { callback, ms }); return id; },
       clearTimeout(id) { timers.delete(id); },
@@ -144,6 +166,10 @@ function environment(realCache = false) {
         if (specifier.endsWith('/Identity') || specifier === './Identity') return { Identity };
         if (specifier.endsWith('/Env')) return { NxEnv };
         if (specifier.endsWith('/ReadingState')) return load('services/ReadingState');
+        if (specifier.endsWith('/SoftGlowState')) return load('services/SoftGlowState');
+        if (specifier.endsWith('/ReplyCancellation')) return load('services/ReplyCancellation');
+        if (specifier.endsWith('/AmbientTokens')) return load('theme/AmbientTokens');
+        if (specifier.endsWith('TimelineRows')) return load('components/entry/TimelineRows');
         if (specifier.endsWith('/ReaderApi')) return readerMock ? { ReaderApi: ReaderTransport } : load('services/ReaderApi');
         if (specifier.endsWith('/ReportApi')) return { ReportApi: class {} };
         if (specifier.endsWith('/AgentApi')) return { AgentApi: class {
@@ -153,6 +179,7 @@ function environment(realCache = false) {
         if (specifier.endsWith('/liveview')) return { sharedLiveView };
         if (specifier === '@kit.NetworkKit') return { http };
         if (specifier === '@kit.ArkData') return { preferences };
+        if (specifier === '@kit.ArkTS') return { url: { URL: { parseURL: value => new URL(value) } } };
         if (specifier === '@kit.ArkUI') return {
           router: { getParams: () => ({}) },
           MeasureText: { measureTextSize: ({ textContent }) => ({ height: textContent.length * 2 }) },
@@ -224,11 +251,14 @@ function environment(realCache = false) {
   async function settle() { for (let i = 0; i < 20; i++) await Promise.resolve(); }
   if (realCache) sharedCache = load('services/cache/CacheStore').sharedCache;
   return {
-    reader, load, tick, pageChange, settle, requestStarted, requests, telemetry, checkpoints, flowEvents, cache, storage,
+    reader, load, tick, pageChange, settle, requestStarted, requests, httpClients, telemetry, checkpoints, flowEvents, cache, storage,
     setConnected(value) { connected = value; },
     setUsername(value) { username = value; },
     setBaseUrl(value) { baseUrl = value; },
     setGate(value) { requestGate = value; },
+    setHttpHandler(value) { httpHandler = value; },
+    setIdentityGate(value) { identityGate = value; },
+    setNow(value) { now = value; },
     initCache() { sharedCache.init({}); },
     setFlushGate(value, start = 1) { flushGate = value; flushGateStart = start; },
     waitForFlush(count) {
@@ -725,3 +755,5 @@ for (const change of ['account', 'backend']) {
     assert.equal(state.nxPendingReading(originalScope).length, 1);
   });
 }
+
+module.exports = { environment };
