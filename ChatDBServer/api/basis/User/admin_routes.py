@@ -21,7 +21,8 @@ from flask import current_app, jsonify, request, session
 from App.Utils import resolve_configured_path, safe_join_path
 from basis.Permission import require_admin
 from basis.Permission.model_permissions import get_user_model_blacklist
-from basis.TokenUsage import dedupe_token_log_records, iter_papi_token_log_entries, read_usage_log_records
+from basis.TokenUsage import build_log_billing, dedupe_token_log_records, iter_papi_token_log_entries, read_usage_log_records, usage_record_total_tokens
+from basis.Config import filter_archived_models, load_models_config
 from basis.User import load_users, save_users
 
 from .routes import build_user_avatar_url, get_local_mail_profile, user_bp
@@ -53,18 +54,7 @@ def _resolve_user_data_path(user_id, info):
 
 
 def _safe_token_total(log):
-    if not isinstance(log, dict):
-        return 0
-
-    total = log.get('total_tokens', None)
-
-    if total is None:
-        total = log.get('input_tokens', 0) + log.get('output_tokens', 0)
-
-    try:
-        return max(0, int(total or 0))
-    except Exception:
-        return 0
+    return usage_record_total_tokens(log)
 
 
 def _is_safe_username(username) -> bool:
@@ -78,31 +68,35 @@ def admin_get_users():
     """获取所有用户信息"""
     try:
         users = load_users()
+        include_usage = str(request.args.get('include_usage', '1')).strip().lower() in {'1', 'true', 'yes'}
+        models_config = load_models_config() if include_usage else None
         papi_totals = {}
+        papi_billing = {}
 
-        for log in dedupe_token_log_records(list(iter_papi_token_log_entries()), 'papi'):
-            username = str(log.get('username') or '').strip()
+        if include_usage:
+            for log in dedupe_token_log_records(list(iter_papi_token_log_entries()), 'papi'):
+                username = str(log.get('username') or '').strip()
 
-            if username:
-                papi_totals[username] = papi_totals.get(username, 0) + _safe_token_total(log)
+                if username:
+                    papi_totals[username] = papi_totals.get(username, 0) + _safe_token_total(log)
+                    billing = build_log_billing(log, models_config=models_config)
+                    if username not in papi_billing:
+                        papi_billing[username] = {
+                            'cost': 0.0,
+                            'unpriced_records': 0,
+                        }
+                    if billing.get('cost') is None:
+                        papi_billing[username]['unpriced_records'] += 1
+                    else:
+                        papi_billing[username]['cost'] += float(billing.get('cost', 0.0) or 0.0)
 
         user_list = []
         for user_id, info in users.items():
-            # 计算总 token 消耗 (从 token_usage.json 读取)
             total_tokens = 0
-            user_path = _resolve_user_data_path(user_id, info)
-            user_token_file = safe_join_path(user_path, 'token_usage.json')
-            try:
-                tokens = dedupe_token_log_records(read_usage_log_records(user_token_file), 'chat')
+            total_cost = float(papi_billing.get(str(user_id), {}).get('cost', 0.0) or 0.0)
+            unpriced_records = int(papi_billing.get(str(user_id), {}).get('unpriced_records', 0) or 0)
 
-                for log in tokens:
-                    total_tokens += _safe_token_total(log)
-            except Exception as e:
-                current_app.logger.warning('admin user token usage load failed for %s: %s', user_id, e)
-
-            total_tokens += papi_totals.get(str(user_id), 0)
-
-            user_list.append({
+            user_item = {
                 'user_id': user_id,
                 'username': info.get('display_name', user_id),
                 'has_password': bool(info.get('password')),
@@ -110,10 +104,37 @@ def admin_get_users():
                 'last_ip': info.get('last_ip', '未知'),
                 'last_login': info.get('last_login'),
                 'created_at': info.get('created_at'),
-                'total_token_usage': total_tokens,
                 'avatar_url': build_user_avatar_url(user_id, info),
                 'local_mail': get_local_mail_profile(info)
-            })
+            }
+
+            if include_usage:
+                user_path = _resolve_user_data_path(user_id, info)
+                user_token_file = safe_join_path(user_path, 'token_usage.json')
+
+                try:
+                    tokens = dedupe_token_log_records(read_usage_log_records(user_token_file), 'chat')
+
+                    for log in tokens:
+                        total_tokens += _safe_token_total(log)
+                        billing = build_log_billing(log, models_config=models_config)
+
+                        if billing.get('cost') is None:
+                            unpriced_records += 1
+                        else:
+                            total_cost += float(billing.get('cost', 0.0) or 0.0)
+                except Exception as e:
+                    current_app.logger.warning('admin user token usage load failed for %s: %s', user_id, e)
+
+                total_tokens += papi_totals.get(str(user_id), 0)
+                user_item.update({
+                    'total_token_usage': total_tokens,
+                    'total_billing_cost': round(total_cost, 8),
+                    'billing_currency': 'CNY',
+                    'unpriced_billing_records': unpriced_records,
+                })
+
+            user_list.append(user_item)
         user_list.sort(key=lambda x: (x['role'] != 'admin', x['user_id']))
         return jsonify({'success': True, 'users': user_list})
     except Exception as e:
@@ -312,7 +333,7 @@ def admin_get_user_models(target_username=None):
 
     try:
         config = _get_config_all()
-        all_models = config.get('models', {})
+        all_models = filter_archived_models(config.get('models', {}))
         blacklist = get_user_model_blacklist(target_username)
 
         models = []

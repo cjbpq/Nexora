@@ -48,6 +48,9 @@ export interface ChatMessage {
     model?: { name?: string; provider?: string }
     summary?: string
     usage?: Record<string, number>
+    /** 最后一轮与整次 assistant 回复累计 I/O token */
+    io_tokens_window?: Record<string, number>
+    io_tokens_cumulative?: Record<string, number>
     trace?: {
         events?: Array<Record<string, unknown>>
         tool_calls?: Array<Record<string, unknown>>
@@ -229,6 +232,28 @@ export async function updateMessageContent(conversationId: string, messageIndex:
         {
             method: 'PUT',
             body: JSON.stringify({ content: String(content || '') }),
+        }
+    )
+}
+
+/**
+ * question 工具作答登记(POST .../question/resolve):
+ * 服务端把 resolved/answer 回写进会话文件,历史加载时据此锁定作答卡片,
+ * 使回答锁跨设备生效(本地 localStorage 锁仅覆盖当前设备会话内状态)。
+ */
+export async function resolveConversationQuestion(
+    conversationId: string,
+    questionId: string,
+    answer: string,
+): Promise<void> {
+    await apiFetch<{ success: boolean }>(
+        `/api/conversations/${encodeURIComponent(conversationId)}/question/resolve`,
+        {
+            method: 'POST',
+            body: JSON.stringify({
+                question_id: String(questionId || '').trim(),
+                answer: String(answer || '').trim(),
+            }),
         }
     )
 }

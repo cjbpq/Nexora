@@ -20,14 +20,19 @@ from flask import Blueprint, current_app, jsonify, request, session
 
 from App.Runtime import get_service_status_monitor
 from App.Utils import resolve_configured_path, safe_join_path
+from basis.Config import load_models_config
 from basis.Permission import require_admin, require_login
 from basis.TokenUsage import (
+    build_log_billing,
     dedupe_token_log_records,
     is_usage_log_path,
     iter_papi_image_log_entries,
     iter_papi_token_log_entries,
+    merge_billing_totals,
     read_usage_log_records,
     replace_usage_log_records,
+    round_billing_amount,
+    usage_record_total_tokens,
 )
 from basis.User import load_users, save_users
 
@@ -100,11 +105,7 @@ def _status_normalize_token_log_entry(raw: Dict[str, Any]) -> Dict[str, Any]:
     log = dict(src)
     input_tokens = _safe_int_status(log.get('input_tokens', 0))
     output_tokens = _safe_int_status(log.get('output_tokens', 0))
-    total_raw = log.get('total_tokens', None)
-    if total_raw is None:
-        total_tokens = input_tokens + output_tokens
-    else:
-        total_tokens = _safe_int_status(total_raw, input_tokens + output_tokens)
+    total_tokens = usage_record_total_tokens(log)
     log['input_tokens'] = input_tokens
     log['output_tokens'] = output_tokens
     log['total_tokens'] = total_tokens
@@ -791,15 +792,7 @@ def build_status_overview() -> Dict[str, Any]:
             input_tokens = _safe_int_status(log.get('input_tokens', 0), 0)
             output_tokens = _safe_int_status(log.get('output_tokens', 0), 0)
             token_details = log.get('token_details') if isinstance(log.get('token_details'), dict) else {}
-            raw_input_tokens = _safe_int_status(
-                token_details.get('raw_input_tokens', input_tokens),
-                input_tokens
-            )
-            recorded_total = _safe_int_status(log.get('total_tokens', 0), 0)
-            if raw_input_tokens > 0 or output_tokens > 0:
-                total = raw_input_tokens + output_tokens
-            else:
-                total = recorded_total
+            total = usage_record_total_tokens(log)
             ts_dt = _status_parse_timestamp(timestamp)
             prev = deduped_token_logs.get(key)
             if prev is None or total >= _safe_int_status(prev.get('total_tokens', 0)):
@@ -976,10 +969,7 @@ def build_status_overview() -> Dict[str, Any]:
 
         input_tokens = _safe_int_status(log.get('input_tokens', 0), 0)
         output_tokens = _safe_int_status(log.get('output_tokens', 0), 0)
-        total = log.get('total_tokens', None)
-        if total is None:
-            total = input_tokens + output_tokens
-        total = _safe_int_status(total, 0)
+        total = usage_record_total_tokens(log)
         total_tokens += total
 
         model_raw = str(log.get('model') or 'unknown').strip() or 'unknown'
@@ -1329,6 +1319,14 @@ def admin_token_stats():
     """获取所有用户的总 token 消耗"""
     try:
         total_tokens = 0
+        billing_totals = {
+            'cost': 0.0,
+            'input_cost': 0.0,
+            'output_cost': 0.0,
+            'cache_hit_cost': 0.0,
+            'unpriced_records': 0,
+        }
+        models_config = load_models_config()
         user_dir = safe_join_path(BASE_DIR, "data", "users")
         for username in os.listdir(user_dir):
             token_file = safe_join_path(user_dir, username, "token_usage.json")
@@ -1336,24 +1334,25 @@ def admin_token_stats():
                 logs = _status_dedupe_token_logs(read_usage_log_records(token_file), 'chat')
 
                 for log in logs:
-                    t = log.get('total_tokens', None)
-
-                    if t is None:
-                        t = log.get('input_tokens', 0) + log.get('output_tokens', 0)
-
-                    total_tokens += int(t or 0)
+                    total_tokens += usage_record_total_tokens(log)
+                    merge_billing_totals(billing_totals, build_log_billing(log, models_config=models_config))
             except Exception as e:
                 current_app.logger.warning('admin token stats load failed for %s: %s', username, e)
 
         for log in _status_dedupe_token_logs(list(iter_papi_token_log_entries()), 'papi'):
-            t = log.get('total_tokens', None)
+            total_tokens += usage_record_total_tokens(log)
+            merge_billing_totals(billing_totals, build_log_billing(log, models_config=models_config))
 
-            if t is None:
-                t = log.get('input_tokens', 0) + log.get('output_tokens', 0)
-
-            total_tokens += int(t or 0)
-
-        return jsonify({'success': True, 'total': total_tokens})
+        return jsonify({
+            'success': True,
+            'total': total_tokens,
+            'total_cost': round_billing_amount(billing_totals.get('cost', 0.0)),
+            'input_cost': round_billing_amount(billing_totals.get('input_cost', 0.0)),
+            'output_cost': round_billing_amount(billing_totals.get('output_cost', 0.0)),
+            'cache_hit_cost': round_billing_amount(billing_totals.get('cache_hit_cost', 0.0)),
+            'unpriced_records': int(billing_totals.get('unpriced_records', 0) or 0),
+            'currency': 'CNY',
+        })
     except Exception as e:
         return jsonify({'success': False, 'message': str(e)})
 
@@ -1377,23 +1376,19 @@ def _admin_token_stats_range_start(range_name: str) -> Optional[datetime]:
     return now - timedelta(days=30)
 
 
-def _admin_normalize_token_log_for_user(log: Dict[str, Any], source: str) -> Dict[str, Any]:
+def _admin_normalize_token_log_for_user(
+    log: Dict[str, Any],
+    source: str,
+    models_config: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     src = log if isinstance(log, dict) else {}
     input_tokens = _safe_int_status(src.get('input_tokens', 0), 0)
     output_tokens = _safe_int_status(src.get('output_tokens', 0), 0)
-    total_tokens = src.get('total_tokens')
-
-    if total_tokens is None:
-        total_tokens = input_tokens + output_tokens
-
-    total_tokens = _safe_int_status(total_tokens, input_tokens + output_tokens)
-
-    if total_tokens <= 0 and (input_tokens > 0 or output_tokens > 0):
-        total_tokens = input_tokens + output_tokens
+    total_tokens = usage_record_total_tokens(src)
 
     timestamp = str(src.get('timestamp') or '').strip()
 
-    return {
+    normalized = {
         'log_id': str(src.get('log_id') or src.get('id') or '').strip(),
         'timestamp': timestamp,
         'timestamp_dt': _status_parse_timestamp(timestamp),
@@ -1413,9 +1408,14 @@ def _admin_normalize_token_log_for_user(log: Dict[str, Any], source: str) -> Dic
         'total_tokens': total_tokens,
         'duration_ms': _safe_int_status(src.get('duration_ms', 0), 0),
     }
+    normalized['billing'] = build_log_billing(src, models_config=models_config)
+    return normalized
 
 
-def _admin_collect_user_token_logs(username: str) -> List[Dict[str, Any]]:
+def _admin_collect_user_token_logs(
+    username: str,
+    models_config: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
     target_username = str(username or '').strip()
     user_path = _status_resolve_user_path(target_username)
     logs: List[Dict[str, Any]] = []
@@ -1425,7 +1425,7 @@ def _admin_collect_user_token_logs(username: str) -> List[Dict[str, Any]]:
         'chat',
     ):
         if isinstance(item, dict):
-            logs.append(_admin_normalize_token_log_for_user(item, 'chat'))
+            logs.append(_admin_normalize_token_log_for_user(item, 'chat', models_config=models_config))
 
     for item in _status_dedupe_token_logs(list(iter_papi_token_log_entries()), 'papi'):
         if not isinstance(item, dict):
@@ -1434,14 +1434,15 @@ def _admin_collect_user_token_logs(username: str) -> List[Dict[str, Any]]:
         if str(item.get('username') or '').strip() != target_username:
             continue
 
-        logs.append(_admin_normalize_token_log_for_user(item, 'papi'))
+        logs.append(_admin_normalize_token_log_for_user(item, 'papi', models_config=models_config))
 
     return logs
 
 
 def _admin_build_user_token_stats(username: str, range_name: str) -> Dict[str, Any]:
     range_start = _admin_token_stats_range_start(range_name)
-    all_logs = _admin_collect_user_token_logs(username)
+    models_config = load_models_config()
+    all_logs = _admin_collect_user_token_logs(username, models_config=models_config)
     filtered_logs: List[Dict[str, Any]] = []
 
     for log in all_logs:
@@ -1452,9 +1453,9 @@ def _admin_build_user_token_stats(username: str, range_name: str) -> Dict[str, A
 
         filtered_logs.append(log)
 
-    provider_totals: Dict[str, Dict[str, int]] = {}
-    model_totals: Dict[str, Dict[str, int]] = {}
-    source_totals: Dict[str, Dict[str, int]] = {}
+    provider_totals: Dict[str, Dict[str, Any]] = {}
+    model_totals: Dict[str, Dict[str, Any]] = {}
+    source_totals: Dict[str, Dict[str, Any]] = {}
     total_input = 0
     total_output = 0
     total_tokens = 0
@@ -1462,11 +1463,18 @@ def _admin_build_user_token_stats(username: str, range_name: str) -> Dict[str, A
     papi_output_tokens = 0
     papi_total_tokens = 0
     papi_requests = 0
+    billing_totals = {
+        'cost': 0.0,
+        'input_cost': 0.0,
+        'output_cost': 0.0,
+        'cache_hit_cost': 0.0,
+        'unpriced_records': 0,
+    }
 
     for log in filtered_logs:
         input_tokens = _safe_int_status(log.get('input_tokens', 0), 0)
         output_tokens = _safe_int_status(log.get('output_tokens', 0), 0)
-        tokens = _safe_int_status(log.get('total_tokens', 0), input_tokens + output_tokens)
+        tokens = usage_record_total_tokens(log)
         provider = str(log.get('provider') or 'unknown').strip() or 'unknown'
         model = str(log.get('model') or 'unknown').strip() or 'unknown'
         source = str(log.get('source') or 'chat').strip() or 'chat'
@@ -1474,6 +1482,7 @@ def _admin_build_user_token_stats(username: str, range_name: str) -> Dict[str, A
         total_input += input_tokens
         total_output += output_tokens
         total_tokens += tokens
+        merge_billing_totals(billing_totals, log.get('billing', {}))
 
         if source == 'papi':
             papi_input_tokens += input_tokens
@@ -1486,9 +1495,12 @@ def _admin_build_user_token_stats(username: str, range_name: str) -> Dict[str, A
             (model_totals, model),
             (source_totals, source),
         ):
-            row = bucket.setdefault(key, {'tokens': 0, 'requests': 0})
+            row = bucket.setdefault(key, {'tokens': 0, 'requests': 0, 'cost': 0.0})
             row['tokens'] += tokens
             row['requests'] += 1
+
+            if log.get('billing', {}).get('cost') is not None:
+                row['cost'] += float(log.get('billing', {}).get('cost', 0.0) or 0.0)
 
     recent = sorted(
         filtered_logs,
@@ -1496,9 +1508,14 @@ def _admin_build_user_token_stats(username: str, range_name: str) -> Dict[str, A
         reverse=True
     )[:20]
 
-    def _top_rows(bucket: Dict[str, Dict[str, int]], limit: int) -> List[Dict[str, Any]]:
+    def _top_rows(bucket: Dict[str, Dict[str, Any]], limit: int) -> List[Dict[str, Any]]:
         rows = [
-            {'name': key, 'tokens': value.get('tokens', 0), 'requests': value.get('requests', 0)}
+            {
+                'name': key,
+                'tokens': value.get('tokens', 0),
+                'requests': value.get('requests', 0),
+                'cost': round_billing_amount(value.get('cost', 0.0)),
+            }
             for key, value in bucket.items()
         ]
         return sorted(rows, key=lambda item: item['tokens'], reverse=True)[:limit]
@@ -1517,6 +1534,12 @@ def _admin_build_user_token_stats(username: str, range_name: str) -> Dict[str, A
             'papi_input_tokens': papi_input_tokens,
             'papi_output_tokens': papi_output_tokens,
             'papi_total_tokens': papi_total_tokens,
+            'cost': round_billing_amount(billing_totals.get('cost', 0.0)),
+            'input_cost': round_billing_amount(billing_totals.get('input_cost', 0.0)),
+            'output_cost': round_billing_amount(billing_totals.get('output_cost', 0.0)),
+            'cache_hit_cost': round_billing_amount(billing_totals.get('cache_hit_cost', 0.0)),
+            'unpriced_records': int(billing_totals.get('unpriced_records', 0) or 0),
+            'currency': 'CNY',
         },
         'top_providers': _top_rows(provider_totals, 8),
         'top_models': _top_rows(model_totals, 10),
@@ -1532,6 +1555,8 @@ def _admin_build_user_token_stats(username: str, range_name: str) -> Dict[str, A
                 'output_tokens': _safe_int_status(item.get('output_tokens', 0), 0),
                 'total_tokens': _safe_int_status(item.get('total_tokens', 0), 0),
                 'duration_ms': _safe_int_status(item.get('duration_ms', 0), 0),
+                'cost': item.get('billing', {}).get('cost'),
+                'billing_estimated': bool(item.get('billing', {}).get('estimated', False)),
             }
             for item in recent
         ],
@@ -1925,11 +1950,14 @@ def admin_token_timeseries():
             'input_tokens': 0,
             'output_tokens': 0,
             'total_tokens': 0,
-            'requests': 0
+            'requests': 0,
+            'cost': 0.0,
+            'unpriced_records': 0,
         }
 
     provider_totals = {}
     model_totals = {}
+    models_config = load_models_config()
 
     def add_log(log: Dict[str, Any]) -> None:
         if not isinstance(log, dict):
@@ -1947,30 +1975,36 @@ def admin_token_timeseries():
 
         in_tokens = _safe_int_status(log.get('input_tokens', 0), 0)
         out_tokens = _safe_int_status(log.get('output_tokens', 0), 0)
-        total = log.get('total_tokens', None)
-
-        if total is None:
-            total = in_tokens + out_tokens
-
-        total = _safe_int_status(total, in_tokens + out_tokens)
+        total = usage_record_total_tokens(log)
         buckets[day]['input_tokens'] += in_tokens
         buckets[day]['output_tokens'] += out_tokens
         buckets[day]['total_tokens'] += total
         buckets[day]['requests'] += 1
 
+        billing = build_log_billing(log, models_config=models_config)
+
+        if billing.get('cost') is None:
+            buckets[day]['unpriced_records'] += 1
+        else:
+            buckets[day]['cost'] += float(billing.get('cost', 0.0) or 0.0)
+
         provider = str(log.get('provider') or 'unknown').strip() or 'unknown'
         model = str(log.get('model') or 'unknown').strip() or 'unknown'
 
         if provider not in provider_totals:
-            provider_totals[provider] = {'tokens': 0, 'requests': 0}
+            provider_totals[provider] = {'tokens': 0, 'requests': 0, 'cost': 0.0}
 
         if model not in model_totals:
-            model_totals[model] = {'tokens': 0, 'requests': 0}
+            model_totals[model] = {'tokens': 0, 'requests': 0, 'cost': 0.0}
 
         provider_totals[provider]['tokens'] += total
         provider_totals[provider]['requests'] += 1
         model_totals[model]['tokens'] += total
         model_totals[model]['requests'] += 1
+
+        if billing.get('cost') is not None:
+            provider_totals[provider]['cost'] += float(billing.get('cost', 0.0) or 0.0)
+            model_totals[model]['cost'] += float(billing.get('cost', 0.0) or 0.0)
 
     user_dir = safe_join_path(BASE_DIR, "data", "users")
 
@@ -1989,15 +2023,33 @@ def admin_token_timeseries():
         'output_tokens': [buckets[d]['output_tokens'] for d in labels],
         'total_tokens': [buckets[d]['total_tokens'] for d in labels],
         'requests': [buckets[d]['requests'] for d in labels],
+        'cost': [round_billing_amount(buckets[d]['cost']) for d in labels],
+        'unpriced_records': [buckets[d]['unpriced_records'] for d in labels],
     }
 
     top_providers = sorted(
-        [{'name': k, 'tokens': v['tokens'], 'requests': v['requests']} for k, v in provider_totals.items()],
+        [
+            {
+                'name': k,
+                'tokens': v['tokens'],
+                'requests': v['requests'],
+                'cost': round_billing_amount(v.get('cost', 0.0)),
+            }
+            for k, v in provider_totals.items()
+        ],
         key=lambda x: x['tokens'],
         reverse=True
     )[:8]
     top_models = sorted(
-        [{'name': k, 'tokens': v['tokens'], 'requests': v['requests']} for k, v in model_totals.items()],
+        [
+            {
+                'name': k,
+                'tokens': v['tokens'],
+                'requests': v['requests'],
+                'cost': round_billing_amount(v.get('cost', 0.0)),
+            }
+            for k, v in model_totals.items()
+        ],
         key=lambda x: x['tokens'],
         reverse=True
     )[:10]

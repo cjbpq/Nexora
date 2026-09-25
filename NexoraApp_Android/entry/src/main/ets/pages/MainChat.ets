@@ -9,21 +9,24 @@
 // 页面级统一 @State 持有进程单例（见工程约定），弹层收敛到单个 bindSheet
 
 import { hilog } from '@kit.PerformanceAnalysisKit';
-import { promptAction } from '@kit.ArkUI';
+import { display, promptAction } from '@kit.ArkUI';
 import { ApiService } from '../common/ApiService';
 import { AppState } from '../common/AppState';
 import { ConversationItem, greetingOfHour, KnowledgeItem, QuickAction, QUICK_ACTIONS, sanitizeDisplayName } from '../common/AppConfig';
 import { ChatMessage, TokenUsage, ToolResultPayload } from '../common/ChatTypes';
-import { chatStream, StreamListener } from '../common/ChatStreamClient';
+import { chatStream, StreamListener, StreamOptions } from '../common/ChatStreamClient';
 import { LiveViewController } from '../common/LiveViewController';
-import { MapRendererConfig } from '../common/MapRendererConfig';
-import { QuestionItem, readQuestionLock, writeQuestionLock } from '../common/QuestionLocks';
+import { NextFrameCallback } from '../common/NextFrame';
 import { FontSize, Glow, Motion, Radius, Shadow, Size, Space, StaggerDelay } from '../common/DesignToken';
 import { ChatInputBar } from '../components/ChatInputBar';
 import { QuickActionGrid } from '../components/QuickActionGrid';
+import { ChatItemBuilder } from '../common/ChatItemBuilder';
+import { ChatItemDataSource } from '../common/ChatItemDataSource';
+import { ChatRenderItem } from '../common/ChatRenderItem';
+import { QuestionItem, readQuestionLock, writeQuestionLock } from '../common/QuestionLocks';
+import { ChatItemRow } from '../components/chat/ChatItemRow';
+import { ChatScrollOverlay, ChatScrollOverlayState } from '../components/chat/ChatScrollOverlay';
 import { ImageViewer } from '../components/chat/ImageViewer';
-import { MessageBubble } from '../components/chat/MessageBubble';
-import { TurnIndicatorPanel } from '../components/chat/TurnIndicatorPanel';
 import { IconButton } from '../components/common/IconButton';
 import { UserAvatar } from '../components/common/UserAvatar';
 import { ModelPickerSheet } from '../components/sheets/ModelPickerSheet';
@@ -31,16 +34,42 @@ import { SettingsSheet } from '../components/sheets/SettingsSheet';
 import { KnowledgeEditorSheet } from '../components/sheets/KnowledgeEditorSheet';
 import { SidebarPanel } from '../components/sidebar/SidebarPanel';
 import { MailPage } from '../components/mail/MailPage';
+import { NotesPage } from '../components/notes/NotesPage';
+import { LearningPage } from '../components/learning/LearningPage';
 
 const DOMAIN: number = 0x0001;
 const TAG: string = 'NexoraMain';
 const TITLE_MAX_LENGTH: number = 18;
 // 侧栏抽屉宽度：固定 vp，translate 用 -100% 相对自身宽，隐藏时刚好滑出屏幕
 const DRAWER_WIDTH: number = 304;
-// 侧栏滑动结束后继续抑制行点击的时长(ms)：快速滑动回收抽屉时，
-// 行的 onClick 可能紧随手势结束触发，导致莫名跳转对话
-const SIDEBAR_CLICK_GUARD_MS: number = 220;
-
+// 上滑历史分页条数：前插的行都没被测量过，列表只能用「已测行平均高度」估算补偿量，
+// 误差与插入行数成正比 —— 20 条一页会偏掉近两屏，6 条一页只偏半屏（跳变随页变小）
+const HISTORY_PAGE_SIZE: number = 6;
+// 触底校验延时（ms）：等该次 scrollEdge 的布局与索引上报完成
+const BOTTOM_SETTLE_DELAY: number = 56;
+// 触底最大重试次数：引擎对内容边界的认知来自未测量行的行高估算，需逐次逼近
+const BOTTOM_MAX_ATTEMPTS: number = 12;
+// 程序滚动（定位 / 触底 / 回底）后屏蔽触顶分页的时长（ms）
+const JUMP_PAGINATION_HOLD: number = 240;
+// 触顶判定要求的连续贴顶帧数：估算修正会让视口单帧路过索引 0，一帧就触发会连锁前插
+const TOP_TRIGGER_STREAK: number = 3;
+// 前插落地后的分页静默期（ms）：给列表留出修正估算的时间，静默期内不再前插
+const PREPEND_PAGINATION_HOLD: number = 2000;
+// 滚动来源追踪只保留一次手势末尾的少量样本，在停止时汇总输出，不在滚动帧里打印日志。
+const SCROLL_SOURCE_TRACE_CAP: number = 64;
+// 轮次跳转高亮的保持时长（ms）
+const HIGHLIGHT_DURATION: number = 3000;
+// 预取窗口（行）。maxCount 既是销毁线、也是空闲时向上/下预加载的行数。
+//
+// 曾经把窗口放大到 48/192，想「用静态期把行建好、别在滚动期建」——方向错了：
+// 引擎会就地预建到 maxCount，打开会话后一次性建出 212 行（整份会话），
+// 每行约 470 KB 原生堆（冷启动实测：61 MB → 159 MB，线性），
+// ArkTS 堆到 171 MB 后老年代并发标记变成每秒一轮，标记/压实 STW 300~500 ms。
+// 于是「每秒冻一次」——滚动期任何编排都碰不到这条路径。
+// 现在按「只留视口附近」配置：视口约 15~25 行（行高 30~56vp）+ 两侧半屏预取。
+// min=8 / max=16 给惯性滚动留出已完成创建与测量的跑道，减少视口边缘首次布局。
+const CACHE_MIN_ROWS: number = 8;
+const CACHE_MAX_ROWS: number = 16;
 @Component
 export struct MainChat {
     // 页面级统一用 @State 本地持有进程单例（@Observed 加持，字段级变化驱动本页刷新）
@@ -62,8 +91,8 @@ export struct MainChat {
     @State private hasMoreMessages: boolean = false;
     @State private oldestLoadedIndex: number = 0;
     @State private loadingMoreMessages: boolean = false;
-    // 加载更多前的可见区域起始索引，加载后用于恢复滚动位置
-    private scrollStartBeforeLoad: number = 0;
+    // 加载更多前的可见区域中心索引：前插会改变所有旧消息的下标，用它修正活动轮次
+    private scrollCenterBeforeLoad: number = -1;
 
     // ---------- 快捷能力 ----------
     @State private greeting: string = '';
@@ -88,26 +117,28 @@ export struct MainChat {
     @State private avatarPressed: boolean = false;
     // 拖拽起始时的 translate 值（跟手拖动用，非响应式）
     private dragStartTranslate: number = 0;
-    // 侧栏滑动抑制窗口：手势进行中/刚结束时为 true，行的点击一律忽略
-    private sidebarDragging: boolean = false;
-    private sidebarDragReleaseTimer: number = -1;
 
     // ---------- 邮件页（全屏覆盖层） ----------
     // 条件挂载 + 右滑转场；mailDetailOpen 以 @Link 下发 MailPage，返回键先退详情再退页面
     @State private mailOpen: boolean = false;
     @State private mailDetailOpen: boolean = false;
 
-    // 回到底部按钮：滚动离开底部时显示，点击平滑回到底部
-    @State private showScrollBottom: boolean = false;
+    // 随笔页：页面层持有编辑器状态，保证返回键可以先退出编辑器再退出随笔页
+    @State private notesOpen: boolean = false;
+    @State private noteEditorOpen: boolean = false;
+    @State private noteLaunchEditor: boolean = false;
+
+    // Learning 页：页面层持有导航深度，返回键按页面内层级逐级返回
+    @State private learningOpen: boolean = false;
+    @State private learningNavDepth: number = 0;
 
     // 全屏图片查看器当前图片地址（空串表示关闭）
     @State private viewerUrl: string = '';
 
-    // 轮次指示器：当前激活的用户轮次索引（-1 表示无）
-    @State private activeTurnIndex: number = -1;
+    // 滚动反馈状态独立于页面状态：索引变化只更新覆盖层，不触发整页 build。
+    @State private scrollOverlayState: ChatScrollOverlayState = new ChatScrollOverlayState();
 
-    // 轮次跳转后临时高亮的消息索引（-1 表示无高亮）
-    @State private highlightIndex: number = -1;
+
     // 会话列表代次：每次刷新/置顶/删除后 +1，随 @Prop 下发侧栏并进 ForEach key，
     // 强制列表行整体重建——规避 @ObjectLink 对数组整体替换通知不稳导致的"重开侧栏才更新"
     @State private convEpoch: number = 0;
@@ -122,7 +153,88 @@ export struct MainChat {
 
     private scroller: ListScroller = new ListScroller();
 
+    // 流式贴底只允许由当前帧合并执行；用户开始滚动后不再抢占手势
+    private streamFollowPending: boolean = false;
+    private streamUserScrolled: boolean = false;
+    // 滑动期间只保留滚动反馈的普通字段，停止后再提交到覆盖层，避免覆盖层与 List 同帧重绘。
+    private scrollGestureActive: boolean = false;
+    private pendingOverlayShowBottom: boolean = false;
+    private pendingOverlayActiveTurn: number = -1;
+    private pendingOverlayActiveValid: boolean = false;
+    // 滚动索引回调可能在同一帧触发多次，只保留最后一次结果，避免反复驱动指示器重排
+    private scrollIndexFramePending: boolean = false;
+    private pendingScrollStart: number = -1;
+    private pendingScrollEnd: number = -1;
+    private pendingScrollCenter: number = -1;
+    // 滚动来源诊断：will 是引擎准备执行的本帧位移，did 是实际执行的本帧位移。
+    // 两路都只写入固定环形缓冲，停止后一次性输出，用来区分业务滚动和 List 自身修正。
+    private scrollTraceWillOffsets: number[] = [];
+    private scrollTraceWillStates: number[] = [];
+    private scrollTraceWillSources: number[] = [];
+    private scrollTraceWillWrite: number = 0;
+    private scrollTraceWillCount: number = 0;
+    private scrollTraceDidOffsets: number[] = [];
+    private scrollTraceDidStates: number[] = [];
+    private scrollTraceDidWrite: number = 0;
+    private scrollTraceDidCount: number = 0;
+    private scrollTraceDidPrevious: number = 0;
+    private scrollTraceDidPrimed: boolean = false;
+    private scrollTraceDidMaxJerk: number = 0;
+    // 列表实测宽度派生出的「可用文本宽度」：切片器靠它推算一行能排多少字，
+    // 猜错了每片会白吃一行，行数上升就是滚动期单帧成本的直接来源
+    private measuredContentWidth: number = 0;
+    // 宽度冻结后若实测值与冻结值不符，只报一次警：用来确认播种是对的
+    private widthLockWarned: boolean = false;
+    // 触底收敛状态：在途标记 + 已尝试次数
+    private bottomLoopActive: boolean = false;
+    private bottomAttempts: number = 0;
+    // 程序滚动后的分页屏蔽截止时间戳：布尔开关在异常路径漏复位会永久锁死分页，时间戳可自愈
+    private paginationBlockedUntil: number = 0;
+    // 前插落地后的分页静默截止时间戳 + 连续贴顶帧计数
+    private prependGuardUntil: number = 0;
+    private topStreak: number = 0;
+    // 最近一次 List 上报的可视区间：触底收敛与帧间隔探针都读它
+    private visibleStartIndex: number = 0;
+    private visibleEndIndex: number = 0;
+    // 轮次高亮代次：连续跳转时，旧的清除定时器据此失效
+    private highlightToken: number = 0;
+
+    // 块级渲染单元数据源：一条消息按 Markdown AST 拆成多个小行，
+    // 流式增量只更新真正变化的那一块，不必重建整条消息对应的行
+    private itemSource: ChatItemDataSource = new ChatItemDataSource();
+    // 单元索引在单元集合变化时一次性建立，滚动回调只读 O(1) 结果，不再每帧扫描整段历史
+    @State private userTurnCount: number = 0;
+    private turnIndexByItem: number[] = [];
+    // 每条消息的首个单元下标：轮次跳转以「该消息的第一行」为目标
+    private messageStartByMessage: number[] = [];
+    // 替换消息数组的唯一入口：同步响应式页面状态与 LazyForEach 数据源
+    private replaceMessages(messages: ChatMessage[]): void {
+        this.messages = messages;
+        this.itemSource.replaceAll(this.buildItems(messages));
+        this.rebuildItemIndex();
+    }
+
+    // 把消息数组整体展开成渲染单元（顺序即渲染顺序）
+    private buildItems(messages: ChatMessage[]): ChatRenderItem[] {
+        const items: ChatRenderItem[] = [];
+
+        for (let i: number = 0; i < messages.length; i++) {
+            const built: ChatRenderItem[] = ChatItemBuilder.build(messages[i]);
+
+            for (let j: number = 0; j < built.length; j++) {
+                items.push(built[j]);
+            }
+        }
+
+        return items;
+    }
+
     aboutToAppear(): void {
+        // 必须排在一切构建之前：切片宽度一旦定型就不许再变（键 = uid#order 与内容一一对应），
+        // 所以正确的值要在第一次 build 之前就位。列表的 onAreaChange 发生在子行首次布局之后，
+        // 只等它会让首屏那批行按缺省值切片、后续行按实测值切片 —— 同一段对话被切成两种口径
+        this.seedContentWidth();
+
         this.greeting = greetingOfHour(new Date().getHours());
         this.labelForModel(this.app.selectedModelId);
         this.app.refreshModels().then(() => {
@@ -133,9 +245,6 @@ export struct MainChat {
         });
         this.app.refreshUserProfile();
 
-        // 地图渲染配置轻量预取：登录后只拉一次，地图结果到达时无需等待
-        MapRendererConfig.ensure();
-
         // 空态区域交错入场（仅问候 / 快捷能力两个区块，输入栏常驻底部不做位移）
         setTimeout(() => { this.greetingVisible = true; }, StaggerDelay.greeting);
         setTimeout(() => { this.actionsVisible = true; }, StaggerDelay.actions);
@@ -144,9 +253,10 @@ export struct MainChat {
         this.app.backHandler = (): boolean => {
             return this.handleBackPress();
         };
+
     }
 
-    // 系统返回键处理：优先级 图片查看器 > 邮件页(详情→页面) > 侧边栏 > 弹层 > 对话→新对话
+    // 系统返回键处理：优先级 邮件页(详情→页面) > 随笔编辑器/页面 > Learning 子页/页面 > 侧边栏 > 弹层 > 对话→新对话
     private handleBackPress(): boolean {
         if (this.viewerUrl.length > 0) {
             this.viewerUrl = '';
@@ -160,6 +270,26 @@ export struct MainChat {
             }
 
             this.closeMail();
+            return true;
+        }
+
+        if (this.notesOpen) {
+            if (this.noteEditorOpen) {
+                this.noteEditorOpen = false;
+                return true;
+            }
+
+            this.closeNotes();
+            return true;
+        }
+
+        if (this.learningOpen) {
+            if (this.learningNavDepth > 0) {
+                this.learningNavDepth = this.learningNavDepth - 1;
+                return true;
+            }
+
+            this.learningOpen = false;
             return true;
         }
 
@@ -201,7 +331,7 @@ export struct MainChat {
                         this.sendDraft();
                     },
                     onStop: () => {
-                        chatStream.cancel();
+                        this.stopStreaming();
                     },
                     onPickModel: () => {
                         this.openSheetModel();
@@ -230,7 +360,37 @@ export struct MainChat {
                         .animation({ duration: Motion.durationBase, curve: Motion.easeInOut }));
             }
 
-            // 全屏图片查看器：最顶层，点击任意区域或系统返回键关闭
+            // 随笔页层：由 MainChat 统一持有返回键和编辑器状态，避免侧栏点击后只关闭抽屉而没有目标页面
+            if (this.notesOpen) {
+                NotesPage({
+                    app: this.app,
+                    noteEditorOpen: $noteEditorOpen,
+                    launchEditor: this.noteLaunchEditor,
+                    onBack: () => {
+                        this.closeNotes();
+                    }
+                })
+                    .width('100%')
+                    .height('100%')
+                    .transition(TransitionEffect.translate({ x: '100%' }).combine(TransitionEffect.OPACITY)
+                        .animation({ duration: Motion.durationBase, curve: Motion.easeInOut }));
+            }
+
+            // Learning 页层：页面内部通过 navDepth 管理子页，宿主只负责最外层挂载与退出
+            if (this.learningOpen) {
+                LearningPage({
+                    app: this.app,
+                    navDepth: $learningNavDepth,
+                    onBack: () => {
+                        this.learningOpen = false;
+                    }
+                })
+                    .width('100%')
+                    .height('100%')
+                    .transition(TransitionEffect.translate({ x: '100%' }).combine(TransitionEffect.OPACITY)
+                        .animation({ duration: Motion.durationBase, curve: Motion.easeInOut }));
+            }
+
             if (this.viewerUrl.length > 0) {
                 ImageViewer({
                     url: this.viewerUrl,
@@ -357,57 +517,79 @@ export struct MainChat {
                 .width('100%')
                 .height('100%');
             } else {
+                // space 为 0：行间间距全部由行自身 margin 给出。
+                // 被切开过的块（表格 / 列表）需要精确控制接缝间距，
+                // List 的统一间距会在接缝处叠出额外空隙，把整块切成几截
                 List({ scroller: this.scroller, space: 0 }) {
-                    ForEach(this.messages, (message: ChatMessage, index: number) => {
+                    LazyForEach(this.itemSource, (item: ChatRenderItem) => {
                         ListItem() {
-                            MessageBubble({
-                                message: message,
+                            ChatItemRow({
+                                item: item,
                                 conversationId: this.conversationId,
-                                onRegenerate: () => {
-                                    this.regenerate(index);
+                                onRegenerate: (message: ChatMessage) => {
+                                    this.regenerate(message);
                                 },
                                 onOpenImage: (url: string) => {
                                     this.viewerUrl = url;
                                 },
-                                onQuestionAnswer: (item: QuestionItem, answer: string) => {
-                                    this.answerQuestion(item, answer);
+                                onQuestionAnswer: (target: QuestionItem, answer: string) => {
+                                    this.answerQuestion(target, answer);
                                 }
                             });
                         }
-                        // 轮次跳转高亮：目标消息临时加背景色，3 秒后自动清除
-                        .backgroundColor(index === this.highlightIndex
-                            ? $r('app.color.bg_sunken')
-                            : Color.Transparent)
-                        .animation({ duration: Motion.durationBase, curve: Motion.easeOut })
-                        // 新消息入场过渡：配合 sendMessage 里的 animateTo 播放淡入上移，
-                        // 让"发送/收到首段回复"不再是硬切闪烁
-                        .transition(
-                            TransitionEffect.OPACITY
-                                .combine(TransitionEffect.translate({ y: 10 }))
-                                .animation({ duration: Motion.durationBase, curve: Motion.easeOut })
-                        );
-                    }, (message: ChatMessage, index: number) => message.index + '_' + message.role);
+                        // 键值取「消息身份 + 单元序号」：单元序号在消息内稳定，
+                        // 同一条消息的第 N 个块流式期间始终复用同一个节点
+                    }, (item: ChatRenderItem) => item.key());
                 }
                 .width('100%')
                 .height('100%')
                 .listDirection(Axis.Vertical)
                 .edgeEffect(EdgeEffect.Spring)
-
-                .padding({ top: Space.xs, bottom: Space.sm })
+                // 隐藏滚动条：引擎每次为修正行高估算重新锚定偏移时，thumb 位置
+                // （= 偏移 / 内容总高，两个量都在变）都会跟着回跳 —— 它是滚动中最显眼的「跳」。
+                // 修正本身避不开，但不必把它画出来；聊天页也不需要滚动条
+                .scrollBar(BarState.Off)
+                // 预取窗口双值：低于 minCount 就趁空闲预加载，超过 maxCount 才销毁/复用，
+                // 空闲时按 maxCount 把上下的行先建好。惯性滑动一屏约 13~16 行，
+                // maxCount=16 给一次滑动留出约一屏的「已建好」跑道，
+                // 又不会把整份历史预建出来；滑动期间新建行越少，首次测量引起的重锚越少
+                .cachedCount({ minCount: CACHE_MIN_ROWS, maxCount: CACHE_MAX_ROWS }, false)
+                // 切片点必须贴着真实折行位置。可用宽度写死成 360vp 屏的 328 时，
+                // 在 392.7vp 的屏上预算偏小，每片都白吃一行。只认实测算出的宽度，不再猜屏宽
+                .onAreaChange((oldArea: Area, newArea: Area) => {
+                    this.applyContentWidth(newArea.width as number);
+                })
+                // 关闭「同步加载全部子组件」：默认 true 时无动画跳转/首屏会把沿途尚未布局的行
+                // 在同一帧里全部布局完，置 false 后单帧布局超时会把这部分工作顺延到后续帧
+                .syncLoad(false)
+                // 历史消息只在列表头部前插，交给 List 保持当前可见内容；
+                // 不再手动 scrollToIndex 二次定位 —— 手动恢复的落点按估算算，本身就是一次硬跳
+                .maintainVisibleContentPosition(true)
+                // 纵向留白走 contentStart/EndOffset：写在 padding 上会变成裁切死带，
+                // 表现为「最后一条消息与输入栏之间永远空一条」
+                .contentStartOffset(Space.xs)
+                .contentEndOffset(Space.sm)
                 .onScrollIndex((start: number, end: number, center: number) => {
-                    // 末条可见时隐藏按钮，离开底部时显示
-                    this.showScrollBottom = end < this.messages.length - 1;
-                    // 以可见区域底部索引判定当前轮次：用户阅读到底部时即使末条消息很短也能正确高亮
-                    if (end >= 0) {
-                        this.activeTurnIndex = this.computeActiveTurn(end);
-                    }
-
-                    this.scrollStartBeforeLoad = start;
-
-                    // 滚到顶部时加载更早的一页消息
-                    if (start <= 0) {
-                        this.loadMoreMessages();
-                    }
+                    this.scheduleScrollIndexUpdate(start, end, center);
+                })
+                .onWillScroll((offset: number, state: ScrollState, source: ScrollSource) => {
+                    this.recordScrollWill(offset, state, source);
+                })
+                .onDidScroll((offset: number, state: ScrollState) => {
+                    this.recordScrollDid(offset, state);
+                })
+                // 只在手势开始时声明用户已接管滚动；不把业务回调挂到每一帧 offset 上。
+                // 一旦用户开始阅读历史内容，流式更新不得再把手势拉回末条。
+                .onScrollStart(() => {
+                    this.resetScrollTrace();
+                    this.streamUserScrolled = true;
+                    this.scrollGestureActive = true;
+                    this.pendingOverlayActiveValid = false;
+                })
+                .onScrollStop(() => {
+                    this.scrollGestureActive = false;
+                    this.commitScrollOverlay();
+                    this.reportScrollTrace();
                 });
 
                 // 已打开会话但无消息（如空历史 / 加载失败后）：居中轻提示
@@ -435,61 +617,23 @@ export struct MainChat {
                     .color($r('app.color.brand_primary'));
             }
 
-            // 回到底部按钮：滚动离开底部时浮现，定位在内容区右下角（输入框正上方）
-            if (this.showScrollBottom && this.messages.length > 0) {
-                Stack() {
-                    this.ScrollBottomButton();
+            ChatScrollOverlay({
+                state: this.scrollOverlayState,
+                turnCount: this.userTurnCount,
+                messagesExist: this.messages.length > 0,
+                onJump: (turnIndex: number) => {
+                    this.jumpToTurn(turnIndex);
+                },
+                onRequirePreviews: (): string[] => {
+                    return this.buildTurnPreviews();
+                },
+                onScrollToEnd: () => {
+                    this.scrollToEnd('button', true);
                 }
-                .alignContent(Alignment.BottomEnd)
-                .width('100%')
-                .height('100%')
-                .padding({ right: Space.lg, bottom: Space.lg })
-                .hitTestBehavior(HitTestMode.Transparent);
-            }
-
-            // 轮次指示器：右侧垂直居中，仅在有多轮对话时显示
-            if (this.countUserTurns() >= 2) {
-                Stack() {
-                    TurnIndicatorPanel({
-                        turnCount: this.countUserTurns(),
-                        activeIndex: this.activeTurnIndex,
-                        onJump: (turnIndex: number) => {
-                            this.jumpToTurn(turnIndex);
-                        },
-                        onRequirePreviews: (): string[] => {
-                            return this.buildTurnPreviews();
-                        }
-                    });
-                }
-                .alignContent(Alignment.End)
-                .width('100%')
-                .height('100%')
-                .padding({ right: Space.sm })
-                .hitTestBehavior(HitTestMode.Transparent);
-            }
+            });
         }
         .layoutWeight(1)
         .width('100%');
-    }
-
-    // 回到底部浮动按钮：圆形带阴影，点击平滑滚到最后一条消息
-    @Builder
-    ScrollBottomButton() {
-        Column() {
-            Image($r('app.media.ic_chevron_down'))
-                .width(Size.icon)
-                .height(Size.icon)
-                .fillColor($r('app.color.icon_secondary'));
-        }
-        .width(Size.touchTarget)
-        .height(Size.touchTarget)
-        .justifyContent(FlexAlign.Center)
-        .borderRadius(Size.touchTarget / 2)
-        .backgroundColor($r('app.color.bg_card'))
-        .shadow(Shadow.raised)
-        .onClick(() => {
-            this.scrollToEnd(true);
-        });
     }
 
     // 装饰背景：品牌色渐变光球，垫在问候区背后，仅空态出现
@@ -593,13 +737,13 @@ export struct MainChat {
                 .gesture(
                     PanGesture({ direction: PanDirection.Horizontal, distance: 5 })
                         .onActionStart(() => {
-                            this.handleSidebarDragStart();
+                            this.dragStartTranslate = this.sidebarTranslate;
                         })
                         .onActionUpdate((event: GestureEvent) => {
-                            this.handleSidebarDragUpdate(event.offsetX);
+                            this.updateDragTranslate(event.offsetX);
                         })
-                        .onActionEnd(() => {
-                            this.handleSidebarDragEnd();
+                        .onActionEnd((event: GestureEvent) => {
+                            this.finishDrag();
                         })
                 );
 
@@ -616,6 +760,13 @@ export struct MainChat {
                     onOpenMail: () => {
                         this.closeSidebar();
                         this.openMail();
+                    },
+                    onOpenNotes: () => {
+                        this.closeSidebar();
+                        this.openNotes(false);
+                    },
+                    onOpenLearning: () => {
+                        void this.openLearning();
                     },
                     onOpenConversation: (conversationId: string, convTitle: string) => {
                         this.openConversation(conversationId, convTitle);
@@ -640,7 +791,7 @@ export struct MainChat {
                         });
                     },
                     onOpenKnowledge: (title: string) => {
-                        this.closeSidebar();
+
                         this.openSheetKnowledge(title);
                     },
                     onToggleKnowledgePin: (item: KnowledgeItem) => {
@@ -659,18 +810,16 @@ export struct MainChat {
             .shadow(Shadow.float)
             .translate({ x: this.sidebarTranslate })
             .hitTestBehavior(this.sidebarOpen ? HitTestMode.Default : HitTestMode.None)
-            // priorityGesture：滑动识别后优先于子组件点击，避免"回收抽屉时顺带触发会话行 onClick"；
-            // parallelGesture 会让行点击同手势并行触发，是误跳转的根源
-            .priorityGesture(
+            .parallelGesture(
                 PanGesture({ direction: PanDirection.Horizontal, distance: 5 })
                     .onActionStart(() => {
-                        this.handleSidebarDragStart();
+                        this.dragStartTranslate = this.sidebarTranslate;
                     })
                     .onActionUpdate((event: GestureEvent) => {
-                        this.handleSidebarDragUpdate(event.offsetX);
+                        this.updateDragTranslate(event.offsetX);
                     })
-                    .onActionEnd(() => {
-                        this.handleSidebarDragEnd();
+                    .onActionEnd((event: GestureEvent) => {
+                        this.finishDrag();
                     })
             );
         }
@@ -769,6 +918,38 @@ export struct MainChat {
         this.mailOpen = false;
     }
 
+    // 打开随笔页；launchEditor 由快捷入口决定，侧栏入口默认打开列表
+    private openNotes(launchEditor: boolean): void {
+        this.noteLaunchEditor = launchEditor;
+        this.noteEditorOpen = launchEditor;
+        this.notesOpen = true;
+    }
+
+    private closeNotes(): void {
+        this.noteEditorOpen = false;
+        this.noteLaunchEditor = false;
+        this.notesOpen = false;
+    }
+
+    // Learning 入口需要先刷新运行时配置，避免打开页面后才发现功能未启用或地址为空
+    private async openLearning(): Promise<void> {
+        await this.app.refreshLearningRuntime();
+
+        if (!this.app.learningEnabled) {
+            this.notify('Learning 未启用', 1600);
+            return;
+        }
+
+        if (this.app.learningFrontendUrl.trim().length === 0) {
+            this.notify('Learning 未配置前端地址', 1600);
+            return;
+        }
+
+        this.closeSidebar();
+        this.learningNavDepth = 0;
+        this.learningOpen = true;
+    }
+
     // ---------- 侧栏开关 ----------
     // 打开/关闭用 animateTo 驱动 translate+opacity 属性动画（始终挂载，无 if 卸载退场动画问题）
     private openSidebar(): void {
@@ -827,31 +1008,6 @@ export struct MainChat {
         }
     }
 
-    // 侧栏滑动开始：标记抑制窗口，拖动期间不允许行点击生效
-    private handleSidebarDragStart(): void {
-        this.sidebarDragging = true;
-        this.dragStartTranslate = this.sidebarTranslate;
-    }
-
-    private handleSidebarDragUpdate(offsetX: number): void {
-        this.updateDragTranslate(offsetX);
-    }
-
-    // 侧栏滑动结束：先完成抽屉开合判定；手势结束后保留一小段抑制窗口，
-    // 快速滑动回收时行的 onClick 可能紧随手势结束触发，期间一并忽略
-    private handleSidebarDragEnd(): void {
-        this.finishDrag();
-
-        if (this.sidebarDragReleaseTimer >= 0) {
-            clearTimeout(this.sidebarDragReleaseTimer);
-        }
-
-        this.sidebarDragReleaseTimer = setTimeout(() => {
-            this.sidebarDragReleaseTimer = -1;
-            this.sidebarDragging = false;
-        }, SIDEBAR_CLICK_GUARD_MS);
-    }
-
     // ---------- 知识库行为 ----------
     private toggleKnowledgePin(item: KnowledgeItem): void {
         this.app.setKnowledgePin(item.title, !item.pin).then((message: string) => {
@@ -908,28 +1064,30 @@ export struct MainChat {
                 return;
             }
 
-            this.messages = result.messages;
+            this.replaceMessages(result.messages);
+            this.applyQuestionLocks(this.conversationId, result.messages);
             this.hasMoreMessages = result.hasMoreBefore;
             this.oldestLoadedIndex = result.startIndex;
-            this.applyQuestionLocks(this.messages);
-            this.scrollToEnd();
-            // scrollToEnd 的 scrollToIndex 不一定触发 onScrollIndex，这里主动以末条为基准算出当前轮次
-            this.activeTurnIndex = this.computeActiveTurn(this.messages.length - 1);
-            hilog.info(DOMAIN, TAG, '[loadHistory] msgCount=%{public}d activeTurn=%{public}d', this.messages.length, this.activeTurnIndex);
+            this.streamUserScrolled = false;
+            this.scrollToEnd('load-history');
+            // scrollToEnd 的 scrollEdge 不一定触发 onScrollIndex，这里主动以末条为基准算出当前轮次
+            this.scrollOverlayState.activeTurnIndex = this.computeActiveTurnOfLastMessage();
+            hilog.info(DOMAIN, TAG, '[loadHistory] msgCount=%{public}d activeTurn=%{public}d', this.messages.length,
+                this.scrollOverlayState.activeTurnIndex);
         });
     }
 
-    // 加载更早的一页消息：滚到顶部时触发，插入列表头部
-    // 记录加载前可见位置，加载后 scrollToIndex 恢复到原位置（偏移 insertedCount）
+    // 加载更早的一页消息：滚到顶部时触发，插入列表头部。
+    // List 的 maintainVisibleContentPosition 负责保持当前可见内容，不再手动二次定位
     private loadMoreMessages(): void {
         if (!this.hasMoreMessages || this.loadingMoreMessages || this.oldestLoadedIndex <= 0) {
             return;
         }
 
         this.loadingMoreMessages = true;
-        const startBeforeLoad: number = this.scrollStartBeforeLoad;
+        const centerBeforeLoad: number = this.scrollCenterBeforeLoad;
 
-        ApiService.fetchMessages(this.conversationId, 20, this.oldestLoadedIndex).then((result) => {
+        ApiService.fetchMessages(this.conversationId, HISTORY_PAGE_SIZE, this.oldestLoadedIndex).then((result) => {
             if (!result.success) {
                 this.loadingMoreMessages = false;
                 return;
@@ -952,16 +1110,91 @@ export struct MainChat {
             }
 
             const insertedCount: number = dedupedMessages.length;
+            const insertedItems: ChatRenderItem[] = this.buildItems(dedupedMessages);
             this.messages = [...dedupedMessages, ...this.messages];
+            this.itemSource.prependItems(insertedItems);
+            this.applyQuestionLocks(this.conversationId, dedupedMessages);
+            this.rebuildItemIndex();
             this.hasMoreMessages = result.hasMoreBefore;
             this.oldestLoadedIndex = result.startIndex;
-            this.applyQuestionLocks(dedupedMessages);
 
-            // 恢复滚动位置：原 startBeforeLoad 处的消息现在在 startBeforeLoad + insertedCount
-            setTimeout(() => {
-                this.scroller.scrollToIndex(startBeforeLoad + insertedCount, false, ScrollAlign.START);
-                this.loadingMoreMessages = false;
-            }, 0);
+            // 前插会改变所有旧消息的数组下标；先按偏移修正活动轮次，
+            // 避免指示器在旧轮次与新轮次之间出现双高亮
+            const preservedCenter: number = centerBeforeLoad + insertedItems.length;
+
+            if (centerBeforeLoad >= 0 && preservedCenter < this.turnIndexByItem.length) {
+                this.scrollOverlayState.activeTurnIndex = this.computeActiveTurn(preservedCenter);
+            }
+
+            hilog.info(DOMAIN, TAG, '[history] prepend add=%{public}d size=%{public}d',
+                insertedCount, this.messages.length);
+
+            // 前插落地后的静默期：视口的估算修正会在随后 1~2 秒内多次甩动，
+            // 甩动路过索引 0 若被当成触顶就会连锁前插，这里先把分页入口关掉
+            this.prependGuardUntil = Date.now() + PREPEND_PAGINATION_HOLD;
+            this.topStreak = 0;
+
+            // 释放加载锁：可见位置由 List 属性保持，不再需要等定位回调
+            this.loadingMoreMessages = false;
+        });
+    }
+
+    // question 作答：服务端登记成功后写本地锁，再把回答作为普通用户消息送入当前会话。
+    // 服务端登记是跨设备恢复卡片状态的权威步骤，本地状态不能先于它落地。
+    private answerQuestion(item: QuestionItem, answer: string): void {
+        const text: string = answer.trim();
+
+        if (text.length === 0 || item.answered || item.submitting) {
+            return;
+        }
+
+        if (this.streaming || chatStream.isStreamingFor(this.conversationId)) {
+            this.notify('当前对话已有回复生成中,请稍候', 1200);
+            return;
+        }
+
+        item.submitting = true;
+        this.app.loadQuestionLocks().then((store: string) => {
+            const updated: string = writeQuestionLock(store, this.conversationId, item.cardId, text);
+
+            return ApiService.resolveConversationQuestion(this.conversationId, item.payload.questionId, text).then((result) => {
+                if (!result.success) {
+                    item.submitting = false;
+                    this.notify(result.message, 1600);
+                    return;
+                }
+
+                this.app.saveQuestionLocks(updated);
+                item.markAnswered(text);
+                this.sendMessage(text);
+            });
+        });
+    }
+
+    // 本地回答锁恢复：历史加载、分页和 question 帧到达时复原已答卡片。
+    private applyQuestionLocks(conversationId: string, messages: ChatMessage[]): void {
+        if (conversationId.length === 0 || messages.length === 0) {
+            return;
+        }
+
+        this.app.loadQuestionLocks().then((store: string) => {
+            for (let m: number = 0; m < messages.length; m++) {
+                const message: ChatMessage = messages[m];
+
+                for (let q: number = 0; q < message.questions.length; q++) {
+                    const item: QuestionItem = message.questions[q];
+
+                    if (item.answered) {
+                        continue;
+                    }
+
+                    const locked: string = readQuestionLock(store, conversationId, item.cardId);
+
+                    if (locked.length > 0) {
+                        message.markQuestionAnswered(item.callId, locked);
+                    }
+                }
+            }
         });
     }
 
@@ -1018,27 +1251,18 @@ export struct MainChat {
 
     // 实际发流：消息入列 + 侧栏即时占位（若列表还没有该会话）+ 挂流
     private dispatchSend(text: string): void {
-        // 双保险：UI streaming 与传输层 streaming 任一仍在进行都拒绝发送。
-        // 若只查 UI streaming，传输层尚未释放时 start() 会静默返回，而消息已入列并置 streaming=true，
-        // 界面会永久卡在"生成中"（三个点不消失、无任何请求）
-        if (this.streaming || chatStream.isStreaming) {
-            this.notify('已有回复生成中，请稍候', 1200);
+        if (this.streaming) {
             return;
         }
 
-        // 本地消息必须分配连续且唯一的 index：列表 ForEach key 由 message.index 派生，
-        // 新建消息若恒为 0 会与首条消息 key 冲突，ArkUI 按 key 复用组件导致列表错位/末条重复
-        // （表现：发送瞬间最后一条消息被重复渲染、工具调用段位置错乱；重进会话后索引来自服务端才正常）。
-        // 取末条 index + 1 同时与后端持久化索引对齐
-        const baseIndex: number = this.messages.length > 0 ? this.messages[this.messages.length - 1].index + 1 : 0;
         const userMessage: ChatMessage = ChatMessage.createUser(text);
-        userMessage.index = baseIndex;
         const assistantMessage: ChatMessage = ChatMessage.createAssistant();
-        assistantMessage.index = baseIndex + 1;
         // 追加包在显式 animateTo 中：配合 ListItem 的 transition 播放"淡入 + 轻微上移"，
         // 消除新消息硬插入的闪烁感（空态问候页首次切入消息流时尤其明显）
         animateTo({ duration: Motion.durationBase, curve: Motion.easeOut }, () => {
             this.messages = [...this.messages, userMessage, assistantMessage];
+            this.itemSource.appendItems(this.buildItems([userMessage, assistantMessage]));
+            this.rebuildItemIndex();
         });
         this.streaming = true;
         this.lastContentLog = -1;
@@ -1058,9 +1282,9 @@ export struct MainChat {
             }
         }
 
-        this.scrollToEnd(true);
+        this.scrollToEnd('send', true);
 
-        chatStream.start({
+        chatStream.start(this.conversationId, {
             message: text,
             conversationId: this.conversationId.length > 0 ? this.conversationId : undefined,
             modelName: this.app.selectedModelName.length > 0 ? this.app.selectedModelName : undefined,
@@ -1068,20 +1292,40 @@ export struct MainChat {
             enableWebSearch: this.app.enableWebSearch,
             enableTools: true,
             toolMode: this.app.forceTools ? 'force' : 'auto_off'
-        }, this.listenerFor(assistantMessage));
+        } as StreamOptions, this.listenerFor(assistantMessage));
     }
 
     // 重新生成：通过后端 is_regenerate 机制覆盖目标回答（自动保存旧版本）。
     // 不截断消息列表、不新增用户消息，直接清空目标 assistant 消息并锁定流式更新该消息。
-    // 直接接收 ForEach 的数组索引，不依赖 indexOf（@ObjectLink 代理与原数组引用不等）
-    private regenerate(targetIndex: number): void {
-        if (this.streaming) {
-            hilog.warn(DOMAIN, TAG, '[regenerate] skipped: streaming=true');
+    // 接收 ChatMessage（由 ChatItemRow 的 onRegenerate 回调传入），通过 uid 查找索引
+    private regenerate(targetMessage: ChatMessage): void {
+        // 页面标志与传输层锁是两条独立状态链：页面可能已收到 done，
+        // 但传输层还在等待 dataEnd；反过来也可能是旧页面标志残留。
+        // 以真实会话锁裁决是否能重答，避免清空消息后才发现请求被静默拒绝。
+        const clientStreaming: boolean = chatStream.isStreamingFor(this.conversationId);
+
+        if (clientStreaming) {
+            hilog.warn(DOMAIN, TAG, '[regenerate] skipped: client stream active conv=%{public}s',
+                this.conversationId);
             return;
         }
 
-        if (targetIndex < 0 || targetIndex >= this.messages.length) {
-            hilog.warn(DOMAIN, TAG, '[regenerate] skipped: targetIndex out of range=%{public}d', targetIndex);
+        if (this.streaming) {
+            hilog.warn(DOMAIN, TAG, '[regenerate] corrected stale page streaming flag');
+            this.streaming = false;
+        }
+
+        let targetIndex: number = -1;
+
+        for (let i: number = 0; i < this.messages.length; i++) {
+            if (this.messages[i].uid === targetMessage.uid) {
+                targetIndex = i;
+                break;
+            }
+        }
+
+        if (targetIndex < 0) {
+            hilog.warn(DOMAIN, TAG, '[regenerate] skipped: message not in view');
             return;
         }
 
@@ -1110,21 +1354,29 @@ export struct MainChat {
         target.reasoning = '';
         target.segments = [];
         target.toolCalls = [];
-        target.questions = [];
         target.usage = null;
         target.errorMessage = '';
         target.streaming = true;
         target.thinkingExpanded = true;
         this.messages = [...this.messages];
+        this.itemSource.refreshMessage(target);
+        // 清空目标消息会改变它的单元数：其后所有单元下标整体位移，映射必须跟着重建
+        this.rebuildItemIndex();
 
         this.streaming = true;
         this.lastContentLog = -1;
         this.lastReasoningLog = -1;
 
         // 滚动到目标消息位置，让用户看到正在重答的消息
-        this.scroller.scrollToIndex(targetIndex, true, ScrollAlign.CENTER);
+        const itemIndex: number = this.itemSource.startIndexOf(target.uid);
 
-        chatStream.start({
+        if (itemIndex >= 0) {
+            // 程序滚动会路过索引 0：触顶分页由时间戳统一挡掉，不能让它启动历史前插
+            this.paginationBlockedUntil = Date.now() + JUMP_PAGINATION_HOLD;
+            this.scroller.scrollToIndex(itemIndex, true, ScrollAlign.CENTER);
+        }
+
+        chatStream.start(this.conversationId, {
             message: question,
             conversationId: this.conversationId,
             modelName: this.app.selectedModelName.length > 0 ? this.app.selectedModelName : undefined,
@@ -1134,77 +1386,21 @@ export struct MainChat {
             toolMode: this.app.forceTools ? 'force' : 'auto_off',
             isRegenerate: true,
             regenerateIndex: target.index
-        }, this.listenerFor(target));
-    }
-
-    // question 作答：写本地回答锁并作为普通用户消息发送
-    // （与 Web handleQuestionAnswer 一致：上一条助手消息以 await 收尾，模型把该消息当回答继续）
-    private answerQuestion(item: QuestionItem, answer: string): void {
-        const text: string = answer.trim();
-
-        if (text.length === 0 || item.answered || item.submitting) {
-            return;
-        }
-
-        if (this.streaming || chatStream.isStreaming) {
-            this.notify('已有回复生成中，请稍候', 1200);
-            return;
-        }
-
-        item.submitting = true;
-
-        this.app.loadQuestionLocks().then((store: string) => {
-            const updated: string = writeQuestionLock(store, this.conversationId, item.cardId, text);
-            this.app.saveQuestionLocks(updated);
-            item.markAnswered(text);
-            this.dispatchSend(text);
-        });
-    }
-
-    // 本地回答锁恢复：历史加载 / 分页 / question 帧到达时把已答卡片置为锁定态
-    private applyQuestionLocks(messages: ChatMessage[]): void {
-        const conversationId: string = this.conversationId;
-
-        if (conversationId.length === 0 || messages.length === 0) {
-            return;
-        }
-
-        this.app.loadQuestionLocks().then((store: string) => {
-            for (let m: number = 0; m < messages.length; m++) {
-                const message: ChatMessage = messages[m];
-
-                for (let q: number = 0; q < message.questions.length; q++) {
-                    const item: QuestionItem = message.questions[q];
-
-                    if (item.answered) {
-                        continue;
-                    }
-
-                    const locked: string = readQuestionLock(store, conversationId, item.cardId);
-
-                    if (locked.length > 0) {
-                        message.markQuestionAnswered(item.callId, locked);
-                    }
-                }
-            }
-        });
+        } as StreamOptions, this.listenerFor(target));
     }
 
     // 打开历史会话：原地替换会话状态并载入历史，不做导航压栈
     private openConversation(conversationId: string, convTitle: string): void {
-        // 侧栏滑动中/刚结束：行点击视为误触，不跳转对话（快速滑回收抽屉时的边界）
-        if (this.sidebarDragging) {
-            hilog.info(DOMAIN, TAG, 'conversation click ignored during sidebar drag');
-            return;
-        }
-
         if (this.streaming) {
             this.stopStreaming();
         }
 
         this.conversationId = conversationId;
+        this.streamUserScrolled = false;
+        this.streamFollowPending = false;
+        this.stopBottomLoop();
         this.title = convTitle.length > 0 ? convTitle : '新对话';
-        this.messages = [];
+        this.replaceMessages([]);
         this.loadError = '';
         this.activatedActionId = '';
         this.loadHistory();
@@ -1220,8 +1416,11 @@ export struct MainChat {
 
         this.stopStreaming();
         this.conversationId = '';
+        this.streamUserScrolled = false;
+        this.streamFollowPending = false;
+        this.stopBottomLoop();
         this.title = '新对话';
-        this.messages = [];
+        this.replaceMessages([]);
         this.loadError = '';
         this.hasMoreMessages = false;
         this.oldestLoadedIndex = 0;
@@ -1232,43 +1431,163 @@ export struct MainChat {
     private stopStreaming(): void {
         if (chatStream.isStreaming) {
             chatStream.cancel();
-        }
-    }
-
-    // 滚动到底：smooth=true 时用带动画的滚动（首条消息/历史载入），
-    // 流式增量期间传 false 快速贴底，避免逐帧动画叠加造成卡顿/闪烁
-    private scrollToEnd(smooth: boolean = false): void {
-        if (this.messages.length === 0) {
             return;
         }
 
-        this.scroller.scrollToIndex(this.messages.length - 1, smooth, ScrollAlign.END);
-    }
+        // 传输层已结束但页面状态尚未收到终止回调时，不能留下不可操作的停止按钮。
+        // 同步结束仍标记为 streaming 的消息行，避免下一次发送继续复用圆点占位。
+        if (!this.streaming) {
+            return;
+        }
 
-    // 以可见区域中心索引为基准，找到最后一个位置 ≤ center 的用户轮次索引
-    private computeActiveTurn(center: number): number {
-        let turn: number = -1;
-
-        for (let i: number = 0; i <= center && i < this.messages.length; i++) {
-            if (this.messages[i].isUser) {
-                turn++;
+        for (let i: number = 0; i < this.messages.length; i++) {
+            if (this.messages[i].streaming) {
+                this.messages[i].finish();
+                this.itemSource.refreshMessage(this.messages[i]);
             }
         }
 
-        return turn;
+        this.streaming = false;
+        this.stopBottomLoop();
+        LiveViewController.shared.stop();
     }
 
-    // 统计用户消息总轮次数
-    private countUserTurns(): number {
-        let count: number = 0;
+    // 滚动到底：history / send / button / stream-follow 等入口统一走这里，
+    // reason 用于把「视口被强行拉回底部」当场归因到具体链路
+    private scrollToEnd(reason: string, resumeStreamFollow: boolean = false): void {
+        if (this.itemSource.totalCount() === 0) {
+            return;
+        }
+
+        hilog.info(DOMAIN, TAG, '[bottom] request reason=%{public}s total=%{public}d visible=%{public}d-%{public}d',
+            reason, this.itemSource.totalCount(), this.visibleStartIndex, this.visibleEndIndex);
+
+        if (resumeStreamFollow) {
+            this.streamUserScrolled = false;
+            this.streamFollowPending = false;
+        }
+
+        if (this.bottomLoopActive) {
+            return;
+        }
+
+        this.bottomLoopActive = true;
+        this.bottomAttempts = 0;
+        this.runBottomStep();
+    }
+
+    // 触底一步：滚到内容边界后校验末条是否可见。
+    // scrollEdge 的「边界」同样来自引擎对内容总高的认知（未测量行按估算计入），
+    // 行高还没测全时一次调用会停在内容中部（进入会话停在非底部的直接原因）；
+    // 每次调用都会让引擎补测沿途行高，逐次校验重试即可逼近真实底部
+    private runBottomStep(): void {
+        if (this.itemSource.totalCount() === 0) {
+            this.stopBottomLoop();
+            return;
+        }
+
+        this.bottomAttempts++;
+        this.paginationBlockedUntil = Date.now() + JUMP_PAGINATION_HOLD;
+        hilog.info(DOMAIN, TAG, '[bottom] edge attempt=%{public}d visible=%{public}d-%{public}d',
+            this.bottomAttempts, this.visibleStartIndex, this.visibleEndIndex);
+        this.scroller.scrollEdge(Edge.Bottom);
+        const attempt: number = this.bottomAttempts;
+
+        setTimeout(() => {
+            if (!this.bottomLoopActive || attempt !== this.bottomAttempts) {
+                return;
+            }
+
+            const lastIndex: number = this.itemSource.totalCount() - 1;
+
+            if (this.visibleEndIndex >= lastIndex) {
+                hilog.info(DOMAIN, TAG, '[bottom] settled attempts=%{public}d visible=%{public}d-%{public}d',
+                    this.bottomAttempts, this.visibleStartIndex, this.visibleEndIndex);
+                this.stopBottomLoop();
+                return;
+            }
+
+            if (this.bottomAttempts >= BOTTOM_MAX_ATTEMPTS) {
+                hilog.warn(DOMAIN, TAG, '[bottom] give up attempts=%{public}d visible=%{public}d-%{public}d last=%{public}d',
+                    this.bottomAttempts, this.visibleStartIndex, this.visibleEndIndex, lastIndex);
+                this.stopBottomLoop();
+                return;
+            }
+
+            this.runBottomStep();
+        }, BOTTOM_SETTLE_DELAY);
+    }
+
+    private stopBottomLoop(): void {
+        this.bottomLoopActive = false;
+        this.bottomAttempts = 0;
+    }
+
+    // 以可见区域索引为基准读取用户轮次索引：查 rebuildItemIndex 建立的表，
+    // 滚动回调只读 O(1) 结果，不再每帧扫描整段历史
+    private computeActiveTurn(center: number): number {
+        if (center < 0 || center >= this.turnIndexByItem.length) {
+            return -1;
+        }
+
+        return this.turnIndexByItem[center];
+    }
+
+    // 末条消息所在轮次：载入 / 打开会话后直接把指示器定到最后一轮
+    private computeActiveTurnOfLastMessage(): number {
+        return this.computeActiveTurn(this.itemSource.totalCount() - 1);
+    }
+
+    // 单元集合变化时重建索引：每个单元继承所属消息的轮次，
+    // 滚动回调只读 O(1) 结果，不重复扫描历史
+    private rebuildItemIndex(): void {
+        const items: ChatRenderItem[] = this.itemSource.snapshot();
+        const indexes: number[] = [];
+        const starts: number[] = [];
+        let turn: number = -1;
+        let lastUid: string = '';
+
+        for (let i: number = 0; i < items.length; i++) {
+            const item: ChatRenderItem = items[i];
+
+            if (item.message.uid !== lastUid) {
+                lastUid = item.message.uid;
+
+                if (item.message.isUser) {
+                    turn++;
+                }
+
+                starts.push(i);
+            }
+
+            indexes.push(turn);
+        }
+
+        this.turnIndexByItem = indexes;
+        this.messageStartByMessage = starts;
+
+        const nextCount: number = turn + 1;
+
+        if (this.userTurnCount !== nextCount) {
+            this.userTurnCount = nextCount;
+        }
+    }
+
+    // 指定轮次里用户消息的首个单元下标：轮次跳转以「该轮用户消息的第一行」为目标
+    private firstItemOfTurn(turnIndex: number): number {
+        let seen: number = -1;
 
         for (let i: number = 0; i < this.messages.length; i++) {
             if (this.messages[i].isUser) {
-                count++;
+                seen++;
+
+                if (seen === turnIndex) {
+                    return i < this.messageStartByMessage.length ? this.messageStartByMessage[i] : -1;
+                }
             }
         }
 
-        return count;
+        return -1;
     }
 
     // 生成各轮次用户消息预览文本
@@ -1285,29 +1604,52 @@ export struct MainChat {
         return previews;
     }
 
-    // 跳转到指定轮次：滚动使目标用户消息居中，并临时高亮
+    // 跳转到指定轮次：滚动使目标用户消息居中，并临时高亮。
+    // 目标下标查 rebuildItemIndex 建立的表，不再整表扫描
     private jumpToTurn(turnIndex: number): void {
-        let userCount: number = 0;
+        const itemIndex: number = this.firstItemOfTurn(turnIndex);
 
-        for (let i: number = 0; i < this.messages.length; i++) {
-            if (this.messages[i].isUser) {
-                if (userCount === turnIndex) {
-                    this.scroller.scrollToIndex(i, true, ScrollAlign.CENTER);
-                    this.highlightMessage(i);
-                    return;
-                }
-
-                userCount++;
-            }
+        if (itemIndex < 0) {
+            return;
         }
+
+        // 程序滚动会路过索引 0：触顶分页由时间戳统一挡掉，不能让它启动历史前插
+        this.paginationBlockedUntil = Date.now() + JUMP_PAGINATION_HOLD;
+        this.scroller.scrollToIndex(itemIndex, true, ScrollAlign.CENTER);
+        this.highlightMessage(itemIndex);
     }
 
-    // 临时高亮指定消息：设置索引后 3 秒自动清除
+    // 临时高亮指定消息的所有渲染单元：设置 highlighted 字段后 3 秒自动清除。
+    // index 是渲染单元索引，需找到同一条消息的所有单元一起高亮
     private highlightMessage(index: number): void {
-        this.highlightIndex = index;
+        const items: ChatRenderItem[] = this.itemSource.snapshot();
+
+        if (index < 0 || index >= items.length) {
+            return;
+        }
+
+        const targetUid: string = items[index].message.uid;
+        // 代次 +1：连续跳转时，旧定时器不得清掉新目标的高亮
+        this.highlightToken++;
+        const token: number = this.highlightToken;
+
+        for (let i: number = 0; i < items.length; i++) {
+            if (items[i].message.uid === targetUid) {
+                items[i].highlighted = true;
+            }
+        }
+
         setTimeout(() => {
-            this.highlightIndex = -1;
-        }, 3000);
+            if (token !== this.highlightToken) {
+                return;
+            }
+
+            for (let i: number = 0; i < items.length; i++) {
+                if (items[i].message.uid === targetUid) {
+                    items[i].highlighted = false;
+                }
+            }
+        }, HIGHLIGHT_DURATION);
     }
 
     // 首轮生成结束后用首条提问作为会话标题
@@ -1450,10 +1792,68 @@ export struct MainChat {
     // http 流回调线程不保证是 UI 线程，直接在此改 @Observed 字段可能不触发界面通知，
     // 表现为"服务端在推、界面一字不流"（曾实测复现），必须回到 UI 线程再落地。
     private listenerFor(assistant: ChatMessage): StreamListener {
-        const onUi = (action: () => void): void => {
+        const onUi = (action: () => void, reloadMessage: boolean = false): void => {
             setTimeout(() => {
                 action();
+
+                // 本帧改动的消息字段同步给列表数据源：
+                // 原地改写受影响的单元，列表不重建，只有真正变化的那一行重渲染
+                if (reloadMessage) {
+                    this.itemSource.reloadMessage(assistant);
+                } else {
+                    this.itemSource.refreshMessage(assistant);
+                }
             }, 0);
+        };
+
+        // 同一帧内到达的多个增量合并成一次落地：每条 SSE 增量各自重跑一遍 markdown
+        // 解析与单元重建，字符级流式下足以把主线程一直钉在高负载上
+        let pendingReasoning: string = '';
+        let pendingContent: string = '';
+        let deltaFlushScheduled: boolean = false;
+
+        const applyPendingDeltas = (): void => {
+            const reasoning: string = pendingReasoning;
+            const content: string = pendingContent;
+            pendingReasoning = '';
+            pendingContent = '';
+
+            if (reasoning.length > 0) {
+                assistant.appendDelta('reasoning', reasoning);
+                this.logStreamProgress(assistant, true);
+            }
+
+            if (content.length > 0) {
+                // 正文到达：思考阶段结束，折叠 thinking 块
+                if (assistant.thinkingExpanded) {
+                    assistant.thinkingExpanded = false;
+                }
+
+                assistant.appendDelta('content', content);
+                this.logStreamProgress(assistant, false);
+                this.scheduleStreamFollowToBottom();
+
+                // 胶囊滚动窗口：截取正文末尾 5 字更新灵动岛胶囊（仅退后台活跃时生效）
+                LiveViewController.shared.updateContent(assistant.content);
+            }
+
+        };
+
+        const scheduleDeltaFlush = (): void => {
+            if (deltaFlushScheduled) {
+                return;
+            }
+
+            deltaFlushScheduled = true;
+            this.getUIContext().postFrameCallback(new NextFrameCallback(() => {
+                deltaFlushScheduled = false;
+                applyPendingDeltas();
+            }));
+        };
+
+        const flushDeltaNow = (): void => {
+            deltaFlushScheduled = false;
+            applyPendingDeltas();
         };
 
         return {
@@ -1476,51 +1876,46 @@ export struct MainChat {
             },
             onReasoningDelta: (delta: string) => {
                 onUi(() => {
-                    assistant.appendDelta('reasoning', delta);
-                    this.logStreamProgress(assistant, true);
+                    pendingReasoning += delta;
+                    scheduleDeltaFlush();
                 });
             },
             onContentDelta: (delta: string) => {
                 onUi(() => {
-                    // 正文到达：思考阶段结束，折叠 thinking 块
-                    if (assistant.thinkingExpanded) {
-                        assistant.thinkingExpanded = false;
-                    }
-
-                    assistant.appendDelta('content', delta);
-                    this.logStreamProgress(assistant, false);
-                    this.scrollToEnd();
-
-                    // 胶囊滚动窗口：截取正文末尾 5 字更新灵动岛胶囊（仅退后台活跃时生效）
-                    LiveViewController.shared.updateContent(assistant.content);
+                    pendingContent += delta;
+                    scheduleDeltaFlush();
                 });
             },
             onToolCall: (name: string, callId: string, args: string, round: number) => {
                 onUi(() => {
+                    flushDeltaNow();
                     // 工具调用到达：思考阶段结束，折叠 thinking 块
                     if (assistant.thinkingExpanded) {
                         assistant.thinkingExpanded = false;
                     }
 
                     assistant.beginToolCall(callId, name, args, round);
-                    this.scrollToEnd();
+                    this.scheduleStreamFollowToBottom();
                 });
             },
             onToolResult: (name: string, callId: string, payload: ToolResultPayload, round: number) => {
                 onUi(() => {
+                    flushDeltaNow();
                     assistant.completeToolCall(callId, payload);
+
+                    // 工具结果卡是本轮最后输出时后面不再有正文增量，这里必须自己补一次贴底，
+                    // 否则结果块（含图片画廊）会停在视口下方
+                    this.scrollToEndAfterLayout();
                 });
             },
             onQuestion: (callId: string, payload: Object | null, round: number) => {
                 onUi(() => {
-                    // question 工具等待作答：关闭思考块并挂载交互卡片，回答走 answerQuestion
-                    if (assistant.thinkingExpanded) {
-                        assistant.thinkingExpanded = false;
-                    }
-
+                    flushDeltaNow();
                     assistant.beginQuestion(callId, payload);
-                    this.applyQuestionLocks([assistant]);
-                    this.scrollToEnd();
+                    this.applyQuestionLocks(this.conversationId, [assistant]);
+
+                    // 选择题卡通常是本轮最后一块输出：挂载当帧还没有真实高度，同步滚动会漏底
+                    this.scrollToEndAfterLayout();
                 });
             },
             onTokenUsage: (usage: TokenUsage) => {
@@ -1530,13 +1925,15 @@ export struct MainChat {
             },
             onError: (message: string) => {
                 onUi(() => {
+                    flushDeltaNow();
                     assistant.setError(message);
                     this.streaming = false;
                     LiveViewController.shared.stop();
-                });
+                }, true);
             },
             onComplete: (finalContent: string) => {
                 onUi(() => {
+                    flushDeltaNow();
                     // 思考型回复常见「全程 reasoning 帧、正文在结尾一次性到达」：
                     // 只要正文仍为空就必须落进 content，不能因消息已有思考内容而吞掉结尾正文
                     if (assistant.content.length === 0 && finalContent.length > 0) {
@@ -1550,19 +1947,317 @@ export struct MainChat {
                     this.scheduleListRefresh();
                     // 正常完成：胶囊改"回复完成"保留 5 秒后自动关闭
                     LiveViewController.shared.finishGenerating();
-                });
+                }, true);
             },
             onAborted: () => {
                 onUi(() => {
+                    flushDeltaNow();
                     assistant.finish();
                     this.streaming = false;
                     this.deriveTitle();
                     this.app.updatePendingConversation(this.conversationId, this.title);
                     this.scheduleListRefresh();
                     LiveViewController.shared.stop();
-                });
+                }, true);
             }
         };
+    }
+
+    // ---------- 滚动仲裁 ----------
+    // 程序滚动（定位 / 触底 / 回底）与前插静默期内屏蔽触顶分页：
+    // 定位经过索引 0、前插后的估算修正甩动都会让视口「停在顶部」，
+    // 不挡掉就会连锁前插 → 连锁修正 → 滑动动量被反复打断。
+    // 用时间戳而不是布尔开关：异常路径漏复位会让分页永久锁死，时间戳能自愈
+    private isPaginationBlocked(): boolean {
+        const now: number = Date.now();
+
+        return now < this.paginationBlockedUntil || now < this.prependGuardUntil;
+    }
+
+    // 滚动索引回调可能在同一帧触发多次，只保留最后一次结果并推迟到下一帧统一应用。
+    // 每帧无条件写 @State 会让整页（含侧栏层与轮次面板）重跑一遍 build
+    private scheduleScrollIndexUpdate(start: number, end: number, center: number): void {
+        this.pendingScrollStart = start;
+        this.pendingScrollEnd = end;
+        this.pendingScrollCenter = center;
+
+        // 手势/惯性滚动期间不需要再把普通索引处理推到下一帧：
+        // 当前调用只更新可见范围、分页计数和待提交反馈，不触发页面状态写入。
+        if (this.scrollGestureActive) {
+            this.applyScrollIndex(start, end, center);
+            return;
+        }
+
+        if (this.scrollIndexFramePending) {
+            return;
+        }
+
+        this.scrollIndexFramePending = true;
+        this.getUIContext().postFrameCallback(new NextFrameCallback(() => {
+            this.scrollIndexFramePending = false;
+            this.applyScrollIndex(this.pendingScrollStart, this.pendingScrollEnd, this.pendingScrollCenter);
+        }));
+    }
+
+    // 清空一次手势的滚动来源样本。样本只在手势开始时分配，滚动帧内只改固定数组槽位。
+    private resetScrollTrace(): void {
+        this.scrollTraceWillOffsets = [];
+        this.scrollTraceWillStates = [];
+        this.scrollTraceWillSources = [];
+        this.scrollTraceWillWrite = 0;
+        this.scrollTraceWillCount = 0;
+        this.scrollTraceDidOffsets = [];
+        this.scrollTraceDidStates = [];
+        this.scrollTraceDidWrite = 0;
+        this.scrollTraceDidCount = 0;
+        this.scrollTraceDidPrevious = 0;
+        this.scrollTraceDidPrimed = false;
+        this.scrollTraceDidMaxJerk = 0;
+    }
+
+    // 记录引擎本帧准备执行的位移和来源；不会返回 ScrollResult，也不改变滚动行为。
+    private recordScrollWill(offset: number, state: ScrollState, source: ScrollSource): void {
+        const slot: number = this.scrollTraceWillWrite;
+        this.scrollTraceWillOffsets[slot] = offset;
+        this.scrollTraceWillStates[slot] = state;
+        this.scrollTraceWillSources[slot] = source;
+        this.scrollTraceWillWrite = (slot + 1) % SCROLL_SOURCE_TRACE_CAP;
+
+        if (this.scrollTraceWillCount < SCROLL_SOURCE_TRACE_CAP) {
+            this.scrollTraceWillCount++;
+        }
+    }
+
+    // 记录引擎本帧实际执行的位移；相邻位移差用于确认是否出现单帧异常 offset。
+    private recordScrollDid(offset: number, state: ScrollState): void {
+        const slot: number = this.scrollTraceDidWrite;
+        this.scrollTraceDidOffsets[slot] = offset;
+        this.scrollTraceDidStates[slot] = state;
+        this.scrollTraceDidWrite = (slot + 1) % SCROLL_SOURCE_TRACE_CAP;
+
+        if (this.scrollTraceDidCount < SCROLL_SOURCE_TRACE_CAP) {
+            this.scrollTraceDidCount++;
+        }
+
+        if (this.scrollTraceDidPrimed) {
+            const jerk: number = Math.abs(offset - this.scrollTraceDidPrevious);
+
+            if (jerk > this.scrollTraceDidMaxJerk) {
+                this.scrollTraceDidMaxJerk = jerk;
+            }
+        }
+
+        this.scrollTraceDidPrevious = offset;
+        this.scrollTraceDidPrimed = true;
+    }
+
+    // 使用固定顺序还原环形缓冲，输出 source/delta/state，方便把异常帧和具体来源对齐。
+    private scrollSourceName(source: ScrollSource): string {
+        switch (source) {
+            case ScrollSource.DRAG:
+                return 'drag';
+            case ScrollSource.FLING:
+                return 'fling';
+            case ScrollSource.EDGE_EFFECT:
+                return 'edge';
+            case ScrollSource.OTHER_USER_INPUT:
+                return 'input';
+            case ScrollSource.SCROLL_BAR:
+                return 'bar';
+            case ScrollSource.SCROLL_BAR_FLING:
+                return 'bar-fling';
+            case ScrollSource.SCROLLER:
+                return 'scroller';
+            case ScrollSource.SCROLLER_ANIMATION:
+                return 'scroller-animation';
+            default:
+                return 'source-' + source;
+        }
+    }
+
+    private scrollTraceWillText(): string {
+        const values: string[] = [];
+        const first: number = this.scrollTraceWillCount >= SCROLL_SOURCE_TRACE_CAP
+            ? this.scrollTraceWillWrite : 0;
+
+        for (let i: number = 0; i < this.scrollTraceWillCount; i++) {
+            const slot: number = (first + i) % SCROLL_SOURCE_TRACE_CAP;
+            values.push(this.scrollSourceName(this.scrollTraceWillSources[slot])
+                + '/' + Math.round(this.scrollTraceWillOffsets[slot])
+                + '/' + this.scrollTraceWillStates[slot]);
+        }
+
+        return values.join(',');
+    }
+
+    private scrollTraceDidText(): string {
+        const values: string[] = [];
+        const first: number = this.scrollTraceDidCount >= SCROLL_SOURCE_TRACE_CAP
+            ? this.scrollTraceDidWrite : 0;
+
+        for (let i: number = 0; i < this.scrollTraceDidCount; i++) {
+            const slot: number = (first + i) % SCROLL_SOURCE_TRACE_CAP;
+            values.push(Math.round(this.scrollTraceDidOffsets[slot])
+                + '/' + this.scrollTraceDidStates[slot]);
+        }
+
+        return values.join(',');
+    }
+
+    // 一次滚动结束只输出一条诊断日志：will 证明谁要求了 offset，did 证明实际是否出现异常位移。
+    private reportScrollTrace(): void {
+        hilog.info(DOMAIN, TAG,
+            '[scrollsrc] will=%{public}d did=%{public}d maxJerk=%{public}d visible=%{public}d-%{public}d willSeq=%{public}s didSeq=%{public}s',
+            this.scrollTraceWillCount, this.scrollTraceDidCount, Math.round(this.scrollTraceDidMaxJerk),
+            this.visibleStartIndex, this.visibleEndIndex, this.scrollTraceWillText(), this.scrollTraceDidText());
+        this.resetScrollTrace();
+    }
+
+    // 应用滚动索引：底部按钮看 end，轮次指示器看 center（查表 O(1)）。
+    // 手势期间只暂存覆盖层结果，避免滚动反馈和 List 在同一帧竞争布局/绘制。
+    private applyScrollIndex(start: number, end: number, center: number): void {
+        this.visibleStartIndex = start;
+        this.visibleEndIndex = end;
+
+        const nextShowScrollBottom: boolean = end < this.itemSource.totalCount() - 1;
+
+        if (this.scrollGestureActive) {
+            this.pendingOverlayShowBottom = nextShowScrollBottom;
+        } else if (this.scrollOverlayState.showScrollBottom !== nextShowScrollBottom) {
+            this.scrollOverlayState.showScrollBottom = nextShowScrollBottom;
+        }
+
+        if (center >= 0 && center < this.turnIndexByItem.length) {
+            const nextActiveTurn: number = this.turnIndexByItem[center];
+
+            if (this.scrollGestureActive) {
+                this.pendingOverlayActiveTurn = nextActiveTurn;
+                this.pendingOverlayActiveValid = true;
+            } else if (this.scrollOverlayState.activeTurnIndex !== nextActiveTurn) {
+                this.scrollOverlayState.activeTurnIndex = nextActiveTurn;
+                hilog.info(DOMAIN, TAG,
+                    '[scroll] active turn=%{public}d center=%{public}d start=%{public}d end=%{public}d',
+                    nextActiveTurn, center, start, end);
+            }
+        }
+
+        if (center >= 0) {
+            this.scrollCenterBeforeLoad = center;
+        }
+
+        // 触顶分页必须先确认「用户真的停在顶部」：
+        // 前插的估算修正会让视口单帧路过索引 0，一帧就触发会连锁前插
+        if (start <= 0) {
+            this.topStreak++;
+        } else {
+            this.topStreak = 0;
+        }
+
+        if (this.topStreak >= TOP_TRIGGER_STREAK && !this.isPaginationBlocked()) {
+            this.loadMoreMessages();
+        }
+
+    }
+
+    // 在滚动停止后一次性提交按钮和轮次指示器状态，避免它们参与滚动中的逐帧更新。
+    private commitScrollOverlay(): void {
+        if (this.scrollOverlayState.showScrollBottom !== this.pendingOverlayShowBottom) {
+            this.scrollOverlayState.showScrollBottom = this.pendingOverlayShowBottom;
+        }
+
+        if (this.pendingOverlayActiveValid
+            && this.scrollOverlayState.activeTurnIndex !== this.pendingOverlayActiveTurn) {
+            this.scrollOverlayState.activeTurnIndex = this.pendingOverlayActiveTurn;
+            hilog.info(DOMAIN, TAG,
+                '[scroll] active turn=%{public}d center=stop start=%{public}d end=%{public}d',
+                this.pendingOverlayActiveTurn, this.visibleStartIndex, this.visibleEndIndex);
+        }
+
+        this.pendingOverlayActiveValid = false;
+    }
+
+    // 帧间隔探针：滑动期间只累加，不在帧内打印（日志本身会成为滚动开销）。
+    // js 有值 → 掉帧来自 JS 侧（滚动回调里的处理）；js≈0 而间隔大 → 掉帧在渲染引擎
+    // 由列表实测宽度下发可用文本宽度（扣掉行容器左右 padding）
+    private applyContentWidth(listWidth: number): void {
+        if (listWidth <= 0) {
+            return;
+        }
+
+        const contentWidth: number = listWidth - Space.lg * 2;
+
+        // 已冻结：这里只核对、不改写。改写会让同一 key 切出不同文本，就是串台本身
+        if (ChatItemBuilder.isContentWidthLocked()) {
+            if (!this.widthLockWarned && Math.abs(contentWidth - ChatItemBuilder.currentContentWidth()) > 1) {
+                this.widthLockWarned = true;
+                hilog.warn(DOMAIN, TAG, '[width] locked slice=%{public}d list=%{public}d delta=%{public}d',
+                    Math.round(ChatItemBuilder.currentContentWidth()), Math.round(contentWidth),
+                    Math.round(contentWidth - ChatItemBuilder.currentContentWidth()));
+            }
+
+            return;
+        }
+
+        if (Math.abs(contentWidth - this.measuredContentWidth) < 1) {
+            return;
+        }
+
+        this.measuredContentWidth = contentWidth;
+        ChatItemBuilder.setContentWidth(contentWidth);
+        hilog.info(DOMAIN, TAG, '[width] list=%{public}d content=%{public}d',
+            Math.round(listWidth), Math.round(contentWidth));
+    }
+
+    // 构建前播种切片宽度。列表横向铺满，宽度等于屏宽，据此推出可用文本宽度。
+    // 播种值只是初值：第一次 build 之前仍允许被列表实测值覆盖；
+    // 一旦 build 发生即冻结。取不到显示信息时保持缺省值 —— 口径会偏小，但始终一致
+    private seedContentWidth(): void {
+        try {
+            const screenVp: number = px2vp(display.getDefaultDisplaySync().width);
+            const contentWidth: number = screenVp - Space.lg * 2;
+
+            // 区间护栏：手机可用文本宽度落在 200~600vp。取不到合理值就保留缺省值 ——
+            // 口径会偏小，但始终一致；宁可多一行也不要按错误宽度定型
+            if (contentWidth > 200 && contentWidth < 600) {
+                this.measuredContentWidth = contentWidth;
+                ChatItemBuilder.setContentWidth(contentWidth);
+                hilog.info(DOMAIN, TAG, '[width] seed screen=%{public}d content=%{public}d',
+                    Math.round(screenVp), Math.round(contentWidth));
+            }
+        } catch (err) {
+            hilog.warn(DOMAIN, TAG, '[width] seed failed, keep fallback');
+        }
+    }
+
+    // 把同一帧内到达的多个正文增量合并为一次贴底，避免滚动控制 API 与手势连续竞争。
+    // 用户已接管滚动（或已离开底部）时直接放弃跟手，绝不把视口拽回末条
+    private scheduleStreamFollowToBottom(): void {
+        if (this.streamUserScrolled || this.scrollOverlayState.showScrollBottom || this.streamFollowPending) {
+            return;
+        }
+
+        this.streamFollowPending = true;
+        this.getUIContext().postFrameCallback(new NextFrameCallback(() => {
+            this.streamFollowPending = false;
+
+            if (!this.streamUserScrolled && !this.scrollOverlayState.showScrollBottom && this.messages.length > 0) {
+                this.scrollToEnd('stream-follow');
+            }
+        }));
+    }
+
+    // 独立区块（工具结果卡 / 选择题卡 / 图片画廊）贴底：这些块挂载当帧 List 还没为它排版，
+    // 同步滚动会停在旧底部。推迟一帧，等真实高度参与排版后再滚
+    private scrollToEndAfterLayout(): void {
+        if (this.streamUserScrolled || this.scrollOverlayState.showScrollBottom) {
+            return;
+        }
+
+        this.getUIContext().postFrameCallback(new NextFrameCallback(() => {
+            if (!this.streamUserScrolled && !this.scrollOverlayState.showScrollBottom) {
+                this.scrollToEnd('after-layout');
+            }
+        }));
     }
 
     // ---------- 展示文案 ----------

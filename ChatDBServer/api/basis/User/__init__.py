@@ -80,7 +80,7 @@ from basis.Database import (
     safe_read_text,
     safe_write_text,
 )
-from basis.TokenUsage import append_usage_log_record, read_usage_log_records
+from basis.TokenUsage import append_usage_log_record, build_billing_snapshot, read_usage_log_records, resolve_model_pricing, usage_record_total_tokens
 from App.Utils import (
     apply_range_replacements,
     apply_text_patch,
@@ -1338,9 +1338,12 @@ class User:
         metadata = metadata if isinstance(metadata, dict) else {}
         input_tokens = int(input_tokens or 0)
         output_tokens = int(output_tokens or 0)
-        if total_tokens is None:
-            total_tokens = input_tokens + output_tokens
-        total_tokens = int(total_tokens or 0)
+        token_details = metadata.get("token_details") if isinstance(metadata.get("token_details"), dict) else {}
+        total_tokens = usage_record_total_tokens({
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "token_details": token_details,
+        })
 
         # 添加新日志
         log_entry = {
@@ -1354,7 +1357,7 @@ class User:
             "total_tokens": total_tokens,
             "provider": metadata.get("provider") or "",
             "model": metadata.get("model") or "",
-            "token_details": metadata.get("token_details") or {},
+            "token_details": token_details,
             "has_web_search": bool(metadata.get("has_web_search", False)),
             "tool_call_count": int(metadata.get("tool_call_count", 0) or 0),
             "duration_ms": int(metadata.get("duration_ms", 0) or 0),
@@ -1366,6 +1369,18 @@ class User:
             "source_assistant_index": parse_message_index(metadata.get("source_assistant_index"), default=-1),
             "response_trace_id": str(metadata.get("response_trace_id") or "")
         }
+
+        pricing = resolve_model_pricing(
+            log_entry["model"],
+            log_entry["provider"],
+        )
+        log_entry["billing"] = build_billing_snapshot(
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            pricing=pricing,
+            token_details=log_entry["token_details"],
+            source="snapshot",
+        )
 
         append_usage_log_record(log_file, log_entry)
 
@@ -1386,9 +1401,15 @@ class User:
         # 服务器统一额度由全局 token 日志推算，不在这里单独扣减。
 
     def get_token_logs(self):
-        """获取Token使用日志"""
+        """获取Token使用日志，并将历史记录的总量统一为完整 Token。"""
         log_file = self.path + "token_usage.json"
-        return read_usage_log_records(log_file)
+        records = read_usage_log_records(log_file)
+
+        for record in records:
+            if isinstance(record, dict):
+                record["total_tokens"] = usage_record_total_tokens(record)
+
+        return records
 
     def _preferences_file(self):
         return self.path + "preferences.json"

@@ -24,6 +24,11 @@
                 <span class="label">总 Token 消耗</span>
                 <span class="value mono">{{ formatNumber(totalTokens) }}</span>
             </div>
+            <div class="stat-card">
+                <span class="label">累计模型费用</span>
+                <span class="value mono">¥{{ formatMoney(totalCost) }}</span>
+                <span v-if="unpricedBillingRecords" class="admin-billing-note">{{ unpricedBillingRecords }} 条未计价</span>
+            </div>
         </div>
 
         <!-- Token Trend -->
@@ -40,22 +45,26 @@
                 </span>
             </div>
             <div v-if="trendTopModels.length" class="admin-model-usage-wrap">
-                <table class="admin-model-usage-table">
-                    <thead>
-                        <tr>
-                            <th>模型</th>
-                            <th>请求数</th>
-                            <th>统计 Token</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        <tr v-for="row in trendTopModels" :key="`model-usage-${row.name}`">
-                            <td :title="row.name">{{ row.name }}</td>
-                            <td class="mono">{{ formatNumber(row.requests) }}</td>
-                            <td class="mono">{{ formatNumber(row.tokens) }}</td>
-                        </tr>
-                    </tbody>
-                </table>
+                <GddpSortableTable
+                    :rows="trendTopModels"
+                    :columns="trendModelTableColumns"
+                    row-key="name"
+                    class="admin-stats-table"
+                    empty-text="暂无模型统计"
+                >
+                    <template #cell-name="{ row }">
+                        <span class="admin-table-name" :title="row.name">{{ row.name }}</span>
+                    </template>
+                    <template #cell-requests="{ row }">
+                        {{ formatNumber(row.requests) }}
+                    </template>
+                    <template #cell-tokens="{ row }">
+                        {{ formatNumber(row.tokens) }}
+                    </template>
+                    <template #cell-cost="{ row }">
+                        ¥{{ formatMoney(row.cost) }}
+                    </template>
+                </GddpSortableTable>
             </div>
         </div>
 
@@ -127,28 +136,39 @@
                     <span class="label">总 Token</span>
                     <span class="value mono">{{ formatNumber(userStats.summary.total_tokens) }}</span>
                 </div>
+                <div class="stat-card">
+                    <span class="label">模型费用</span>
+                    <span class="value mono">¥{{ formatMoney(userStats.summary.cost) }}</span>
+                    <span v-if="userStats.summary.unpriced_records" class="admin-billing-note">{{ userStats.summary.unpriced_records }} 条未计价</span>
+                </div>
             </div>
 
             <div v-if="userStats" class="admin-user-token-recent-wrap">
-                <table class="admin-user-token-recent-table">
-                    <thead>
-                        <tr>
-                            <th>时间</th>
-                            <th>来源</th>
-                            <th>模型</th>
-                            <th>Token</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        <tr v-if="!userStats.recent.length"><td colspan="4">暂无查询结果</td></tr>
-                        <tr v-for="(row, index) in userStats.recent" :key="index">
-                            <td>{{ formatDateTime(row.timestamp) }}</td>
-                            <td>{{ row.source }}</td>
-                            <td>{{ row.model }}</td>
-                            <td class="mono">{{ formatNumber(row.total_tokens) }}</td>
-                        </tr>
-                    </tbody>
-                </table>
+                <GddpSortableTable
+                    :rows="userStats.recent"
+                    :columns="recentTableColumns"
+                    :row-key="recentRowKey"
+                    class="admin-stats-table admin-recent-table"
+                    empty-text="暂无查询结果"
+                >
+                    <template #cell-timestamp="{ row }">
+                        {{ formatDateTime(row.timestamp) }}
+                    </template>
+                    <template #cell-source="{ row }">
+                        {{ row.source }}
+                    </template>
+                    <template #cell-model="{ row }">
+                        <span class="admin-table-name" :title="row.model">{{ row.model }}</span>
+                    </template>
+                    <template #cell-total_tokens="{ row }">
+                        {{ formatNumber(row.total_tokens) }}
+                    </template>
+                    <template #cell-cost="{ row }">
+                        <span v-if="row.cost !== null && row.cost !== undefined">¥{{ formatMoney(row.cost) }}</span>
+                        <span v-else>-</span>
+                        <small v-if="row.billing_estimated" class="admin-billing-estimated">估算</small>
+                    </template>
+                </GddpSortableTable>
             </div>
 
             <!-- Top Providers / Top Models(对齐原版 renderAdminUserTokenStats topEl) -->
@@ -158,7 +178,7 @@
                     <div v-if="userStats.top_providers.length" class="admin-user-token-top-rows">
                         <div v-for="row in userStats.top_providers.slice(0, 5)" :key="row.name" class="admin-user-token-top-row">
                             <span>{{ row.name }}</span>
-                            <span class="mono">{{ formatNumber(row.tokens) }}</span>
+                            <span class="mono">{{ formatNumber(row.tokens) }} · ¥{{ formatMoney(row.cost) }}</span>
                         </div>
                     </div>
                     <div v-else class="admin-user-token-top-empty">-</div>
@@ -168,7 +188,7 @@
                     <div v-if="userStats.top_models.length" class="admin-user-token-top-rows">
                         <div v-for="row in userStats.top_models.slice(0, 5)" :key="row.name" class="admin-user-token-top-row">
                             <span>{{ row.name }}</span>
-                            <span class="mono">{{ formatNumber(row.tokens) }}</span>
+                            <span class="mono">{{ formatNumber(row.tokens) }} · ¥{{ formatMoney(row.cost) }}</span>
                         </div>
                     </div>
                     <div v-else class="admin-user-token-top-empty">-</div>
@@ -221,19 +241,29 @@
     import type { ToolStats, UserTokenStats } from '@/api/admin-stats'
     import { fetchAdminTokenStats, fetchToolStats, fetchTokenTimeseries, fetchUserTokenStats } from '@/api/admin-stats'
     import { showError } from '@/stores/notify'
-import { isInsideOpenPopover } from '@/ui/overlay'
+    import { isInsideOpenPopover } from '@/ui/overlay'
 
+    import GddpSortableTable from '@/ui/GddpSortableTable.vue'
     import SettingSelect from '@/ui/settings/SettingSelect.vue'
 
     const totalUsers = ref(0)
     const adminCount = ref(0)
     const totalTokens = ref(0)
+    const totalCost = ref(0)
+    const unpricedBillingRecords = ref(0)
 
     /** Token 趋势 */
     const trendChartRef = ref<HTMLDivElement | null>(null)
     const trendMeta = ref('加载中...')
-    const trendTopModels = ref<Array<{ name: string; tokens: number; requests: number }>>([])
+    const trendTopModels = ref<Array<{ name: string; tokens: number; requests: number; cost: number }>>([])
     let trendChart: echarts.ECharts | null = null
+
+    const trendModelTableColumns = [
+        { key: 'name', label: '模型', sortValue: (row: { name: string }) => row.name },
+        { key: 'requests', label: '请求数', align: 'right' as const, sortValue: (row: { requests: number }) => row.requests },
+        { key: 'tokens', label: '统计 Token', align: 'right' as const, sortValue: (row: { tokens: number }) => row.tokens },
+        { key: 'cost', label: '费用', align: 'right' as const, sortValue: (row: { cost: number }) => row.cost },
+    ]
 
     /** 单用户查询 */
     const userSelectorRef = ref<HTMLElement | null>(null)
@@ -244,6 +274,18 @@ import { isInsideOpenPopover } from '@/ui/overlay'
     const userQueryMeta = ref('请选择用户')
     const userStats = ref<UserTokenStats | null>(null)
     const allUsers = ref<AdminUser[]>([])
+
+    const recentTableColumns = [
+        { key: 'timestamp', label: '时间', sortValue: (row: { timestamp: string }) => timestampSortValue(row.timestamp) },
+        { key: 'source', label: '来源', sortValue: (row: { source: string }) => row.source },
+        { key: 'model', label: '模型', sortValue: (row: { model: string }) => row.model },
+        { key: 'total_tokens', label: 'Token', align: 'right' as const, sortValue: (row: { total_tokens: number }) => row.total_tokens },
+        { key: 'cost', label: '费用', align: 'right' as const, sortValue: (row: { cost?: number | null }) => row.cost },
+    ]
+
+    const recentRowKey = (row: UserTokenStats['recent'][number], index: number): string => {
+        return `${row.timestamp}-${row.model}-${index}`
+    }
 
     const rangeOptions = [
         { value: 'today', label: '今日' },
@@ -301,12 +343,14 @@ import { isInsideOpenPopover } from '@/ui/overlay'
 
     async function loadAll(): Promise<void> {
         try {
-            const [users, tokens] = await Promise.all([listAdminUsers(), fetchAdminTokenStats()])
+            const [users, tokenStats] = await Promise.all([listAdminUsers(), fetchAdminTokenStats()])
 
             allUsers.value = users
             totalUsers.value = users.length
             adminCount.value = users.filter((user) => String(user.role || '').toLowerCase() === 'admin').length
-            totalTokens.value = tokens
+            totalTokens.value = tokenStats.total_tokens
+            totalCost.value = tokenStats.total_cost
+            unpricedBillingRecords.value = tokenStats.unpriced_records
         } catch (error) {
             showError(error instanceof Error ? error.message : '加载统计失败')
         }
@@ -320,14 +364,13 @@ import { isInsideOpenPopover } from '@/ui/overlay'
         try {
             const data = await fetchTokenTimeseries(30)
 
+            const trendCost = data.series.cost.reduce((a, b) => a + b, 0)
+            const trendUnpriced = data.series.unpriced_records.reduce((a, b) => a + b, 0)
+
             trendMeta.value = data.series.total_tokens.length
-                ? `共 ${formatNumber(data.series.total_tokens.reduce((a, b) => a + b, 0))} 统计 Token · ${data.series.requests.reduce((a, b) => a + b, 0)} 次请求`
+                ? `共 ${formatNumber(data.series.total_tokens.reduce((a, b) => a + b, 0))} 统计 Token · ${data.series.requests.reduce((a, b) => a + b, 0)} 次请求 · ¥${formatMoney(trendCost)}${trendUnpriced ? ` · ${trendUnpriced} 条未计价` : ''}`
                 : '暂无数据'
-            trendTopModels.value = data.top_models.map((row) => ({
-                name: row.name,
-                tokens: row.tokens,
-                requests: row.requests,
-            }))
+            trendTopModels.value = data.top_models
 
             await nextTick()
 
@@ -516,6 +559,28 @@ import { isInsideOpenPopover } from '@/ui/overlay'
         const num = Number(value || 0)
 
         return Number.isFinite(num) ? num.toLocaleString() : '-'
+    }
+
+    function timestampSortValue(raw: string): number {
+        if (!raw) {
+            return 0
+        }
+
+        const numeric = /^\d+$/.test(raw) ? Number(raw) : Date.parse(raw)
+
+        if (!Number.isFinite(numeric)) {
+            return 0
+        }
+
+        return numeric < 1000000000000 ? numeric * 1000 : numeric
+    }
+
+    function formatMoney(value: number | undefined): string {
+        const num = Number(value || 0)
+
+        return Number.isFinite(num)
+            ? num.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+            : '-'
     }
 </script>
 
@@ -739,93 +804,34 @@ import { isInsideOpenPopover } from '@/ui/overlay'
 
     .admin-user-token-summary-grid {
         display: grid;
-        grid-template-columns: repeat(4, minmax(0, 1fr));
+        grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
         gap: 10px;
         margin-bottom: 14px;
     }
 
     .admin-user-token-recent-wrap {
-        border: 1px solid var(--color-border);
-        border-radius: 8px;
         max-height: 320px;
-        overflow-x: auto;
-        overflow-y: auto;
-        scrollbar-gutter: stable;
-    }
-
-    .admin-user-token-recent-table {
-        width: 100%;
-        min-width: 640px;
-        border-collapse: collapse;
-        font-size: 12.5px;
-    }
-
-    .admin-user-token-recent-table th,
-    .admin-user-token-recent-table td {
-        padding: 8px 12px;
-        text-align: left;
-        border-bottom: 1px solid var(--color-border);
-    }
-
-    .admin-user-token-recent-table th {
-        position: sticky;
-        top: 0;
-        z-index: 1;
-        background: var(--color-bg-sunken);
-        font-size: 11.5px;
-        font-weight: 600;
-        color: var(--color-text-secondary);
+        margin-top: 2px;
     }
 
     .admin-model-usage-wrap {
         margin-top: 12px;
-        border: 1px solid var(--color-border);
-        border-radius: 8px;
-        overflow-x: auto;
     }
 
-    .admin-model-usage-table {
-        width: 100%;
+    .admin-stats-table :deep(.gddp-table) {
         min-width: 520px;
-        border-collapse: collapse;
-        font-size: 12px;
     }
 
-    .admin-model-usage-table th,
-    .admin-model-usage-table td {
-        padding: 8px 12px;
-        text-align: left;
-        border-bottom: 1px solid var(--color-border);
+    .admin-recent-table :deep(.gddp-table) {
+        min-width: 640px;
     }
 
-    .admin-model-usage-table th {
-        background: var(--color-bg-sunken);
-        font-size: 11.5px;
-        font-weight: 600;
-        color: var(--color-text-secondary);
-    }
-
-    .admin-model-usage-table td:first-child {
+    .admin-table-name {
+        display: block;
         max-width: 360px;
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
-    }
-
-    .admin-model-usage-table td:nth-child(2),
-    .admin-model-usage-table td:nth-child(3),
-    .admin-model-usage-table th:nth-child(2),
-    .admin-model-usage-table th:nth-child(3) {
-        width: 140px;
-        white-space: nowrap;
-    }
-
-    .admin-model-usage-table tr:last-child td {
-        border-bottom: none;
-    }
-
-    .admin-user-token-recent-table tr:last-child td {
-        border-bottom: none;
     }
 
     /* Top Providers / Top Models(对齐原版 trend-block) */

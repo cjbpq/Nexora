@@ -799,6 +799,25 @@ class ConversationService:
             safe_write_json(path, data, indent=2)
             index_mod.sync_index_from_file(self.username, path, data)
 
+    def resolve_question(self, conversation_id: str, question_id: str, answer: str) -> Dict[str, Any]:
+        """
+        question 工具作答登记：回写 trace.events 中 question 载荷的 resolved/answer。
+
+        作答与登记同事务（文件锁保护），登记结果即为历史加载时的权威已答状态。
+        """
+        with conversation_update_session(self.username, conversation_id) as (path, data):
+            if int(data.get("schema_version") or 0) != SCHEMA_VERSION:
+                data = migrate_single_conversation_data(data)
+                data = normalize_v4_conversation(data)
+
+            result = messages_mod.resolve_question_payload(data, question_id, answer)
+
+            data["updated_at"] = datetime.now().isoformat()
+            validate_v4_conversation(data)
+            safe_write_json(path, data, indent=2)
+            index_mod.sync_index_from_file(self.username, path, data)
+            return copy.deepcopy(result)
+
     # ------------------------------------------------------------------
     # 系统快照 / 知识 / 压缩
     # ------------------------------------------------------------------
@@ -1441,7 +1460,7 @@ class ConversationService:
             if not isinstance(usage, dict):
                 continue
             try:
-                in_tok = int(usage.get("input") or 0)
+                in_tok = int(usage.get("raw_input") or usage.get("input") or 0)
                 out_tok = int(usage.get("output") or 0)
             except Exception:
                 continue

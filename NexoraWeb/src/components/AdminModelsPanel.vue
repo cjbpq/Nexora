@@ -17,7 +17,7 @@
                 <div
                     v-for="provider in filteredProviders"
                     :key="provider"
-                    class="admin-user-item model-provider-item"
+                    class="admin-user-item settings-management-item model-provider-item"
                     :class="{ active: selectedProvider === provider }"
                     data-role="model-provider-item"
                     role="button"
@@ -25,7 +25,7 @@
                     @click="selectProvider(provider)"
                     @keydown.enter="selectProvider(provider)"
                 >
-                    <span class="provider-icon">
+                    <span class="provider-icon settings-management-item-icon">
                         <img v-if="providerIconUrl(provider)" :src="providerIconUrl(provider)" alt="">
                         <template v-else>{{ providerIconFallback(provider) }}</template>
                     </span>
@@ -122,14 +122,17 @@
                                     <button
                                         class="model-icon-btn model-icon-btn-danger"
                                         type="button"
-                                        title="删除模型"
+                                        title="归档模型"
                                         @click.stop="requestDeleteModel(model.id, model.name)"
                                     >
                                         <i class="fa-solid fa-trash" aria-hidden="true"></i>
                                     </button>
                                 </div>
                             </div>
-                            <span class="admin-model-ctx">{{ quotaCtx(model) }}</span>
+                            <div class="admin-model-meta-row">
+                                <span class="admin-model-ctx">{{ quotaCtx(model) }}</span>
+                                <span class="admin-model-pricing" :class="{ 'is-unpriced': !model.pricing }">{{ pricingSummary(model.pricing) }}</span>
+                            </div>
                             <!-- 额度计量条(对齐原版 model-admin-item-meter-wrap:点击直接打开额度调整) -->
                             <div
                                 class="quota-meter-wrap"
@@ -137,7 +140,7 @@
                                 :data-model="model.id"
                                 :data-total-tokens="quotaTotal(model)"
                                 :data-used-tokens="modelTokens(model)"
-                                title="点击编辑额度"
+                                title="点击编辑额度；已用按原始输入加输出统计，包含缓存命中"
                                 @click.stop="openQuotaAdjustAt($event, model)"
                             >
                                 <div class="quota-meter-shell">
@@ -179,7 +182,7 @@
                                             data-role="quota-meter-label-used"
                                             :data-visible="!meterHasDebt(model) && meterUsed(model) > 0 ? '1' : '0'"
                                             :style="{ display: !meterHasDebt(model) && meterUsed(model) > 0 ? '' : 'none' }"
-                                        >已用{{ fmtQuota(modelTokens(model)) }}</div>
+                                        >已用（全量）{{ fmtQuota(modelTokens(model)) }}</div>
                                         <div class="quota-meter-label-item total" data-role="quota-meter-label-total">
                                             共{{ fmtQuota(quotaTotal(model)) }}
                                         </div>
@@ -227,26 +230,60 @@
         </div>
 
         <!-- 添加/编辑模型弹窗 -->
-        <Modal :open="modelFormOpen" :title="editingModel ? '编辑模型' : '添加模型'" size="sm" @close="modelFormOpen = false">
-            <div class="gddp-form-field">
-                <label>供应商</label>
-                <SettingSelect v-model="modelForm.provider" :options="providerSelectOptions" width="100%" />
-            </div>
-            <div class="gddp-form-field">
-                <label for="adminModelId">模型 ID</label>
-                <input id="adminModelId" v-model="modelForm.model_id" class="gddp-input" type="text" maxlength="120" placeholder="例如:my-model-v1">
-            </div>
-            <div class="gddp-form-field">
-                <label for="adminModelName">名称(可选)</label>
-                <input id="adminModelName" v-model="modelForm.name" class="gddp-input" type="text" maxlength="120" placeholder="默认同模型 ID">
-            </div>
-            <div class="gddp-form-field">
-                <label for="adminModelCtx">Context Window(可选)</label>
-                <input id="adminModelCtx" v-model="modelForm.context_window" class="gddp-input" type="number" min="0" placeholder="例如:128000">
-            </div>
-            <div class="gddp-form-field">
-                <label>状态</label>
-                <SettingSelect v-model="modelForm.status" :options="modelStatusOptions" width="100%" />
+        <Modal
+            :open="modelFormOpen"
+            :title="editingModel ? '编辑模型' : '添加模型'"
+            size="lg"
+            width="min(860px, calc(100vw - 32px))"
+            modal-class="admin-model-form-modal"
+            @close="modelFormOpen = false"
+        >
+            <div class="admin-model-form-layout">
+                <section class="admin-model-form-section">
+                    <div class="admin-model-form-section-head">
+                        <h4>模型信息</h4>
+                        <span>基础配置</span>
+                    </div>
+                    <div class="gddp-form-field">
+                        <label>供应商</label>
+                        <SettingSelect v-model="modelForm.provider" :options="providerSelectOptions" width="100%" />
+                    </div>
+                    <div class="gddp-form-field">
+                        <label for="adminModelId">模型 ID</label>
+                        <input id="adminModelId" v-model="modelForm.model_id" class="gddp-input" type="text" maxlength="120" placeholder="例如:my-model-v1">
+                    </div>
+                    <div class="gddp-form-field">
+                        <label for="adminModelName">名称(可选)</label>
+                        <input id="adminModelName" v-model="modelForm.name" class="gddp-input" type="text" maxlength="120" placeholder="默认同模型 ID">
+                    </div>
+                    <div class="gddp-form-field">
+                        <label for="adminModelCtx">Context Window（留空默认为 128000）</label>
+                        <input id="adminModelCtx" v-model="modelForm.context_window" class="gddp-input" type="number" min="0" placeholder="例如:128000">
+                    </div>
+                    <div class="gddp-form-field">
+                        <label>状态</label>
+                        <SettingSelect v-model="modelForm.status" :options="modelStatusOptions" width="100%" />
+                    </div>
+                </section>
+                <section class="admin-model-form-section admin-model-pricing-section">
+                    <div class="admin-model-form-section-head">
+                        <h4>模型价格</h4>
+                        <span>每 1,000,000 Token · CNY</span>
+                    </div>
+                    <div class="admin-model-pricing-note">留空三项可移除价格配置；填写时三项必须完整。缓存命中按单独价格计算。</div>
+                    <div class="gddp-form-field">
+                        <label for="adminModelInputPrice">Input Price</label>
+                        <input id="adminModelInputPrice" v-model="modelForm.input_per_million" class="gddp-input" type="number" min="0" step="0.000001" placeholder="例如:0.001">
+                    </div>
+                    <div class="gddp-form-field">
+                        <label for="adminModelOutputPrice">Output Price</label>
+                        <input id="adminModelOutputPrice" v-model="modelForm.output_per_million" class="gddp-input" type="number" min="0" step="0.000001" placeholder="例如:0.008">
+                    </div>
+                    <div class="gddp-form-field">
+                        <label for="adminModelCachePrice">Cache Hit Price</label>
+                        <input id="adminModelCachePrice" v-model="modelForm.cache_hit_per_million" class="gddp-input" type="number" min="0" step="0.000001" placeholder="例如:0.0005">
+                    </div>
+                </section>
             </div>
             <template #footer>
                 <button class="btn-cancel" type="button" @click="modelFormOpen = false">取消</button>
@@ -350,7 +387,7 @@
 <script setup lang="ts">
     import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 
-    import type { ModelInfo } from '@/api/admin-models'
+    import type { ModelInfo, ModelPricing } from '@/api/admin-models'
     import { deleteModel, deleteProvider, fetchModelsConfig, upsertModel, upsertProvider } from '@/api/admin-models'
     import type { OllamaModelStatus, OllamaProviderStatus } from '@/api/admin-ollama'
     import { fetchOllamaProviderStatus, toggleOllamaModelStatus } from '@/api/admin-ollama'
@@ -554,6 +591,7 @@
                 name: String(info.name || id),
                 status: String(info.status || ''),
                 context_window: Number(info.context_window || 0),
+                pricing: info.pricing || null,
             }))
     })
 
@@ -1425,6 +1463,9 @@
         provider: '',
         context_window: '',
         status: 'normal',
+        input_per_million: '',
+        output_per_million: '',
+        cache_hit_per_million: '',
     })
 
     /** 打开新增模型弹窗(默认选中当前 provider) */
@@ -1435,18 +1476,29 @@
         modelForm.provider = selectedProvider.value || (providers.value[0] || '')
         modelForm.context_window = ''
         modelForm.status = 'normal'
+        modelForm.input_per_million = ''
+        modelForm.output_per_million = ''
+        modelForm.cache_hit_per_million = ''
         modelFormOpen.value = true
     }
 
     /** 打开编辑模型弹窗 */
-    function handleEditModel(model: { id: string; name: string; status: string; context_window: number }): void {
+    function handleEditModel(model: { id: string; name: string; status: string; context_window: number; pricing?: ModelPricing | null }): void {
         editingModel.value = model.id
         modelForm.model_id = model.id
         modelForm.name = model.name === model.id ? '' : model.name
         modelForm.provider = selectedProvider.value
         modelForm.context_window = model.context_window ? String(model.context_window) : ''
         modelForm.status = normalizeStatus(model.status) === 'unknown' ? 'normal' : model.status
+        modelForm.input_per_million = model.pricing ? String(model.pricing.input_per_million) : ''
+        modelForm.output_per_million = model.pricing ? String(model.pricing.output_per_million) : ''
+        modelForm.cache_hit_per_million = model.pricing ? String(model.pricing.cache_hit_per_million) : ''
         modelFormOpen.value = true
+    }
+
+    /** 统一归一化价格输入,兼容 number 类型的 input v-model 值。 */
+    function normalizePricingInput(value: unknown): string {
+        return String(value ?? '').trim()
     }
 
     /** 提交新增/编辑模型(对齐原版 admin_upsert_model) */
@@ -1459,6 +1511,28 @@
             return
         }
 
+        const pricingValues = [
+            normalizePricingInput(modelForm.input_per_million),
+            normalizePricingInput(modelForm.output_per_million),
+            normalizePricingInput(modelForm.cache_hit_per_million),
+        ]
+        const hasPricing = pricingValues.some(Boolean)
+
+        if (hasPricing && pricingValues.some((value) => !value)) {
+            showToast('Input、Output、Cache Hit 三项价格需要全部填写', 'warning')
+
+            return
+        }
+
+        const pricing: ModelPricing | null = hasPricing
+            ? {
+                currency: 'CNY',
+                input_per_million: Number(modelForm.input_per_million),
+                output_per_million: Number(modelForm.output_per_million),
+                cache_hit_per_million: Number(modelForm.cache_hit_per_million),
+            }
+            : null
+
         try {
             await upsertModel({
                 model_id: modelId,
@@ -1467,6 +1541,7 @@
                 provider: modelForm.provider,
                 status: modelForm.status,
                 context_window: Number(modelForm.context_window) || 0,
+                pricing,
             })
 
             showToast(editingModel.value ? '模型已保存' : '模型已添加', 'success')
@@ -1477,9 +1552,24 @@
         }
     }
 
-    /** 删除模型(需确认文本) */
+    function pricingSummary(pricing?: ModelPricing | null): string {
+        if (!pricing) {
+            return '计费未配置'
+        }
+
+        return `输入 ¥${formatPrice(pricing.input_per_million)} · 输出 ¥${formatPrice(pricing.output_per_million)} · 缓存命中 ¥${formatPrice(pricing.cache_hit_per_million)} / 1M`
+    }
+
+    function formatPrice(value: number): string {
+        return Number(value || 0).toLocaleString('zh-CN', {
+            minimumFractionDigits: 0,
+            maximumFractionDigits: 6,
+        })
+    }
+
+    /** 归档模型(需确认文本,保留计费信息) */
     async function requestDeleteModel(modelId: string, modelName: string): Promise<void> {
-        const ok = await confirmWithText('删除模型', `确定删除模型「${modelName}」?请输入 确认修改 完成删除。`)
+        const ok = await confirmWithText('归档模型', `确定归档模型「${modelName}」?请输入 确认修改。归档后会隐藏模型，但保留计费信息。`)
 
         if (!ok) {
             return
@@ -1488,10 +1578,10 @@
         try {
             await deleteModel(modelId, '确认修改')
 
-            showToast('模型已删除', 'success')
+            showToast('模型已归档，计费信息已保留', 'success')
             await load()
         } catch (error) {
-            showError(error instanceof Error ? error.message : '删除失败')
+            showError(error instanceof Error ? error.message : '归档失败')
         }
     }
 
