@@ -10,6 +10,7 @@
 
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { display, promptAction } from '@kit.ArkUI';
+import { common } from '@kit.AbilityKit';
 import { ApiService } from '../common/ApiService';
 import { AppState } from '../common/AppState';
 import { ConversationItem, greetingOfHour, KnowledgeItem, QuickAction, QUICK_ACTIONS, sanitizeDisplayName } from '../common/AppConfig';
@@ -39,6 +40,10 @@ import { MailPage } from '../components/mail/MailPage';
 import { NotesEntryCard } from '../components/notes/NotesEntryCard';
 import { NotesPage } from '../components/notes/NotesPage';
 import { LearningPage } from '../components/learning/LearningPage';
+import { LearningAgent } from '../components/agent/LearningAgent';
+import { LearningHttp } from '../common/LearningHttp';
+import { LearningReadingApi } from '../common/LearningReadingApi';
+import { LearningSystemEntry } from '../common/LearningSystemEntry';
 
 const DOMAIN: number = 0x0001;
 const TAG: string = 'NexoraMain';
@@ -170,6 +175,19 @@ export struct MainChat {
     // 系统返回键逐级回退（阅读器 → 课程目录 → 课程列表 → 退出学习）
     @State private learningOpen: boolean = false;
     @State private learningNavDepth: number = 0;
+    @State private agentOpen: boolean = false;
+    @State private agentNavDepth: number = 0;
+    @State private agentLaunchRoute: string = 'day';
+    @State private agentLaunchDecision: string = '';
+    @State private agentLaunchToken: number = 0;
+    @StorageLink('nxLaunchRoute') @Watch('onLaunchRequested') private nxLaunchRoute: string = '';
+    @StorageLink('nxLaunchDecision') @Watch('onLaunchRequested') private nxLaunchDecision: string = '';
+    @StorageLink('nxLaunchToken') @Watch('onLaunchRequested') private nxLaunchToken: number = 0;
+    @StorageProp('nxSessionReady') @Watch('onLaunchRequested') private sessionReady: boolean = false;
+    private learningReady: Promise<boolean> | null = null;
+    private launchConsuming: boolean = false;
+    private launchRequestVersion: number = 0;
+    private attached: boolean = false;
 
     // 回到底部按钮：滚动离开底部时显示，点击平滑回到底部
     @State private showScrollBottom: boolean = false;
@@ -245,6 +263,7 @@ export struct MainChat {
     private widthLockWarned: boolean = false;
 
     aboutToAppear(): void {
+        this.attached = true;
         this.seedContentWidth();
         this.greeting = greetingOfHour(new Date().getHours());
         this.labelForModel(this.app.selectedModelId);
@@ -257,7 +276,7 @@ export struct MainChat {
         this.app.refreshNotes();
         this.app.refreshUserProfile();
         // Learning 运行时配置轻量预取：侧栏入口生效前拿到开关与工作区地址
-        void this.app.refreshLearningRuntime();
+        void this.ensureLearningServices().then(() => { void this.consumeLaunchRoute(); });
 
         // 地图渲染配置轻量预取：登录后只拉一次，地图结果到达时无需等待
         MapRendererConfig.ensure();
@@ -272,10 +291,25 @@ export struct MainChat {
         };
     }
 
+    aboutToDisappear(): void {
+        this.attached = false;
+        this.launchRequestVersion++;
+        this.app.backHandler = null;
+    }
+
     // 系统返回键处理：图片查看器 > 邮件/随笔页(详情→页面) > 侧边栏 > 弹层 > 对话→新对话
     private handleBackPress(): boolean {
         if (this.viewerUrl.length > 0) {
             this.viewerUrl = '';
+            return true;
+        }
+
+        if (this.agentOpen) {
+            if (this.agentNavDepth > 0) {
+                this.agentNavDepth--;
+            } else {
+                this.agentOpen = false;
+            }
             return true;
         }
 
@@ -397,6 +431,7 @@ export struct MainChat {
                 LearningPage({
                     app: this.app,
                     navDepth: $learningNavDepth,
+                    visible: this.learningOpen && this.viewerUrl.length === 0,
                     onBack: () => {
                         this.learningOpen = false;
                     },
@@ -411,6 +446,20 @@ export struct MainChat {
                     .height('100%')
                     .transition(TransitionEffect.translate({ x: '100%' }).combine(TransitionEffect.OPACITY)
                         .animation({ duration: Motion.durationBase, curve: Motion.easeInOut }));
+            }
+
+            if (this.agentOpen) {
+                LearningAgent({
+                    app: this.app,
+                    navDepth: $agentNavDepth,
+                    visible: this.agentOpen && this.viewerUrl.length === 0,
+                    launchRoute: this.agentLaunchRoute,
+                    launchDecision: this.agentLaunchDecision,
+                    launchToken: this.agentLaunchToken,
+                    onBack: () => { this.agentOpen = false; },
+                    onOpenLearning: () => { void this.openLearning(); },
+                    onOpenImage: (url: string) => { this.viewerUrl = url; }
+                }).width('100%').height('100%');
             }
 
             // 全屏图片查看器：最顶层，点击任意区域或系统返回键关闭
@@ -874,6 +923,11 @@ export struct MainChat {
                     onOpenLearning: () => {
                         void this.openLearning();
                     },
+                    onOpenAgent: () => {
+                        this.nxLaunchDecision = '';
+                        this.nxLaunchRoute = 'day';
+                        this.nxLaunchToken++;
+                    },
                     onOpenConversation: (conversationId: string, convTitle: string) => {
                         this.openConversation(conversationId, convTitle);
                     },
@@ -1043,7 +1097,10 @@ export struct MainChat {
     // ---------- Learning 工作区 ----------
     // 打开 Learning：先刷新运行时配置（管理端开关/地址可能刚变更），校验后进入全屏工作区
     private async openLearning(): Promise<void> {
-        await this.app.refreshLearningRuntime();
+        if (!(await this.ensureLearningServices())) {
+            this.notify('学习服务尚未就绪，请确认登录与服务配置', 2000);
+            return;
+        }
 
         if (!this.app.learningEnabled) {
             this.notify('Learning 未启用', 1600);
@@ -1056,8 +1113,105 @@ export struct MainChat {
         }
 
         this.closeSidebar();
+        this.agentOpen = false;
+        this.mailOpen = false;
+        this.notesOpen = false;
+        this.showSheet = false;
+        this.viewerUrl = '';
         this.learningNavDepth = 0;
         this.learningOpen = true;
+    }
+
+    private async ensureLearningServices(): Promise<boolean> {
+        if (!this.attached || !this.sessionReady || !this.app.loggedIn) {
+            return false;
+        }
+        if (this.learningReady === null) {
+            this.learningReady = this.loadLearningServices();
+        }
+        try {
+            return await this.learningReady;
+        } finally {
+            this.learningReady = null;
+        }
+    }
+
+    private async loadLearningServices(): Promise<boolean> {
+        const username: string = this.app.username;
+        try {
+            await this.app.refreshLearningRuntime();
+        } catch (error) {
+            hilog.warn(DOMAIN, TAG, 'learning runtime refresh failed');
+            return false;
+        }
+        if (!this.attached || !this.sessionReady || !this.app.loggedIn || username !== this.app.username ||
+            !this.app.learningEnabled || !LearningHttp.configured) {
+            return false;
+        }
+        const host = this.getUIContext().getHostContext();
+        if (host !== undefined) {
+            LearningSystemEntry.prepare(host);
+            void LearningReadingApi.flushReadingProgress(host as common.UIAbilityContext);
+        }
+        return true;
+    }
+
+    private onLaunchRequested(): void {
+        const version: number = ++this.launchRequestVersion;
+        setTimeout(() => {
+            if (this.attached && version === this.launchRequestVersion) {
+                void this.consumeLaunchRoute();
+            }
+        }, 0);
+    }
+
+    private async consumeLaunchRoute(): Promise<void> {
+        if (!this.attached || !this.sessionReady || this.nxLaunchRoute.length === 0 || this.launchConsuming) {
+            return;
+        }
+        const launchToken: number = this.nxLaunchToken;
+        const requestVersion: number = this.launchRequestVersion;
+        this.launchConsuming = true;
+        try {
+            if (!(await this.ensureLearningServices())) {
+                if (this.attached && this.sessionReady && this.nxLaunchRoute.length > 0) {
+                    this.notify('学习服务尚未就绪，配置好后可继续打开', 2200);
+                }
+                return;
+            }
+            if (!this.attached || !this.sessionReady || this.nxLaunchRoute.length === 0) {
+                return;
+            }
+            const route: string = this.nxLaunchRoute;
+            if (['day', 'study', 'reader', 'mirror', 'judgment', 'review'].indexOf(route) < 0) {
+                this.nxLaunchRoute = '';
+                return;
+            }
+            this.closeSidebar();
+            this.learningOpen = false;
+            this.mailOpen = false;
+            this.notesOpen = false;
+            this.noteEditorOpen = false;
+            this.showSheet = false;
+            this.viewerUrl = '';
+            this.agentLaunchDecision = this.nxLaunchDecision;
+            this.agentLaunchRoute = route;
+            this.agentLaunchToken++;
+            if (!this.agentOpen) {
+                this.agentNavDepth = 0;
+            }
+            this.agentOpen = true;
+            this.nxLaunchRoute = '';
+            this.nxLaunchDecision = '';
+        } finally {
+            this.launchConsuming = false;
+            // An explicit retry can arrive while runtime discovery is in flight. Retry that newer
+            // request once; a failure with the same token must remain pending without a retry loop.
+            if (this.attached && this.sessionReady && this.nxLaunchRoute.length > 0 &&
+                (launchToken !== this.nxLaunchToken || requestVersion !== this.launchRequestVersion)) {
+                this.onLaunchRequested();
+            }
+        }
     }
 
     // 学习侧发起一轮学习会话（当前用于六维画像快速评估）：

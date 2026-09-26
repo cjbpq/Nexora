@@ -32,6 +32,7 @@ export struct SidebarPanel {
     onOpenNotes: () => void = () => {};
     // 打开 Learning 工作区：由宿主关闭抽屉后全屏挂载（ArkWeb 薄挂载）
     onOpenLearning: () => void = () => {};
+    onOpenAgent: () => void = () => {};
     onOpenConversation: (conversationId: string, title: string) => void = () => {};
     onTogglePin: (item: ConversationItem) => void = () => {};
     onDeleteRequest: (item: ConversationItem) => void = () => {};
@@ -164,6 +165,9 @@ export struct SidebarPanel {
 
             this.ActionRow('learning', $r('app.media.ic_book'), '学习', (): void => {
                 this.onOpenLearning();
+            });
+            this.ActionRow('learning_agent', $r('app.media.ic_book'), '学习助手', (): void => {
+                this.onOpenAgent();
             });
         }
         .width('100%')
